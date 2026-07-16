@@ -87,7 +87,7 @@ echo "Requesting deployment through EasyPanel"
 curl -fsS --max-time 30 -X POST "$(<"$DEPLOY_URL_FILE")" >/dev/null
 wait_for_compose
 
-HOOK_DIR="${COMPOSE_DIR}/hooks"
+HOOK_DIR="/opt/ayp-hr/deploy-hooks"
 install -d -m 700 "$HOOK_DIR"
 install -m 644 "$ROOT_DIR/deploy/bootstrap_site.py" "$HOOK_DIR/bootstrap_site.py"
 install -m 644 "$ROOT_DIR/deploy/configure_standard.py" "$HOOK_DIR/configure_standard.py"
