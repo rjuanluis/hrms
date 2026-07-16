@@ -27,7 +27,7 @@ jobs:
           python-version: "3.14"
       - name: Validate Python, JSON, shell and deployment files
         run: |
-          python -m compileall -q hrms deploy/bootstrap_site.py
+          python -m compileall -q hrms deploy/bootstrap_site.py deploy/configure_standard.py
           python -m json.tool deploy/apps.json >/dev/null
           bash -n deploy/deploy.sh deploy/host-deploy-wrapper.sh deploy/provision-host.sh deploy/backup.sh
           python - <<'PY'

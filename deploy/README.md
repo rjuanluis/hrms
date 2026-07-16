@@ -18,7 +18,7 @@ Server state is mutable, but every infrastructure manifest, bootstrap routine, m
 1. A push to `ayp-production` validates the source and builds an immutable image.
 2. GitHub Actions connects using a restricted deployment key.
 3. `host-deploy-wrapper.sh` permits only an AyP HR image deployment.
-4. `deploy.sh` updates the stack, creates or migrates the site, takes a pre-migration backup and forces application services to reload.
+4. `deploy.sh` updates the stack, creates or migrates the site, applies the idempotent standard AyP configuration, takes a pre-migration backup and forces application services to reload.
 5. Traefik serves the site at `https://hr.aroypedal.com`.
 
 ## One-time host provisioning

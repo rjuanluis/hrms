@@ -32,7 +32,11 @@ docker secret inspect ayp_hr_db_root_password >/dev/null 2>&1 || {
 }
 
 echo "Pulling $IMAGE"
-docker pull "$IMAGE" >/dev/null
+if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  echo "Image already present locally; registry pull skipped"
+else
+  docker pull "$IMAGE" >/dev/null
+fi
 export AYP_HR_IMAGE="$IMAGE"
 docker stack deploy --with-registry-auth --prune -c "$ROOT_DIR/deploy/swarm-stack.yml" "$STACK_NAME"
 
@@ -102,13 +106,23 @@ else
     -v "$LOGS_VOLUME:/home/frappe/frappe-bench/logs" \
     -v "$SECRETS_DIR:/run/ayp-secrets:ro" \
     -v "$ROOT_DIR/deploy/bootstrap_site.py:/opt/ayp/bootstrap_site.py:ro" \
-    "$IMAGE" python /opt/ayp/bootstrap_site.py
+    "$IMAGE" /home/frappe/frappe-bench/env/bin/python /opt/ayp/bootstrap_site.py
 fi
 
 docker run --rm --network "$APP_NETWORK" \
   -v "$SITES_VOLUME:/home/frappe/frappe-bench/sites" \
   -v "$LOGS_VOLUME:/home/frappe/frappe-bench/logs" \
   "$IMAGE" bench --site "$SITE_NAME" set-config host_name "https://$SITE_NAME"
+
+echo "Applying idempotent standard AyP configuration"
+docker run --rm --network "$APP_NETWORK" \
+  -e AYP_SITE_NAME="$SITE_NAME" \
+  -e AYP_SECRETS_DIR=/run/ayp-secrets \
+  -v "$SITES_VOLUME:/home/frappe/frappe-bench/sites" \
+  -v "$LOGS_VOLUME:/home/frappe/frappe-bench/logs" \
+  -v "$SECRETS_DIR:/run/ayp-secrets:ro" \
+  -v "$ROOT_DIR/deploy/configure_standard.py:/opt/ayp/configure_standard.py:ro" \
+  "$IMAGE" /home/frappe/frappe-bench/env/bin/python /opt/ayp/configure_standard.py
 
 for service in backend frontend websocket queue-short queue-long scheduler; do
   docker service update --force "${STACK_NAME}_${service}" >/dev/null
