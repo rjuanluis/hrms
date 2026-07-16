@@ -29,6 +29,7 @@ def main() -> None:
 
     db_root_password = read_secret("db_root_password")
     admin_password = read_secret("admin_password")
+    os.chdir(SITES_DIR)
 
     new_site.callback(
         site=SITE,

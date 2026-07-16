@@ -11,6 +11,7 @@ from frappe.desk.page.setup_wizard.setup_wizard import setup_complete
 SITE = os.environ.get("AYP_SITE_NAME", "hr.aroypedal.com")
 COMPANY = "ARO Y PEDAL SRL"
 ADMIN_EMAIL = "juanluis@aroypedal.com"
+SITES_DIR = Path("/home/frappe/frappe-bench/sites")
 SECRETS_DIR = Path(os.environ.get("AYP_SECRETS_DIR", "/run/ayp-secrets"))
 
 
@@ -53,7 +54,7 @@ def ensure_company_address() -> str:
 
 
 def main() -> None:
-    frappe.init(site=SITE)
+    frappe.init(site=SITE, sites_path=str(SITES_DIR))
     frappe.connect()
     frappe.set_user("Administrator")
     try:
