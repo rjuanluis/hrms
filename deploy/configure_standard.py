@@ -15,7 +15,10 @@ SECRETS_DIR = Path(os.environ.get("AYP_SECRETS_DIR", "/run/ayp-secrets"))
 
 
 def read_secret(name: str) -> str:
-    value = (SECRETS_DIR / name).read_text(encoding="utf-8").strip()
+    env_name = f"AYP_{name.upper()}"
+    value = os.environ.get(env_name, "").strip()
+    if not value and (SECRETS_DIR / name).is_file():
+        value = (SECRETS_DIR / name).read_text(encoding="utf-8").strip()
     if not value:
         raise RuntimeError(f"Required secret {name} is empty")
     return value

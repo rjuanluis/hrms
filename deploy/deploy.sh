@@ -99,12 +99,14 @@ if [[ "$SITE_EXISTS" == "yes" ]]; then
     "$IMAGE" bench --site "$SITE_NAME" migrate
 else
   echo "Creating official site $SITE_NAME"
+  AYP_DB_ROOT_PASSWORD="$(<"$SECRETS_DIR/db_root_password")" \
+  AYP_ADMIN_PASSWORD="$(<"$SECRETS_DIR/admin_password")" \
   docker run --rm --network "$APP_NETWORK" \
     -e AYP_SITE_NAME="$SITE_NAME" \
-    -e AYP_SECRETS_DIR=/run/ayp-secrets \
+    -e AYP_DB_ROOT_PASSWORD \
+    -e AYP_ADMIN_PASSWORD \
     -v "$SITES_VOLUME:/home/frappe/frappe-bench/sites" \
     -v "$LOGS_VOLUME:/home/frappe/frappe-bench/logs" \
-    -v "$SECRETS_DIR:/run/ayp-secrets:ro" \
     -v "$ROOT_DIR/deploy/bootstrap_site.py:/opt/ayp/bootstrap_site.py:ro" \
     "$IMAGE" /home/frappe/frappe-bench/env/bin/python /opt/ayp/bootstrap_site.py
 fi
@@ -115,12 +117,12 @@ docker run --rm --network "$APP_NETWORK" \
   "$IMAGE" bench --site "$SITE_NAME" set-config host_name "https://$SITE_NAME"
 
 echo "Applying idempotent standard AyP configuration"
+AYP_ADMIN_PASSWORD="$(<"$SECRETS_DIR/admin_password")" \
 docker run --rm --network "$APP_NETWORK" \
   -e AYP_SITE_NAME="$SITE_NAME" \
-  -e AYP_SECRETS_DIR=/run/ayp-secrets \
+  -e AYP_ADMIN_PASSWORD \
   -v "$SITES_VOLUME:/home/frappe/frappe-bench/sites" \
   -v "$LOGS_VOLUME:/home/frappe/frappe-bench/logs" \
-  -v "$SECRETS_DIR:/run/ayp-secrets:ro" \
   -v "$ROOT_DIR/deploy/configure_standard.py:/opt/ayp/configure_standard.py:ro" \
   "$IMAGE" /home/frappe/frappe-bench/env/bin/python /opt/ayp/configure_standard.py
 
