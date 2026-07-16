@@ -49,9 +49,13 @@ container_id() {
 }
 
 wait_for_compose() {
+  local previous_backend_id="${1:-}"
+  local expect_replacement="${2:-0}"
   local expected=9
+  local stable_seconds=0
+  local last_backend_id=""
   for _ in {1..120}; do
-    local running db_id db_health
+    local running db_id db_health current_backend_id replacement_ready
     running="$(docker ps \
       --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" \
       --format '{{.Label "com.docker.compose.service"}}' | sort -u | wc -l | tr -d ' ')"
@@ -60,8 +64,26 @@ wait_for_compose() {
     if [[ -n "$db_id" ]]; then
       db_health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$db_id" 2>/dev/null || true)"
     fi
-    if [[ "$running" == "$expected" && "$db_health" == "healthy" ]]; then
-      return 0
+    current_backend_id="$(container_id backend)"
+    replacement_ready=1
+    if [[ "$expect_replacement" == 1 && ( -z "$current_backend_id" || "$current_backend_id" == "$previous_backend_id" ) ]]; then
+      replacement_ready=0
+    fi
+    if [[ "$running" == "$expected" && "$db_health" == "healthy" && "$replacement_ready" == 1 ]] \
+      && [[ -n "$current_backend_id" ]] \
+      && docker exec "$current_backend_id" test -f "sites/apps.txt" 2>/dev/null; then
+      if [[ "$current_backend_id" == "$last_backend_id" ]]; then
+        stable_seconds=$((stable_seconds + 3))
+      else
+        last_backend_id="$current_backend_id"
+        stable_seconds=0
+      fi
+      if (( stable_seconds >= 15 )); then
+        return 0
+      fi
+    else
+      stable_seconds=0
+      last_backend_id="$current_backend_id"
     fi
     sleep 3
   done
@@ -78,14 +100,20 @@ if [[ -n "$backend_id" ]] && docker exec "$backend_id" test -f "sites/$SITE_NAME
 fi
 
 echo "Preparing immutable image $IMAGE"
+old_production_id="$(docker image inspect "$PRODUCTION_IMAGE" --format '{{.Id}}' 2>/dev/null || true)"
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   docker pull "$IMAGE" >/dev/null
+fi
+new_image_id="$(docker image inspect "$IMAGE" --format '{{.Id}}')"
+expect_replacement=0
+if [[ -z "$old_production_id" || "$old_production_id" != "$new_image_id" ]]; then
+  expect_replacement=1
 fi
 docker tag "$IMAGE" "$PRODUCTION_IMAGE"
 
 echo "Requesting deployment through EasyPanel"
 curl -fsS --max-time 30 -X POST "$(<"$DEPLOY_URL_FILE")" >/dev/null
-wait_for_compose
+wait_for_compose "$backend_id" "$expect_replacement"
 
 HOOK_DIR="/opt/ayp-hr/deploy-hooks"
 install -d -m 700 "$HOOK_DIR"
