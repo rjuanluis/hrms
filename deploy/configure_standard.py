@@ -14,6 +14,26 @@ COMPANY = "ARO Y PEDAL SRL"
 ADMIN_EMAIL = "juanluis@aroypedal.com"
 SITES_DIR = Path("/home/frappe/frappe-bench/sites")
 SECRETS_DIR = Path(os.environ.get("AYP_SECRETS_DIR", "/run/ayp-secrets"))
+BRANCHES = (
+    {
+        "name": "Tienda Principal",
+        "address_line1": "Ave. 27 de Febrero 112, casi esq. Leopoldo Navarro",
+        "city": "Santo Domingo",
+        "state": "Distrito Nacional",
+        "pincode": "10201",
+        "phone": "829-903-6570",
+        "email_id": "27defebrero@aroypedal.com",
+    },
+    {
+        "name": "Tienda Kennedy",
+        "address_line1": "Plaza Kennedy, Aut. Duarte Km 6 ½, Av. John F. Kennedy",
+        "city": "Santo Domingo",
+        "state": "Distrito Nacional",
+        "pincode": "",
+        "phone": "849-858-7657",
+        "email_id": "kennedy@aroypedal.com",
+    },
+)
 
 
 def read_secret(name: str) -> str:
@@ -54,6 +74,43 @@ def ensure_company_address() -> str:
     return address.name
 
 
+def ensure_branches() -> list[str]:
+    names = []
+    for item in BRANCHES:
+        name = item["name"]
+        if not frappe.db.exists("Branch", name):
+            frappe.get_doc({"doctype": "Branch", "branch": name}).insert(ignore_permissions=True)
+
+        existing_address = frappe.db.get_value(
+            "Dynamic Link",
+            {"link_doctype": "Branch", "link_name": name, "parenttype": "Address"},
+            "parent",
+        )
+        if not existing_address:
+            address = frappe.get_doc(
+                {
+                    "doctype": "Address",
+                    "address_title": name,
+                    "address_type": "Office",
+                    "address_line1": item["address_line1"],
+                    "city": item["city"],
+                    "state": item["state"],
+                    "pincode": item["pincode"],
+                    "country": "Dominican Republic",
+                    "phone": item["phone"],
+                    "email_id": item["email_id"],
+                    "is_your_company_address": 1,
+                    "links": [
+                        {"link_doctype": "Branch", "link_name": name},
+                        {"link_doctype": "Company", "link_name": COMPANY},
+                    ],
+                }
+            )
+            address.insert(ignore_permissions=True)
+        names.append(name)
+    return names
+
+
 def main() -> None:
     os.chdir(SITES_DIR)
     frappe.init(site=SITE)
@@ -89,6 +146,7 @@ def main() -> None:
             raise RuntimeError(f"Setup completed without creating company {COMPANY}")
 
         address = ensure_company_address()
+        branches = ensure_branches()
         set_default_language("es")
         frappe.db.set_single_value("System Settings", "language", "es")
         frappe.db.set_value("User", ADMIN_EMAIL, "language", "es", update_modified=False)
@@ -102,6 +160,7 @@ def main() -> None:
                 "site": SITE,
                 "company": COMPANY,
                 "address": address,
+                "branches": branches,
                 "country": "Dominican Republic",
                 "currency": "DOP",
                 "time_zone": "America/Santo_Domingo",
