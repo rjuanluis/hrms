@@ -96,6 +96,9 @@ jobs:
     needs: build
     if: ${{ vars.AYP_AUTO_DEPLOY == 'true' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     environment:
       name: production
       url: https://hr.aroypedal.com
@@ -106,7 +109,7 @@ jobs:
           KNOWN_HOSTS: ${{ secrets.AYP_DEPLOY_KNOWN_HOSTS }}
         run: |
           install -m 700 -d ~/.ssh
-          printf '%s' "$DEPLOY_KEY" > ~/.ssh/id_ed25519
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
@@ -114,6 +117,8 @@ jobs:
       - name: Deploy immutable image
         env:
           IMAGE: ${{ needs.build.outputs.image }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes \
-            aypdeploy@${{ vars.AYP_DEPLOY_HOST }} "deploy $IMAGE"
+          printf '%s' "$GHCR_TOKEN" | \
+            ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes \
+              aypdeploy@${{ vars.AYP_DEPLOY_HOST }} "deploy $IMAGE $GITHUB_ACTOR"
