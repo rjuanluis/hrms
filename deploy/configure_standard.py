@@ -49,12 +49,6 @@ DEPARTMENT_RENAMES = {
     "Marketing y Ventas": "Marketing",
     "Taller y Servicio Técnico": "Centros de Servicio",
 }
-LEGACY_DEPARTMENTS = (
-    "Compras e Importaciones",
-    "Information Technology",
-    "Recursos Humanos",
-    "Servicio al Cliente",
-)
 
 
 def read_secret(name: str) -> str:
@@ -169,10 +163,15 @@ def ensure_departments() -> list[str]:
         names.append(name)
 
     if has_disabled:
-        for label in LEGACY_DEPARTMENTS:
-            name = department_name(label)
-            if name:
-                frappe.db.set_value("Department", name, "disabled", 1, update_modified=False)
+        desired_names = set(names)
+        company_departments = frappe.get_all(
+            "Department", filters={"company": COMPANY}, fields=["name", "is_group"]
+        )
+        for department in company_departments:
+            if department.name not in desired_names and not department.is_group:
+                frappe.db.set_value(
+                    "Department", department.name, "disabled", 1, update_modified=False
+                )
     return names
 
 
