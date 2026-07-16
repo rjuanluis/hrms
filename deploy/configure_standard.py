@@ -54,7 +54,8 @@ def ensure_company_address() -> str:
 
 
 def main() -> None:
-    frappe.init(site=SITE, sites_path=str(SITES_DIR))
+    os.chdir(SITES_DIR)
+    frappe.init(site=SITE)
     frappe.connect()
     frappe.set_user("Administrator")
     try:
