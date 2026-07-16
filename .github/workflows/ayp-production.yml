@@ -39,6 +39,11 @@ jobs:
               raise SystemExit(f'Missing EasyPanel Compose services: {missing}')
           if 'name: easypanel' not in text or 'external: true' not in text:
               raise SystemExit('EasyPanel external network is not configured')
+          hooks = Path('hrms/hooks.py').read_text()
+          upload_override = 'hrms.security.candidate_cv.upload_file'
+          for key in ['"upload_file"', '"frappe.handler.upload_file"']:
+              if key not in hooks or upload_override not in hooks:
+                  raise SystemExit(f'Missing candidate CV upload override for {key}')
           PY
 
   build:

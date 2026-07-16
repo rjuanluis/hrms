@@ -305,6 +305,7 @@ global_search_doctypes = {
 }
 
 override_whitelisted_methods = {
+	"upload_file": "hrms.security.candidate_cv.upload_file",
 	"frappe.handler.upload_file": "hrms.security.candidate_cv.upload_file",
 }
 #
