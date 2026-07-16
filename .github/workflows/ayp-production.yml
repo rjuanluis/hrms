@@ -1,0 +1,119 @@
+name: AyP HR Production
+
+"on":
+  push:
+    branches:
+      - ayp-production
+  workflow_dispatch:
+
+concurrency:
+  group: ayp-hr-production
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: rjuanluis/ayp-hrms
+
+jobs:
+  validate:
+    name: Validate production source
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Validate Python, JSON, shell and deployment files
+        run: |
+          python -m compileall -q hrms deploy/bootstrap_site.py
+          python -m json.tool deploy/apps.json >/dev/null
+          bash -n deploy/deploy.sh deploy/host-deploy-wrapper.sh deploy/provision-host.sh deploy/backup.sh
+          python - <<'PY'
+          from pathlib import Path
+          text = Path('deploy/swarm-stack.yml').read_text()
+          required = ['backend:', 'frontend:', 'websocket:', 'queue-short:', 'queue-long:', 'scheduler:', 'db:', 'redis-cache:', 'redis-queue:']
+          missing = [x for x in required if x not in text]
+          if missing:
+              raise SystemExit(f'Missing stack services: {missing}')
+          PY
+
+  build:
+    name: Build and publish Frappe v16 + ERPNext + HRMS
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.value }}
+    steps:
+      - name: Checkout AyP HRMS source
+        uses: actions/checkout@v4
+
+      - name: Checkout official frappe_docker release
+        uses: actions/checkout@v4
+        with:
+          repository: frappe/frappe_docker
+          ref: v3.2.1
+          path: frappe_docker
+
+      - name: Set immutable image reference
+        id: image
+        run: echo "value=${REGISTRY}/${IMAGE_NAME}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push production image
+        uses: docker/build-push-action@v6
+        with:
+          context: frappe_docker
+          file: frappe_docker/images/layered/Containerfile
+          push: true
+          platforms: linux/amd64
+          build-args: |
+            FRAPPE_PATH=https://github.com/frappe/frappe
+            FRAPPE_BRANCH=version-16
+            CACHE_BUST=${{ github.sha }}
+          secret-files: |
+            apps_json=${{ github.workspace }}/deploy/apps.json
+          tags: |
+            ${{ steps.image.outputs.value }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:production
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy official hr.aroypedal.com
+    needs: build
+    if: ${{ vars.AYP_AUTO_DEPLOY == 'true' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://hr.aroypedal.com
+    steps:
+      - name: Configure restricted deploy key
+        env:
+          DEPLOY_KEY: ${{ secrets.AYP_DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.AYP_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s' "$DEPLOY_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Deploy immutable image
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes \
+            aypdeploy@${{ vars.AYP_DEPLOY_HOST }} "deploy $IMAGE"

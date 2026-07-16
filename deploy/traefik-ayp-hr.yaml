@@ -1,0 +1,27 @@
+http:
+  routers:
+    ayp-hr-http:
+      rule: Host(`hr.aroypedal.com`) && PathPrefix(`/`)
+      entryPoints:
+        - http
+      service: ayp-hr
+      middlewares:
+        - redirect-to-https
+        - bad-gateway-error-page
+    ayp-hr-https:
+      rule: Host(`hr.aroypedal.com`) && PathPrefix(`/`)
+      entryPoints:
+        - https
+      service: ayp-hr
+      middlewares:
+        - bad-gateway-error-page
+      tls:
+        certResolver: letsencrypt
+        domains:
+          - main: hr.aroypedal.com
+  services:
+    ayp-hr:
+      loadBalancer:
+        passHostHeader: true
+        servers:
+          - url: http://ayphr_frontend:8080/

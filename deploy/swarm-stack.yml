@@ -1,0 +1,220 @@
+version: "3.9"
+
+x-app-image: &app-image
+  image: ${AYP_HR_IMAGE:?AYP_HR_IMAGE is required}
+
+x-app-base: &app-base
+  <<: *app-image
+  networks:
+    - app
+  volumes:
+    - sites:/home/frappe/frappe-bench/sites
+    - logs:/home/frappe/frappe-bench/logs
+
+x-app-deploy: &app-deploy
+  replicas: 1
+  restart_policy:
+    condition: on-failure
+    delay: 5s
+    max_attempts: 0
+  update_config:
+    parallelism: 1
+    order: stop-first
+    failure_action: rollback
+
+services:
+  db:
+    image: mariadb:11.8
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-character-set-client-handshake
+    environment:
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+      MARIADB_AUTO_UPGRADE: "1"
+    secrets:
+      - db_root_password
+    volumes:
+      - db-data:/var/lib/mysql
+    networks:
+      app:
+        aliases:
+          - db
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      start_period: 15s
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        reservations:
+          memory: 512M
+        limits:
+          memory: 2G
+
+  redis-cache:
+    image: redis:8.6-alpine
+    command: ["redis-server", "--maxmemory", "192mb", "--maxmemory-policy", "allkeys-lru"]
+    networks:
+      app:
+        aliases:
+          - redis-cache
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      resources:
+        reservations:
+          memory: 64M
+        limits:
+          memory: 256M
+
+  redis-queue:
+    image: redis:8.6-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-queue-data:/data
+    networks:
+      app:
+        aliases:
+          - redis-queue
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      resources:
+        reservations:
+          memory: 64M
+        limits:
+          memory: 384M
+
+  backend:
+    <<: *app-base
+    networks:
+      app:
+        aliases:
+          - backend
+    environment:
+      GUNICORN_THREADS: "4"
+      GUNICORN_WORKERS: "2"
+      GUNICORN_TIMEOUT: "120"
+    deploy:
+      <<: *app-deploy
+      resources:
+        reservations:
+          memory: 512M
+        limits:
+          memory: 1536M
+
+  frontend:
+    <<: *app-image
+    command: ["nginx-entrypoint.sh"]
+    environment:
+      BACKEND: backend:8000
+      SOCKETIO: websocket:9000
+      FRAPPE_SITE_NAME_HEADER: hr.aroypedal.com
+      UPSTREAM_REAL_IP_ADDRESS: 0.0.0.0/0
+      UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
+      UPSTREAM_REAL_IP_RECURSIVE: "on"
+      PROXY_READ_TIMEOUT: "120"
+      CLIENT_MAX_BODY_SIZE: 50m
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      app:
+        aliases:
+          - frontend
+      proxy:
+        aliases:
+          - ayphr_frontend
+    deploy:
+      <<: *app-deploy
+      resources:
+        reservations:
+          memory: 64M
+        limits:
+          memory: 256M
+
+  websocket:
+    <<: *app-base
+    networks:
+      app:
+        aliases:
+          - websocket
+    command: ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"]
+    deploy:
+      <<: *app-deploy
+      resources:
+        reservations:
+          memory: 64M
+        limits:
+          memory: 256M
+
+  queue-short:
+    <<: *app-base
+    command: ["bench", "worker", "--queue", "short,default"]
+    deploy:
+      <<: *app-deploy
+      resources:
+        reservations:
+          memory: 192M
+        limits:
+          memory: 768M
+
+  queue-long:
+    <<: *app-base
+    command: ["bench", "worker", "--queue", "long,default,short"]
+    deploy:
+      <<: *app-deploy
+      resources:
+        reservations:
+          memory: 256M
+        limits:
+          memory: 1G
+
+  scheduler:
+    <<: *app-base
+    command: ["bench", "schedule"]
+    deploy:
+      <<: *app-deploy
+      resources:
+        reservations:
+          memory: 128M
+        limits:
+          memory: 512M
+
+networks:
+  app:
+    name: ayp_hr_net
+    external: true
+  proxy:
+    name: easypanel
+    external: true
+
+volumes:
+  sites:
+    name: ayp_hr_sites
+    external: true
+  logs:
+    name: ayp_hr_logs
+    external: true
+  db-data:
+    name: ayp_hr_db_data
+    external: true
+  redis-queue-data:
+    name: ayp_hr_redis_queue_data
+    external: true
+
+secrets:
+  db_root_password:
+    name: ayp_hr_db_root_password
+    external: true
