@@ -33,7 +33,7 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           text = Path('deploy/easypanel-compose.yml').read_text()
-          required = ['backend:', 'frontend:', 'websocket:', 'queue-short:', 'queue-long:', 'scheduler:', 'db:', 'redis-cache:', 'redis-queue:']
+          required = ['backend:', 'frontend:', 'websocket:', 'queue-short:', 'queue-long:', 'scheduler:', 'db:', 'redis-cache:', 'redis-queue:', 'clamav:']
           missing = [x for x in required if x not in text]
           if missing:
               raise SystemExit(f'Missing EasyPanel Compose services: {missing}')

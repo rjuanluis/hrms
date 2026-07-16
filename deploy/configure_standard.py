@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Apply the standard, official AyP Frappe/ERPNext/HRMS setup idempotently."""
+
 from __future__ import annotations
 
 import os
 from pathlib import Path
 
 import frappe
+from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
 from frappe.desk.page.setup_wizard.setup_wizard import setup_complete
 from frappe.translate import set_default_language
 
@@ -49,6 +51,31 @@ DEPARTMENT_RENAMES = {
     "Marketing y Ventas": "Marketing",
     "Taller y Servicio Técnico": "Centros de Servicio",
 }
+
+RECRUITMENT_PRIVACY_NOTICE_VERSION = "AYP-RH-2026-07-16-v2"
+RECRUITMENT_WEB_FORM_ROUTE = "empleos/solicitud"
+RECRUITMENT_WEB_FORM_TITLE = "Solicitud de empleo — Aro y Pedal"
+
+RECRUITMENT_INTRODUCTION = """
+<p><strong>Uso de tus datos:</strong> ARO Y PEDAL SRL utilizará la información que compartas
+únicamente para evaluar esta candidatura, contactarte sobre esta vacante y documentar el proceso
+de selección. El acceso se limita a RRHH, entrevistadores autorizados y Gerencia. No usaremos tus
+datos para marketing ni para una bolsa de empleo futura sin una autorización separada. Puedes
+solicitar acceso, corrección, cancelación u oposición escribiendo a
+<a href="mailto:recursoshumanos@aroypedal.com">recursoshumanos@aroypedal.com</a>.</p>
+<p>El currículum es opcional pero recomendado. Solo se aceptan PDF o DOCX, máximo 5 MB; se almacena
+de forma privada y pasa por un control antivirus antes de guardarse. No incluyas datos sensibles que
+no sean necesarios para evaluar tu experiencia.</p>
+"""
+
+RECRUITMENT_CLIENT_SCRIPT = """frappe.web_form.validate = () => {
+  if (!frappe.web_form.get_value('custom_data_processing_consent')) {
+    frappe.msgprint('Debes aceptar el aviso de privacidad para enviar la solicitud.');
+    return false;
+  }
+  return true;
+};
+"""
 
 
 def read_secret(name: str) -> str:
@@ -127,9 +154,7 @@ def ensure_branches() -> list[str]:
 
 
 def department_name(value: str) -> str | None:
-    return frappe.db.get_value(
-        "Department", {"department_name": value, "company": COMPANY}, "name"
-    )
+    return frappe.db.get_value("Department", {"department_name": value, "company": COMPANY}, "name")
 
 
 def ensure_departments() -> list[str]:
@@ -153,9 +178,7 @@ def ensure_departments() -> list[str]:
     for label in DEPARTMENTS:
         name = department_name(label)
         if not name:
-            doc = frappe.get_doc(
-                {"doctype": "Department", "department_name": label, "company": COMPANY}
-            )
+            doc = frappe.get_doc({"doctype": "Department", "department_name": label, "company": COMPANY})
             doc.insert(ignore_permissions=True)
             name = doc.name
         if has_disabled:
@@ -169,10 +192,203 @@ def ensure_departments() -> list[str]:
         )
         for department in company_departments:
             if department.name not in desired_names and not department.is_group:
-                frappe.db.set_value(
-                    "Department", department.name, "disabled", 1, update_modified=False
-                )
+                frappe.db.set_value("Department", department.name, "disabled", 1, update_modified=False)
     return names
+
+
+def ensure_recruitment_security_fields() -> None:
+    create_custom_fields(
+        {
+            "File": [
+                {
+                    "fieldname": "custom_av_scan_status",
+                    "label": "Antivirus Scan Status",
+                    "fieldtype": "Select",
+                    "options": "\nClean\nRejected",
+                    "read_only": 1,
+                    "insert_after": "file_size",
+                },
+                {
+                    "fieldname": "custom_av_scan_engine",
+                    "label": "Antivirus Engine",
+                    "fieldtype": "Data",
+                    "read_only": 1,
+                    "insert_after": "custom_av_scan_status",
+                },
+                {
+                    "fieldname": "custom_av_scanned_on",
+                    "label": "Antivirus Scanned On",
+                    "fieldtype": "Datetime",
+                    "read_only": 1,
+                    "insert_after": "custom_av_scan_engine",
+                },
+            ],
+            "Job Applicant": [
+                {
+                    "fieldname": "custom_years_sales_experience",
+                    "label": "Años de experiencia en ventas o servicio al cliente",
+                    "fieldtype": "Select",
+                    "options": "\nMenos de 1 año\n1 a 2 años\n3 a 5 años\nMás de 5 años",
+                    "insert_after": "phone_number",
+                },
+                {
+                    "fieldname": "custom_retail_experience",
+                    "label": "Experiencia en tiendas o retail",
+                    "fieldtype": "Select",
+                    "options": "\nSí\nNo",
+                    "insert_after": "custom_years_sales_experience",
+                },
+                {
+                    "fieldname": "custom_schedule_availability",
+                    "label": "Disponibilidad dentro del horario de tienda",
+                    "fieldtype": "Select",
+                    "options": "\nSí\nNo\nNecesito conversar sobre el horario",
+                    "insert_after": "custom_retail_experience",
+                },
+                {
+                    "fieldname": "custom_start_availability",
+                    "label": "Disponibilidad para iniciar",
+                    "fieldtype": "Select",
+                    "options": "\nInmediata\nDentro de 1 semana\nDentro de 2 semanas\nMás de 2 semanas",
+                    "insert_after": "custom_schedule_availability",
+                },
+                {
+                    "fieldname": "custom_bicycle_experience",
+                    "label": "Conocimiento o interés en bicicletas",
+                    "fieldtype": "Select",
+                    "options": "\nTengo experiencia en ciclismo o bicicletas\nConozco algunos productos de ciclismo\nMe interesa aprender\nNo tengo experiencia, pero tengo disposición para aprender",
+                    "insert_after": "custom_start_availability",
+                },
+                {
+                    "fieldname": "custom_data_processing_consent",
+                    "label": "Consentimiento para tratamiento de datos",
+                    "fieldtype": "Check",
+                    "default": "0",
+                    "insert_after": "upper_range",
+                },
+                {
+                    "fieldname": "custom_privacy_notice_version",
+                    "label": "Versión del aviso de privacidad",
+                    "fieldtype": "Data",
+                    "default": RECRUITMENT_PRIVACY_NOTICE_VERSION,
+                    "read_only": 1,
+                    "hidden": 1,
+                    "insert_after": "custom_data_processing_consent",
+                },
+            ],
+        },
+        update=True,
+    )
+
+
+def ensure_recruitment_web_form() -> str:
+    name = frappe.db.get_value("Web Form", {"route": RECRUITMENT_WEB_FORM_ROUTE}, "name")
+    web_form = frappe.get_doc("Web Form", name) if name else frappe.new_doc("Web Form")
+    web_form.update(
+        {
+            "title": RECRUITMENT_WEB_FORM_TITLE,
+            "route": RECRUITMENT_WEB_FORM_ROUTE,
+            "doc_type": "Job Applicant",
+            "module": "HR",
+            "published": 1,
+            "login_required": 0,
+            "allow_edit": 0,
+            "allow_delete": 0,
+            "allow_multiple": 0,
+            "show_attachments": 0,
+            "max_attachment_size": 5,
+            "button_label": "Enviar solicitud",
+            "hide_navbar": 1,
+            "hide_footer": 1,
+            "introduction_text": RECRUITMENT_INTRODUCTION,
+            "success_title": "Solicitud recibida",
+            "success_message": "Gracias. RRHH revisará tu información y te contactará si tu perfil avanza.",
+            "success_url": "/jobs",
+            "client_script": RECRUITMENT_CLIENT_SCRIPT,
+        }
+    )
+    web_form.set(
+        "web_form_fields",
+        [
+            {
+                "fieldname": "job_title",
+                "fieldtype": "Data",
+                "label": "Vacante (referencia)",
+                "reqd": 1,
+                "read_only": 1,
+                "description": "Vacante a la que aplicas.",
+            },
+            {"fieldname": "applicant_name", "fieldtype": "Data", "label": "Nombre completo", "reqd": 1},
+            {"fieldname": "email_id", "fieldtype": "Data", "label": "Correo electrónico", "reqd": 1},
+            {"fieldname": "phone_number", "fieldtype": "Data", "label": "Teléfono", "reqd": 1},
+            {
+                "fieldname": "custom_years_sales_experience",
+                "fieldtype": "Select",
+                "label": "Años de experiencia en ventas o servicio al cliente",
+                "reqd": 1,
+            },
+            {
+                "fieldname": "custom_retail_experience",
+                "fieldtype": "Select",
+                "label": "¿Tienes experiencia en tiendas o retail?",
+                "reqd": 1,
+            },
+            {
+                "fieldname": "custom_schedule_availability",
+                "fieldtype": "Select",
+                "label": "¿Tienes disponibilidad dentro del horario de tienda?",
+                "reqd": 1,
+                "description": "La jornada, los descansos y la rotación se coordinan conforme a la planificación interna y la legislación.",
+            },
+            {
+                "fieldname": "custom_start_availability",
+                "fieldtype": "Select",
+                "label": "Disponibilidad para iniciar",
+                "reqd": 1,
+            },
+            {
+                "fieldname": "custom_bicycle_experience",
+                "fieldtype": "Select",
+                "label": "Conocimiento o interés en bicicletas",
+                "reqd": 1,
+            },
+            {
+                "fieldname": "cover_letter",
+                "fieldtype": "Small Text",
+                "label": "¿Por qué te interesa esta posición?",
+                "reqd": 1,
+                "description": "Cuéntanos brevemente sobre tu experiencia y motivación. No incluyas datos sensibles.",
+            },
+            {
+                "fieldname": "resume_attachment",
+                "fieldtype": "Attach",
+                "label": "Currículum (opcional, recomendado)",
+                "reqd": 0,
+                "description": "PDF o DOCX, máximo 5 MB. Se almacena de forma privada y pasa por antivirus.",
+            },
+            {
+                "fieldname": "custom_data_processing_consent",
+                "fieldtype": "Check",
+                "label": "He leído el aviso y acepto el tratamiento de mis datos para esta vacante",
+                "reqd": 1,
+            },
+            {
+                "fieldname": "custom_privacy_notice_version",
+                "fieldtype": "Data",
+                "label": "Versión del aviso de privacidad",
+                "reqd": 0,
+                "read_only": 1,
+                "hidden": 1,
+            },
+        ],
+    )
+    web_form.save(ignore_permissions=True)
+    return web_form.name
+
+
+def enable_restricted_guest_cv_uploads() -> None:
+    frappe.db.set_single_value("System Settings", "allow_guests_to_upload_files", 1)
+    frappe.db.set_single_value("System Settings", "allowed_doctypes_for_guest_uploads", "Job Applicant")
 
 
 def main() -> None:
@@ -213,12 +429,13 @@ def main() -> None:
         address = ensure_company_address()
         branches = ensure_branches()
         departments = ensure_departments()
+        ensure_recruitment_security_fields()
+        recruitment_web_form = ensure_recruitment_web_form()
+        enable_restricted_guest_cv_uploads()
         set_default_language("es")
         frappe.db.set_single_value("System Settings", "language", "es")
         frappe.db.set_value("User", ADMIN_EMAIL, "language", "es", update_modified=False)
-        frappe.db.set_value(
-            "User", ADMIN_EMAIL, "time_zone", "America/Santo_Domingo", update_modified=False
-        )
+        frappe.db.set_value("User", ADMIN_EMAIL, "time_zone", "America/Santo_Domingo", update_modified=False)
         frappe.db.commit()
         print(
             {
@@ -229,6 +446,8 @@ def main() -> None:
                 "address": address,
                 "branches": branches,
                 "departments": departments,
+                "recruitment_web_form": recruitment_web_form,
+                "guest_upload_doctypes": ["Job Applicant"],
                 "country": "Dominican Republic",
                 "currency": "DOP",
                 "time_zone": "America/Santo_Domingo",

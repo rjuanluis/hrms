@@ -78,6 +78,29 @@ services:
         limits:
           memory: 384M
 
+  clamav:
+    image: clamav/clamav:1.5.3@sha256:7f5389ccaa2368c383fa80e167ccfe44348d71e685f926fce4755eed1757673a
+    restart: unless-stopped
+    volumes:
+      - clamav-data:/var/lib/clamav
+    networks:
+      app:
+        aliases:
+          - clamav
+      egress:
+    healthcheck:
+      test: ["CMD", "clamdscan", "--ping", "5:1"]
+      start_period: 120s
+      interval: 30s
+      timeout: 10s
+      retries: 10
+    deploy:
+      resources:
+        reservations:
+          memory: 768M
+        limits:
+          memory: 2G
+
   backend:
     <<: *app-base
     environment:
@@ -91,6 +114,8 @@ services:
         condition: service_started
       redis-queue:
         condition: service_started
+      clamav:
+        condition: service_healthy
     networks:
       app:
         aliases:
@@ -235,4 +260,7 @@ volumes:
     external: true
   redis-queue-data:
     name: ayp_hr_redis_queue_data
+    external: true
+  clamav-data:
+    name: ayp_hr_clamav_data
     external: true

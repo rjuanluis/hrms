@@ -213,6 +213,11 @@ doc_events = {
 		"on_trash": "hrms.overrides.employee_master.update_employee_transfer",
 		"after_delete": "hrms.overrides.employee_master.publish_update",
 	},
+	"Job Applicant": {
+		"validate": "hrms.security.candidate_cv.validate_job_applicant_cv",
+		"after_insert": "hrms.security.candidate_cv.attach_job_applicant_cv",
+		"on_update": "hrms.security.candidate_cv.attach_job_applicant_cv",
+	},
 	"Project": {"validate": "hrms.controllers.employee_boarding_controller.update_employee_boarding_status"},
 	"Task": {"on_update": "hrms.controllers.employee_boarding_controller.update_task"},
 }
@@ -299,9 +304,9 @@ global_search_doctypes = {
 	],
 }
 
-# override_whitelisted_methods = {
-# 	"frappe.desk.doctype.event.event.get_events": "hrms.event.get_events"
-# }
+override_whitelisted_methods = {
+	"frappe.handler.upload_file": "hrms.security.candidate_cv.upload_file",
+}
 #
 # each overriding function accepts a `data` argument;
 # generated from the base implementation of the doctype dashboard,

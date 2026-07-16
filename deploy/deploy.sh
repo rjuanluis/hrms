@@ -29,7 +29,7 @@ for path in \
   [[ -s "$path" ]] || { echo "Missing required file: $path" >&2; exit 3; }
 done
 
-for volume in "$SITES_VOLUME" "$LOGS_VOLUME" ayp_hr_db_data ayp_hr_redis_queue_data; do
+for volume in "$SITES_VOLUME" "$LOGS_VOLUME" ayp_hr_db_data ayp_hr_redis_queue_data ayp_hr_clamav_data; do
   docker volume inspect "$volume" >/dev/null 2>&1 || docker volume create "$volume" >/dev/null
 done
 
@@ -51,11 +51,11 @@ container_id() {
 wait_for_compose() {
   local previous_backend_id="${1:-}"
   local expect_replacement="${2:-0}"
-  local expected=9
+  local expected=10
   local stable_seconds=0
   local last_backend_id=""
   for _ in {1..120}; do
-    local running db_id db_health current_backend_id replacement_ready
+    local running db_id db_health clamav_id clamav_health current_backend_id replacement_ready
     running="$(docker ps \
       --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" \
       --format '{{.Label "com.docker.compose.service"}}' | sort -u | wc -l | tr -d ' ')"
@@ -64,12 +64,17 @@ wait_for_compose() {
     if [[ -n "$db_id" ]]; then
       db_health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$db_id" 2>/dev/null || true)"
     fi
+    clamav_id="$(container_id clamav)"
+    clamav_health=""
+    if [[ -n "$clamav_id" ]]; then
+      clamav_health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$clamav_id" 2>/dev/null || true)"
+    fi
     current_backend_id="$(container_id backend)"
     replacement_ready=1
     if [[ "$expect_replacement" == 1 && ( -z "$current_backend_id" || "$current_backend_id" == "$previous_backend_id" ) ]]; then
       replacement_ready=0
     fi
-    if [[ "$running" == "$expected" && "$db_health" == "healthy" && "$replacement_ready" == 1 ]] \
+    if [[ "$running" == "$expected" && "$db_health" == "healthy" && "$clamav_health" == "healthy" && "$replacement_ready" == 1 ]] \
       && [[ -n "$current_backend_id" ]] \
       && docker exec "$current_backend_id" test -f "sites/apps.txt" 2>/dev/null; then
       if [[ "$current_backend_id" == "$last_backend_id" ]]; then
