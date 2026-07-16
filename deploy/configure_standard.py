@@ -7,6 +7,7 @@ from pathlib import Path
 
 import frappe
 from frappe.desk.page.setup_wizard.setup_wizard import setup_complete
+from frappe.translate import set_default_language
 
 SITE = os.environ.get("AYP_SITE_NAME", "hr.aroypedal.com")
 COMPANY = "ARO Y PEDAL SRL"
@@ -88,6 +89,8 @@ def main() -> None:
             raise RuntimeError(f"Setup completed without creating company {COMPANY}")
 
         address = ensure_company_address()
+        set_default_language("es")
+        frappe.db.set_single_value("System Settings", "language", "es")
         frappe.db.set_value("User", ADMIN_EMAIL, "language", "es", update_modified=False)
         frappe.db.set_value(
             "User", ADMIN_EMAIL, "time_zone", "America/Santo_Domingo", update_modified=False
