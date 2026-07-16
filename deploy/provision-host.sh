@@ -54,17 +54,16 @@ printf 'restrict,command="%s/deploy/host-deploy-wrapper.sh" %s\n' "$SOURCE_DIR" 
 chown "$DEPLOY_USER:$DEPLOY_USER" "/home/$DEPLOY_USER/.ssh/authorized_keys"
 chmod 600 "/home/$DEPLOY_USER/.ssh/authorized_keys"
 
-if ! docker network inspect ayp_hr_net >/dev/null 2>&1; then
-  docker network create --driver overlay --attachable ayp_hr_net >/dev/null
-fi
 for volume in ayp_hr_sites ayp_hr_logs ayp_hr_db_data ayp_hr_redis_queue_data; do
   docker volume inspect "$volume" >/dev/null 2>&1 || docker volume create "$volume" >/dev/null
 done
-docker secret inspect ayp_hr_db_root_password >/dev/null 2>&1 || \
-  docker secret create ayp_hr_db_root_password "$SECRETS_DIR/db_root_password" >/dev/null
 
-install -m 644 -o root -g root "$SOURCE_DIR/deploy/traefik-ayp-hr.yaml" \
-  /etc/easypanel/traefik/config/ayp-hr.yaml
+if [[ -s "$SECRETS_DIR/easypanel_deploy_url" ]]; then
+  chown root:"$DEPLOY_USER" "$SECRETS_DIR/easypanel_deploy_url"
+  chmod 640 "$SECRETS_DIR/easypanel_deploy_url"
+else
+  echo "EasyPanel deploy URL must be registered after creating web/ayp-hrms" >&2
+fi
 
 if ! swapon --show=NAME --noheadings | grep -qx /swapfile-ayphr; then
   if [[ ! -f /swapfile-ayphr ]]; then

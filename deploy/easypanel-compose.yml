@@ -1,0 +1,226 @@
+name: ayp-hrms
+
+x-app-base: &app-base
+  image: ghcr.io/rjuanluis/ayp-hrms:production
+  init: true
+  restart: unless-stopped
+  networks:
+    - app
+  volumes:
+    - sites:/home/frappe/frappe-bench/sites
+    - logs:/home/frappe/frappe-bench/logs
+
+services:
+  db:
+    image: mariadb:11.8
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-character-set-client-handshake
+    environment:
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+      MARIADB_AUTO_UPGRADE: "1"
+    volumes:
+      - db-data:/var/lib/mysql
+      - type: bind
+        source: /opt/ayp-hr/secrets/db_root_password
+        target: /run/secrets/db_root_password
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      app:
+        aliases:
+          - db
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      start_period: 15s
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    deploy:
+      resources:
+        reservations:
+          memory: 512M
+        limits:
+          memory: 2G
+
+  redis-cache:
+    image: redis:8.6-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--maxmemory", "192mb", "--maxmemory-policy", "allkeys-lru"]
+    networks:
+      app:
+        aliases:
+          - redis-cache
+    deploy:
+      resources:
+        reservations:
+          memory: 64M
+        limits:
+          memory: 256M
+
+  redis-queue:
+    image: redis:8.6-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-queue-data:/data
+    networks:
+      app:
+        aliases:
+          - redis-queue
+    deploy:
+      resources:
+        reservations:
+          memory: 64M
+        limits:
+          memory: 384M
+
+  backend:
+    <<: *app-base
+    environment:
+      GUNICORN_THREADS: "4"
+      GUNICORN_WORKERS: "2"
+      GUNICORN_TIMEOUT: "120"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis-cache:
+        condition: service_started
+      redis-queue:
+        condition: service_started
+    networks:
+      app:
+        aliases:
+          - backend
+    deploy:
+      resources:
+        reservations:
+          memory: 512M
+        limits:
+          memory: 1536M
+
+  frontend:
+    image: ghcr.io/rjuanluis/ayp-hrms:production
+    init: true
+    restart: unless-stopped
+    command: ["nginx-entrypoint.sh"]
+    environment:
+      BACKEND: backend:8000
+      SOCKETIO: websocket:9000
+      FRAPPE_SITE_NAME_HEADER: hr.aroypedal.com
+      UPSTREAM_REAL_IP_ADDRESS: 0.0.0.0/0
+      UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
+      UPSTREAM_REAL_IP_RECURSIVE: "on"
+      PROXY_READ_TIMEOUT: "120"
+      CLIENT_MAX_BODY_SIZE: 50m
+    depends_on:
+      - backend
+      - websocket
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      app:
+        aliases:
+          - frontend
+      easypanel:
+        aliases:
+          - web_ayp-hrms_frontend
+    deploy:
+      resources:
+        reservations:
+          memory: 64M
+        limits:
+          memory: 256M
+
+  websocket:
+    <<: *app-base
+    command: ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"]
+    depends_on:
+      redis-queue:
+        condition: service_started
+    networks:
+      app:
+        aliases:
+          - websocket
+    deploy:
+      resources:
+        reservations:
+          memory: 64M
+        limits:
+          memory: 256M
+
+  queue-short:
+    <<: *app-base
+    command: ["bench", "worker", "--queue", "short,default"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis-cache:
+        condition: service_started
+      redis-queue:
+        condition: service_started
+    deploy:
+      resources:
+        reservations:
+          memory: 192M
+        limits:
+          memory: 768M
+
+  queue-long:
+    <<: *app-base
+    command: ["bench", "worker", "--queue", "long,default,short"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis-cache:
+        condition: service_started
+      redis-queue:
+        condition: service_started
+    deploy:
+      resources:
+        reservations:
+          memory: 256M
+        limits:
+          memory: 1G
+
+  scheduler:
+    <<: *app-base
+    command: ["bench", "schedule"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis-cache:
+        condition: service_started
+      redis-queue:
+        condition: service_started
+    deploy:
+      resources:
+        reservations:
+          memory: 128M
+        limits:
+          memory: 512M
+
+networks:
+  app:
+    internal: true
+  easypanel:
+    name: easypanel
+    external: true
+
+volumes:
+  sites:
+    name: ayp_hr_sites
+    external: true
+  logs:
+    name: ayp_hr_logs
+    external: true
+  db-data:
+    name: ayp_hr_db_data
+    external: true
+  redis-queue-data:
+    name: ayp_hr_redis_queue_data
+    external: true

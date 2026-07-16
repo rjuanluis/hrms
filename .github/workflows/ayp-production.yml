@@ -32,11 +32,13 @@ jobs:
           bash -n deploy/deploy.sh deploy/host-deploy-wrapper.sh deploy/provision-host.sh deploy/backup.sh
           python - <<'PY'
           from pathlib import Path
-          text = Path('deploy/swarm-stack.yml').read_text()
+          text = Path('deploy/easypanel-compose.yml').read_text()
           required = ['backend:', 'frontend:', 'websocket:', 'queue-short:', 'queue-long:', 'scheduler:', 'db:', 'redis-cache:', 'redis-queue:']
           missing = [x for x in required if x not in text]
           if missing:
-              raise SystemExit(f'Missing stack services: {missing}')
+              raise SystemExit(f'Missing EasyPanel Compose services: {missing}')
+          if 'name: easypanel' not in text or 'external: true' not in text:
+              raise SystemExit('EasyPanel external network is not configured')
           PY
 
   build:
