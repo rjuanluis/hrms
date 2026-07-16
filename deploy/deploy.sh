@@ -142,8 +142,10 @@ receipt = {
     "deployed_at": datetime.now(timezone.utc).isoformat(),
 }
 path = Path("/opt/ayp-hr/last-deploy.json")
-path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
-path.chmod(0o644)
+tmp = path.with_suffix(".json.tmp")
+tmp.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+tmp.chmod(0o644)
+tmp.replace(path)
 PY
 
 rm -rf "$HOOK_DIR"
