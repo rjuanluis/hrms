@@ -35,6 +35,26 @@ BRANCHES = (
         "email_id": "kennedy@aroypedal.com",
     },
 )
+DEPARTMENTS = (
+    "Gerencia",
+    "Administración, Finanzas y RRHH",
+    "Ventas",
+    "Almacén y Logística",
+    "Centros de Servicio",
+    "Marketing",
+)
+DEPARTMENT_RENAMES = {
+    "Dirección General": "Gerencia",
+    "Administración": "Administración, Finanzas y RRHH",
+    "Marketing y Ventas": "Marketing",
+    "Taller y Servicio Técnico": "Centros de Servicio",
+}
+LEGACY_DEPARTMENTS = (
+    "Compras e Importaciones",
+    "Information Technology",
+    "Recursos Humanos",
+    "Servicio al Cliente",
+)
 
 
 def read_secret(name: str) -> str:
@@ -112,6 +132,50 @@ def ensure_branches() -> list[str]:
     return names
 
 
+def department_name(value: str) -> str | None:
+    return frappe.db.get_value(
+        "Department", {"department_name": value, "company": COMPANY}, "name"
+    )
+
+
+def ensure_departments() -> list[str]:
+    department_meta = frappe.get_meta("Department")
+    has_disabled = department_meta.has_field("disabled")
+
+    for old_label, new_label in DEPARTMENT_RENAMES.items():
+        old_name = department_name(old_label)
+        new_name = department_name(new_label)
+        if old_name and not new_name:
+            frappe.rename_doc("Department", old_name, new_label, force=True)
+            renamed = frappe.get_doc("Department", new_label)
+            renamed.department_name = new_label
+            if has_disabled:
+                renamed.disabled = 0
+            renamed.save(ignore_permissions=True)
+        elif old_name and new_name and has_disabled:
+            frappe.db.set_value("Department", old_name, "disabled", 1, update_modified=False)
+
+    names: list[str] = []
+    for label in DEPARTMENTS:
+        name = department_name(label)
+        if not name:
+            doc = frappe.get_doc(
+                {"doctype": "Department", "department_name": label, "company": COMPANY}
+            )
+            doc.insert(ignore_permissions=True)
+            name = doc.name
+        if has_disabled:
+            frappe.db.set_value("Department", name, "disabled", 0, update_modified=False)
+        names.append(name)
+
+    if has_disabled:
+        for label in LEGACY_DEPARTMENTS:
+            name = department_name(label)
+            if name:
+                frappe.db.set_value("Department", name, "disabled", 1, update_modified=False)
+    return names
+
+
 def main() -> None:
     os.chdir(SITES_DIR)
     frappe.init(site=SITE)
@@ -149,6 +213,7 @@ def main() -> None:
         frappe.db.set_value("Company", COMPANY, "tax_id", TAX_ID, update_modified=False)
         address = ensure_company_address()
         branches = ensure_branches()
+        departments = ensure_departments()
         set_default_language("es")
         frappe.db.set_single_value("System Settings", "language", "es")
         frappe.db.set_value("User", ADMIN_EMAIL, "language", "es", update_modified=False)
@@ -164,6 +229,7 @@ def main() -> None:
                 "tax_id": TAX_ID,
                 "address": address,
                 "branches": branches,
+                "departments": departments,
                 "country": "Dominican Republic",
                 "currency": "DOP",
                 "time_zone": "America/Santo_Domingo",
