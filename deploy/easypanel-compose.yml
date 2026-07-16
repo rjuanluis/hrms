@@ -141,7 +141,7 @@ services:
       UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
       UPSTREAM_REAL_IP_RECURSIVE: "on"
       PROXY_READ_TIMEOUT: "120"
-      CLIENT_MAX_BODY_SIZE: 50m
+      CLIENT_MAX_BODY_SIZE: 10m
     depends_on:
       - backend
       - websocket

@@ -1,15 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import socket
 import struct
 import zipfile
 from pathlib import Path
+from xml.etree import ElementTree
 
 import frappe
 from frappe import _
-from frappe.handler import upload_file as frappe_upload_file
 from frappe.rate_limiter import rate_limit
 from frappe.utils import now_datetime
 
@@ -17,7 +18,18 @@ MAX_CV_BYTES = 5 * 1024 * 1024
 MAX_DOCX_UNCOMPRESSED_BYTES = 20 * 1024 * 1024
 MAX_DOCX_ENTRIES = 1000
 ALLOWED_EXTENSIONS = {".pdf", ".docx"}
-PDF_ACTIVE_MARKERS = (b"/JavaScript", b"/JS", b"/Launch", b"/EmbeddedFile", b"/RichMedia", b"/XFA")
+PDF_ACTIVE_MARKERS = (
+	b"/javascript",
+	b"/js",
+	b"/launch",
+	b"/embeddedfile",
+	b"/richmedia",
+	b"/xfa",
+	b"/openaction",
+	b"/aa",
+	b"/acroform",
+)
+PRIVACY_NOTICE_VERSION = "AYP-RH-2026-07-16-v2"
 
 
 class CandidateCVSecurityError(frappe.ValidationError):
@@ -31,10 +43,18 @@ def _is_candidate_cv_upload() -> bool:
 	)
 
 
+def _is_upload_endpoint() -> bool:
+	request_path = (getattr(frappe.request, "path", "") or "").rstrip("/")
+	return request_path.endswith("/api/method/upload_file") or frappe.form_dict.get("cmd") in (
+		"upload_file",
+		"frappe.handler.upload_file",
+	)
+
+
 def _validate_pdf(content: bytes) -> None:
 	if not content.startswith(b"%PDF-"):
 		raise CandidateCVSecurityError(_("El archivo no es un PDF válido."))
-	if any(marker in content for marker in PDF_ACTIVE_MARKERS):
+	if any(marker in content.lower() for marker in PDF_ACTIVE_MARKERS):
 		raise CandidateCVSecurityError(
 			_("El PDF contiene contenido activo o archivos incrustados y no puede aceptarse.")
 		)
@@ -53,10 +73,27 @@ def _validate_docx(content: bytes) -> None:
 				raise CandidateCVSecurityError(_("El DOCX excede el tamaño interno permitido."))
 			if any(entry.flag_bits & 0x1 for entry in entries):
 				raise CandidateCVSecurityError(_("No se aceptan documentos DOCX cifrados."))
+			if archive.testzip():
+				raise CandidateCVSecurityError(
+					_("El DOCX está dañado o no supera la validación de integridad.")
+				)
 			if any(
-				name.lower().endswith(("vbaproject.bin", ".exe", ".dll", ".js", ".vbs")) for name in names
+				name.lower().startswith("word/embeddings/")
+				or name.lower().endswith((".bin", ".exe", ".dll", ".js", ".vbs"))
+				for name in names
 			):
-				raise CandidateCVSecurityError(_("El DOCX contiene macros o archivos ejecutables."))
+				raise CandidateCVSecurityError(_("El DOCX contiene macros, objetos o archivos ejecutables."))
+			for relationship_name in (name for name in names if name.lower().endswith(".rels")):
+				try:
+					relationships = ElementTree.fromstring(archive.read(relationship_name))
+				except ElementTree.ParseError as exc:
+					raise CandidateCVSecurityError(_("El DOCX contiene relaciones inválidas.")) from exc
+				for relationship in relationships.iter():
+					if relationship.attrib.get("TargetMode", "").lower() != "external":
+						continue
+					relationship_type = relationship.attrib.get("Type", "").lower()
+					if not relationship_type.endswith("/hyperlink"):
+						raise CandidateCVSecurityError(_("El DOCX contiene recursos externos no permitidos."))
 	except zipfile.BadZipFile as exc:
 		raise CandidateCVSecurityError(_("El archivo no es un DOCX válido.")) from exc
 
@@ -124,19 +161,22 @@ def _mark_file_clean(file_doc) -> None:
 		"custom_av_scan_engine": "ClamAV",
 		"custom_av_scanned_on": now_datetime(),
 	}
-	if all(frappe.db.has_column("File", fieldname) for fieldname in values):
-		file_doc.db_set(values, update_modified=False)
+	file_doc.db_set(values, update_modified=False)
 
 
-@frappe.whitelist(allow_guest=True, methods=["POST"])
-def upload_file():
-	if not _is_candidate_cv_upload():
-		return frappe_upload_file()
-	return _upload_candidate_cv()
+def guard_candidate_cv_upload() -> None:
+	if not _is_upload_endpoint():
+		return
+
+	is_job_applicant_upload = frappe.form_dict.get("doctype") == "Job Applicant"
+	if frappe.session.user == "Guest" and is_job_applicant_upload and not _is_candidate_cv_upload():
+		raise CandidateCVSecurityError(_("Los visitantes solo pueden cargar un CV en el campo autorizado."))
+	if _is_candidate_cv_upload():
+		_preflight_candidate_cv_upload()
 
 
 @rate_limit(limit=10, seconds=60 * 60, methods=["POST"], ip_based=True)
-def _upload_candidate_cv():
+def _preflight_candidate_cv_upload() -> None:
 	file_storage = frappe.request.files.get("file")
 	if not file_storage:
 		raise CandidateCVSecurityError(_("Selecciona un CV para cargar."))
@@ -145,32 +185,67 @@ def _upload_candidate_cv():
 	try:
 		validate_cv_file(file_storage.filename or "", content)
 		_scan_candidate_cv(content)
+		frappe.form_dict.is_private = 1
+		frappe.local.candidate_cv_preflight = {
+			"sha256": hashlib.sha256(content).hexdigest(),
+			"size": len(content),
+		}
 	finally:
 		file_storage.stream.seek(0)
 
-	frappe.form_dict.is_private = 1
-	file_doc = frappe_upload_file()
+
+def mark_scanned_candidate_cv_file(file_doc, method=None) -> None:
+	preflight = getattr(frappe.local, "candidate_cv_preflight", None)
+	if not preflight:
+		return
+
+	av_fields = ("custom_av_scan_status", "custom_av_scan_engine", "custom_av_scanned_on")
+	if not all(frappe.db.has_column("File", fieldname) for fieldname in av_fields):
+		raise CandidateCVSecurityError(
+			_("El control antivirus todavía no está disponible. Intenta nuevamente en unos minutos.")
+		)
+	content = file_doc.get_content()
+	if isinstance(content, str):
+		content = content.encode()
+	if (
+		not file_doc.is_private
+		or file_doc.file_size != preflight["size"]
+		or hashlib.sha256(content).hexdigest() != preflight["sha256"]
+	):
+		raise CandidateCVSecurityError(_("No se pudo verificar la integridad del CV cargado."))
+
 	_mark_file_clean(file_doc)
-	return file_doc
+	frappe.local.candidate_cv_preflight = None
 
 
 def validate_job_applicant_cv(doc, method=None) -> None:
 	if frappe.session.user == "Guest" and not doc.custom_data_processing_consent:
 		raise CandidateCVSecurityError(_("Debes aceptar el aviso de privacidad para enviar la solicitud."))
+	if frappe.session.user == "Guest":
+		doc.custom_privacy_notice_version = PRIVACY_NOTICE_VERSION
 
 	if not doc.resume_attachment:
 		return
+	av_fields = ("custom_av_scan_status", "custom_av_scan_engine", "custom_av_scanned_on")
+	if not all(frappe.db.has_column("File", fieldname) for fieldname in av_fields):
+		raise CandidateCVSecurityError(
+			_("El control antivirus todavía no está disponible. Intenta nuevamente en unos minutos.")
+		)
 
 	file_record = frappe.db.get_value(
 		"File",
 		{"file_url": doc.resume_attachment},
 		[
 			"name",
+			"file_name",
 			"file_url",
+			"file_size",
+			"content_hash",
 			"is_private",
 			"custom_av_scan_status",
 			"attached_to_doctype",
 			"attached_to_name",
+			"attached_to_field",
 		],
 		as_dict=True,
 	)
@@ -178,9 +253,15 @@ def validate_job_applicant_cv(doc, method=None) -> None:
 		not file_record
 		or not file_record.is_private
 		or not file_record.file_url.startswith("/private/files/")
+		or not file_record.file_name
+		or Path(file_record.file_name).suffix.lower() not in ALLOWED_EXTENSIONS
+		or not file_record.content_hash
+		or not file_record.file_size
+		or file_record.file_size > MAX_CV_BYTES
 		or file_record.custom_av_scan_status != "Clean"
 		or file_record.attached_to_doctype not in (None, "", "Job Applicant")
 		or (file_record.attached_to_name and file_record.attached_to_name != doc.name)
+		or file_record.attached_to_field not in (None, "", "resume_attachment")
 	)
 	if invalid_attachment:
 		raise CandidateCVSecurityError(

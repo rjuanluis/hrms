@@ -4,6 +4,8 @@ app_publisher = "Frappe Technologies Pvt. Ltd."
 app_description = "Modern HR and Payroll Software"
 app_email = "contact@frappe.io"
 app_license = "GNU General Public License (v3)"
+
+before_request = ["hrms.security.candidate_cv.guard_candidate_cv_upload"]
 required_apps = ["frappe/erpnext"]
 source_link = "http://github.com/frappe/hrms"
 app_logo_url = "/assets/hrms/images/frappe-hr-logo.svg"
@@ -218,6 +220,7 @@ doc_events = {
 		"after_insert": "hrms.security.candidate_cv.attach_job_applicant_cv",
 		"on_update": "hrms.security.candidate_cv.attach_job_applicant_cv",
 	},
+	"File": {"after_insert": "hrms.security.candidate_cv.mark_scanned_candidate_cv_file"},
 	"Project": {"validate": "hrms.controllers.employee_boarding_controller.update_employee_boarding_status"},
 	"Task": {"on_update": "hrms.controllers.employee_boarding_controller.update_task"},
 }
@@ -304,10 +307,7 @@ global_search_doctypes = {
 	],
 }
 
-override_whitelisted_methods = {
-	"upload_file": "hrms.security.candidate_cv.upload_file",
-	"frappe.handler.upload_file": "hrms.security.candidate_cv.upload_file",
-}
+# override_whitelisted_methods = {}
 #
 # each overriding function accepts a `data` argument;
 # generated from the base implementation of the doctype dashboard,

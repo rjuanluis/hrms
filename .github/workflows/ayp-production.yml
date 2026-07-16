@@ -40,10 +40,14 @@ jobs:
           if 'name: easypanel' not in text or 'external: true' not in text:
               raise SystemExit('EasyPanel external network is not configured')
           hooks = Path('hrms/hooks.py').read_text()
-          upload_override = 'hrms.security.candidate_cv.upload_file'
-          for key in ['"upload_file"', '"frappe.handler.upload_file"']:
-              if key not in hooks or upload_override not in hooks:
-                  raise SystemExit(f'Missing candidate CV upload override for {key}')
+          required_hooks = [
+              'hrms.security.candidate_cv.guard_candidate_cv_upload',
+              'hrms.security.candidate_cv.mark_scanned_candidate_cv_file',
+              'hrms.security.candidate_cv.validate_job_applicant_cv',
+          ]
+          missing_hooks = [hook for hook in required_hooks if hook not in hooks]
+          if missing_hooks:
+              raise SystemExit(f'Missing candidate CV security hooks: {missing_hooks}')
           PY
 
   build:
@@ -97,6 +101,28 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:production
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Test candidate CV security in production image
+        run: |
+          docker pull "${{ steps.image.outputs.value }}"
+          docker run --rm --entrypoint bash "${{ steps.image.outputs.value }}" -lc '
+            mkdir -p /tmp/frappe-test-sites/test /home/frappe/logs /home/frappe/frappe-bench/test/logs
+            printf "{}\n" > /tmp/frappe-test-sites/test/site_config.json
+            printf "frappe\nerpnext\nhrms\n" > /tmp/frappe-test-sites/apps.txt
+            cd /home/frappe/frappe-bench
+            ./env/bin/python - <<"PY"
+          import unittest
+          import frappe
+          frappe.init(site="test", sites_path="/tmp/frappe-test-sites")
+          try:
+              suite = unittest.defaultTestLoader.loadTestsFromName("hrms.security.test_candidate_cv")
+              result = unittest.TextTestRunner(verbosity=2).run(suite)
+              if not result.wasSuccessful():
+                  raise SystemExit(1)
+          finally:
+              frappe.destroy()
+          PY
+          '
 
   deploy:
     name: Deploy official hr.aroypedal.com
