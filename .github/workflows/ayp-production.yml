@@ -119,6 +119,6 @@ jobs:
           IMAGE: ${{ needs.build.outputs.image }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          printf '%s' "$GHCR_TOKEN" | \
+          printf '%s\n' "$GHCR_TOKEN" | \
             ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes \
               aypdeploy@${{ vars.AYP_DEPLOY_HOST }} "deploy $IMAGE $GITHUB_ACTOR"

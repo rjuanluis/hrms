@@ -12,7 +12,7 @@ else
   exit 64
 fi
 
-IFS= read -r REGISTRY_TOKEN
+IFS= read -r REGISTRY_TOKEN || true
 [[ -n "$REGISTRY_TOKEN" ]] || { echo "Missing ephemeral GHCR token" >&2; exit 65; }
 DOCKER_CONFIG="$(mktemp -d /tmp/ayphr-docker-config.XXXXXX)"
 chmod 700 "$DOCKER_CONFIG"
