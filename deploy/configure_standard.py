@@ -11,6 +11,7 @@ from frappe.translate import set_default_language
 
 SITE = os.environ.get("AYP_SITE_NAME", "hr.aroypedal.com")
 COMPANY = "ARO Y PEDAL SRL"
+TAX_ID = "101-57005-9"
 ADMIN_EMAIL = "juanluis@aroypedal.com"
 SITES_DIR = Path("/home/frappe/frappe-bench/sites")
 SECRETS_DIR = Path(os.environ.get("AYP_SECRETS_DIR", "/run/ayp-secrets"))
@@ -145,6 +146,7 @@ def main() -> None:
         if not frappe.db.exists("Company", COMPANY):
             raise RuntimeError(f"Setup completed without creating company {COMPANY}")
 
+        frappe.db.set_value("Company", COMPANY, "tax_id", TAX_ID, update_modified=False)
         address = ensure_company_address()
         branches = ensure_branches()
         set_default_language("es")
@@ -159,6 +161,7 @@ def main() -> None:
                 "status": "configured",
                 "site": SITE,
                 "company": COMPANY,
+                "tax_id": TAX_ID,
                 "address": address,
                 "branches": branches,
                 "country": "Dominican Republic",
