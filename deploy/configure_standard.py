@@ -55,6 +55,18 @@ DEPARTMENT_RENAMES = {
 RECRUITMENT_PRIVACY_NOTICE_VERSION = "AYP-RH-2026-07-16-v2"
 RECRUITMENT_WEB_FORM_ROUTE = "empleos/solicitud"
 RECRUITMENT_WEB_FORM_TITLE = "Solicitud de empleo — Aro y Pedal"
+RECRUITMENT_SELECT_OPTIONS = {
+    "custom_years_sales_experience": "\nMenos de 1 año\n1 a 2 años\n3 a 5 años\nMás de 5 años",
+    "custom_retail_experience": "\nSí\nNo",
+    "custom_schedule_availability": "\nSí\nNo\nNecesito conversar sobre el horario",
+    "custom_start_availability": "\nInmediata\nDentro de 1 semana\nDentro de 2 semanas\nMás de 2 semanas",
+    "custom_bicycle_experience": (
+        "\nTengo experiencia en ciclismo o bicicletas"
+        "\nConozco algunos productos de ciclismo"
+        "\nMe interesa aprender"
+        "\nNo tengo experiencia, pero tengo disposición para aprender"
+    ),
+}
 
 RECRUITMENT_INTRODUCTION = """
 <p><strong>Uso de tus datos:</strong> ARO Y PEDAL SRL utilizará la información que compartas
@@ -228,35 +240,35 @@ def ensure_recruitment_security_fields() -> None:
                     "fieldname": "custom_years_sales_experience",
                     "label": "Años de experiencia en ventas o servicio al cliente",
                     "fieldtype": "Select",
-                    "options": "\nMenos de 1 año\n1 a 2 años\n3 a 5 años\nMás de 5 años",
+                    "options": RECRUITMENT_SELECT_OPTIONS["custom_years_sales_experience"],
                     "insert_after": "phone_number",
                 },
                 {
                     "fieldname": "custom_retail_experience",
                     "label": "Experiencia en tiendas o retail",
                     "fieldtype": "Select",
-                    "options": "\nSí\nNo",
+                    "options": RECRUITMENT_SELECT_OPTIONS["custom_retail_experience"],
                     "insert_after": "custom_years_sales_experience",
                 },
                 {
                     "fieldname": "custom_schedule_availability",
                     "label": "Disponibilidad dentro del horario de tienda",
                     "fieldtype": "Select",
-                    "options": "\nSí\nNo\nNecesito conversar sobre el horario",
+                    "options": RECRUITMENT_SELECT_OPTIONS["custom_schedule_availability"],
                     "insert_after": "custom_retail_experience",
                 },
                 {
                     "fieldname": "custom_start_availability",
                     "label": "Disponibilidad para iniciar",
                     "fieldtype": "Select",
-                    "options": "\nInmediata\nDentro de 1 semana\nDentro de 2 semanas\nMás de 2 semanas",
+                    "options": RECRUITMENT_SELECT_OPTIONS["custom_start_availability"],
                     "insert_after": "custom_schedule_availability",
                 },
                 {
                     "fieldname": "custom_bicycle_experience",
                     "label": "Conocimiento o interés en bicicletas",
                     "fieldtype": "Select",
-                    "options": "\nTengo experiencia en ciclismo o bicicletas\nConozco algunos productos de ciclismo\nMe interesa aprender\nNo tengo experiencia, pero tengo disposición para aprender",
+                    "options": RECRUITMENT_SELECT_OPTIONS["custom_bicycle_experience"],
                     "insert_after": "custom_start_availability",
                 },
                 {
@@ -325,18 +337,21 @@ def ensure_recruitment_web_form() -> str:
                 "fieldname": "custom_years_sales_experience",
                 "fieldtype": "Select",
                 "label": "Años de experiencia en ventas o servicio al cliente",
+                "options": RECRUITMENT_SELECT_OPTIONS["custom_years_sales_experience"],
                 "reqd": 1,
             },
             {
                 "fieldname": "custom_retail_experience",
                 "fieldtype": "Select",
                 "label": "¿Tienes experiencia en tiendas o retail?",
+                "options": RECRUITMENT_SELECT_OPTIONS["custom_retail_experience"],
                 "reqd": 1,
             },
             {
                 "fieldname": "custom_schedule_availability",
                 "fieldtype": "Select",
                 "label": "¿Tienes disponibilidad dentro del horario de tienda?",
+                "options": RECRUITMENT_SELECT_OPTIONS["custom_schedule_availability"],
                 "reqd": 1,
                 "description": "La jornada, los descansos y la rotación se coordinan conforme a la planificación interna y la legislación.",
             },
@@ -344,12 +359,14 @@ def ensure_recruitment_web_form() -> str:
                 "fieldname": "custom_start_availability",
                 "fieldtype": "Select",
                 "label": "Disponibilidad para iniciar",
+                "options": RECRUITMENT_SELECT_OPTIONS["custom_start_availability"],
                 "reqd": 1,
             },
             {
                 "fieldname": "custom_bicycle_experience",
                 "fieldtype": "Select",
                 "label": "Conocimiento o interés en bicicletas",
+                "options": RECRUITMENT_SELECT_OPTIONS["custom_bicycle_experience"],
                 "reqd": 1,
             },
             {
@@ -383,6 +400,19 @@ def ensure_recruitment_web_form() -> str:
         ],
     )
     web_form.save(ignore_permissions=True)
+    web_form.reload()
+    rendered_select_options = {
+        row.fieldname: row.options or ""
+        for row in web_form.web_form_fields
+        if row.fieldname in RECRUITMENT_SELECT_OPTIONS
+    }
+    invalid_selects = {
+        fieldname: rendered_select_options.get(fieldname, "")
+        for fieldname, expected_options in RECRUITMENT_SELECT_OPTIONS.items()
+        if rendered_select_options.get(fieldname) != expected_options
+    }
+    if invalid_selects:
+        raise RuntimeError(f"Recruitment Web Form Select options were not persisted: {sorted(invalid_selects)}")
     return web_form.name
 
 
