@@ -15,6 +15,8 @@ SITE = os.environ.get("AYP_SITE_NAME", "hr.aroypedal.com")
 COMPANY = "ARO Y PEDAL SRL"
 TAX_ID = "101-57005-9"
 ADMIN_EMAIL = "juanluis@aroypedal.com"
+LEAVE_PERIOD_START = "2026-01-01"
+LEAVE_PERIOD_END = "2026-12-31"
 SITES_DIR = Path("/home/frappe/frappe-bench/sites")
 SECRETS_DIR = Path(os.environ.get("AYP_SECRETS_DIR", "/run/ayp-secrets"))
 BRANCHES = (
@@ -206,6 +208,22 @@ def ensure_departments() -> list[str]:
             if department.name not in desired_names and not department.is_group:
                 frappe.db.set_value("Department", department.name, "disabled", 1, update_modified=False)
     return names
+
+
+def ensure_active_leave_period() -> str:
+    filters = {
+        "company": COMPANY,
+        "from_date": LEAVE_PERIOD_START,
+        "to_date": LEAVE_PERIOD_END,
+    }
+    name = frappe.db.get_value("Leave Period", filters, "name")
+    leave_period = frappe.get_doc("Leave Period", name) if name else frappe.new_doc("Leave Period")
+    leave_period.update({**filters, "is_active": 1})
+    leave_period.save(ignore_permissions=True)
+    leave_period.reload()
+    if not leave_period.is_active:
+        raise RuntimeError(f"Leave Period {leave_period.name} did not persist as active")
+    return leave_period.name
 
 
 def ensure_recruitment_security_fields() -> None:
@@ -459,6 +477,7 @@ def main() -> None:
         address = ensure_company_address()
         branches = ensure_branches()
         departments = ensure_departments()
+        leave_period = ensure_active_leave_period()
         ensure_recruitment_security_fields()
         recruitment_web_form = ensure_recruitment_web_form()
         enable_restricted_guest_cv_uploads()
@@ -476,6 +495,7 @@ def main() -> None:
                 "address": address,
                 "branches": branches,
                 "departments": departments,
+                "leave_period": leave_period,
                 "recruitment_web_form": recruitment_web_form,
                 "guest_upload_doctypes": ["Job Applicant"],
                 "country": "Dominican Republic",
