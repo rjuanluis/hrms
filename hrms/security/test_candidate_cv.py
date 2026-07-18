@@ -15,6 +15,7 @@ from hrms.security.candidate_cv import (
 	_mark_file_clean,
 	_verified_candidate_cv_sha256,
 	guard_candidate_cv_upload,
+	mark_scanned_candidate_cv_file,
 	scan_bytes_with_clamd,
 	validate_cv_file,
 )
@@ -131,7 +132,7 @@ class TestCandidateCVSecurity(unittest.TestCase):
 		self.assertEqual(file_doc.values["custom_av_scan_status"], "Clean")
 
 	def test_verified_hash_revalidates_pdf_content(self):
-		content = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF"
+		content = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj\n<<>>\nendobj\n%%EOF"
 		file_record = SimpleNamespace(
 			name="FILE-1",
 			file_name="cv.pdf",
@@ -139,7 +140,8 @@ class TestCandidateCVSecurity(unittest.TestCase):
 			custom_cv_sha256="",
 		)
 		with (
-			patch("frappe.get_doc", return_value=SimpleNamespace(get_content=lambda: content)),
+			patch("frappe.get_doc", return_value=SimpleNamespace(file_url="/private/files/cv.pdf")),
+			patch("hrms.security.candidate_cv.get_file", return_value=("cv.pdf", content)),
 			patch("hrms.security.candidate_cv._persist_file_cv_sha256") as persist_sha256,
 		):
 			sha256 = _verified_candidate_cv_sha256(file_record)
@@ -154,9 +156,31 @@ class TestCandidateCVSecurity(unittest.TestCase):
 			file_size=len(content),
 			custom_cv_sha256="",
 		)
-		with patch("frappe.get_doc", return_value=SimpleNamespace(get_content=lambda: content)):
+		with (
+			patch("frappe.get_doc", return_value=SimpleNamespace(file_url="/private/files/cv.pdf")),
+			patch("hrms.security.candidate_cv.get_file", return_value=("cv.pdf", content)),
+		):
 			with self.assertRaises(CandidateCVSecurityError):
 				_verified_candidate_cv_sha256(file_record)
+
+	def test_after_insert_integrity_uses_exact_binary_bytes(self):
+		content = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n%%EOF"
+		sha256 = hashlib.sha256(content).hexdigest()
+		file_doc = SimpleNamespace(
+			file_url="/private/files/cv.pdf",
+			file_size=len(content),
+			is_private=1,
+			db_set=lambda values, update_modified=False: setattr(file_doc, "values", values),
+		)
+		frappe.local.candidate_cv_preflight = {"sha256": sha256, "size": len(content)}
+		with (
+			patch("hrms.security.candidate_cv._file_has_column", return_value=True),
+			patch("hrms.security.candidate_cv.get_file", return_value=("cv.pdf", content)),
+			patch("hrms.security.candidate_cv.now_datetime", return_value="2026-07-18 13:00:00"),
+		):
+			mark_scanned_candidate_cv_file(file_doc)
+		self.assertEqual(file_doc.values["custom_cv_sha256"], sha256)
+		self.assertEqual(file_doc.values["custom_av_scan_status"], "Clean")
 
 
 if __name__ == "__main__":
