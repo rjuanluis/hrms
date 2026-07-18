@@ -9,7 +9,7 @@ import json
 import frappe
 from frappe import _
 from frappe.model.document import Document
-from frappe.model.naming import append_number_if_name_exists
+from frappe.model.naming import append_number_if_name_exists, make_autoname
 from frappe.utils import flt, validate_email_address
 
 from hrms.hr.doctype.interview.interview import get_interviewers
@@ -54,6 +54,10 @@ class JobApplicant(Document):
 			self.get("__onload").job_offer = job_offer[0].name
 
 	def autoname(self):
+		if not self.email_id:
+			self.name = make_autoname("HR-APP-.YYYY.-.#####")
+			return
+
 		self.name = self.email_id
 
 		# applicant can apply more than once for a different job title or reapply

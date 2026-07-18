@@ -930,6 +930,7 @@ class TestShiftType(HRMSTestSuite):
 			"test_working_hours3@example.com", company="_Test Company", default_shift=shift.name
 		)
 
+		frappe.db.delete("Holiday", {"parent": "_Test Half Day", "holiday_date": getdate()})
 		add_date_to_holiday_list(getdate(), "_Test Half Day", is_half_day=1)
 		# employee1 worked for 4 hours which is full threshold on half day
 		make_checkin(employee1, datetime.combine(getdate(), get_time("10:00:00")))

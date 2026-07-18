@@ -18,6 +18,8 @@ class TestAttendanceRequest(HRMSTestSuite):
 	def setUp(self):
 		self.holiday_list = "Salary Slip Test Holiday List"
 		self.employee = get_employee()
+		# Tests that operate on today's date must not depend on the weekday the CI run starts on.
+		frappe.db.delete("Holiday", {"parent": self.holiday_list, "holiday_date": getdate()})
 
 	def test_attendance_request_overlap(self):
 		create_attendance_request(employee=self.employee.name, reason="On Duty", company="_Test Company")

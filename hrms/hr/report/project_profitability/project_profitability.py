@@ -81,9 +81,9 @@ def calculate_cost_and_profit(data):
 	precision = cint(frappe.db.get_default("float_precision")) or 2
 
 	for row in data:
-		row.utilization = flt(
-			flt(row.total_billed_hours) / (flt(row.total_working_days) * flt(standard_working_hours)),
-			precision,
+		available_hours = flt(row.total_working_days) * flt(standard_working_hours)
+		row.utilization = (
+			flt(flt(row.total_billed_hours) / available_hours, precision) if available_hours else 0.0
 		)
 		row.fractional_cost = flt(flt(row.base_gross_pay) * flt(row.utilization), precision)
 

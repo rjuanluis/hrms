@@ -5,6 +5,7 @@ import io
 import struct
 import unittest
 import zipfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -59,6 +60,10 @@ class TestCandidateCVSecurity(unittest.TestCase):
 		frappe.local.session = frappe._dict(user="Guest")
 		frappe.local.request = SimpleNamespace(path="/api/method/upload_file", method="POST", files={})
 
+	def test_guest_upload_without_candidate_context_is_rejected(self):
+		with self.assertRaises(CandidateCVSecurityError):
+			guard_candidate_cv_upload()
+
 	def test_guest_job_applicant_upload_rejects_other_fields(self):
 		frappe.local.form_dict.update(doctype="Job Applicant", fieldname="cover_letter")
 		with self.assertRaises(CandidateCVSecurityError):
@@ -69,6 +74,21 @@ class TestCandidateCVSecurity(unittest.TestCase):
 		with patch("hrms.security.candidate_cv._preflight_candidate_cv_upload") as preflight:
 			guard_candidate_cv_upload()
 		preflight.assert_called_once_with()
+
+	def test_recruitment_web_form_supplies_secure_upload_context(self):
+		config_source = (Path(__file__).resolve().parents[2] / "deploy" / "configure_standard.py").read_text(
+			encoding="utf-8"
+		)
+		for required_source in (
+			"frappe.web_form.after_load",
+			"doctype: 'Job Applicant'",
+			"fieldname: 'resume_attachment'",
+			"is_private: 1",
+			'"label": "Correo electrónico (opcional)"',
+			'"label": "Currículum (obligatorio)"',
+			'"Lunes a viernes de 9:00 a. m. a 6:00 p. m.',
+		):
+			self.assertIn(required_source, config_source)
 
 	def test_accepts_simple_pdf(self):
 		validate_cv_file("cv.pdf", b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF")

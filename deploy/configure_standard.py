@@ -80,12 +80,24 @@ no autoriza mensajes ilimitados ni uso para marketing. El acceso se limita a RRH
 autorizados y Gerencia. Puedes
 solicitar acceso, corrección, cancelación u oposición escribiendo a
 <a href="mailto:recursoshumanos@aroypedal.com">recursoshumanos@aroypedal.com</a>.</p>
-<p>El currículum es opcional pero recomendado. Solo se aceptan PDF o DOCX, máximo 5 MB; se almacena
+<p>El currículum es obligatorio. Solo se aceptan PDF o DOCX, máximo 5 MB; se almacena
 de forma privada y pasa por un control antivirus antes de guardarse. No incluyas datos sensibles que
 no sean necesarios para evaluar tu experiencia.</p>
 """
 
-RECRUITMENT_CLIENT_SCRIPT = """frappe.web_form.validate = () => {
+RECRUITMENT_CLIENT_SCRIPT = """frappe.web_form.after_load = () => {
+  const cv_field = frappe.web_form.fields_dict.resume_attachment;
+  if (cv_field) {
+    cv_field.df.options = Object.assign({}, cv_field.df.options || {}, {
+      disable_file_browser: true,
+      doctype: 'Job Applicant',
+      fieldname: 'resume_attachment',
+      is_private: 1,
+    });
+  }
+};
+
+frappe.web_form.validate = () => {
   if (!frappe.web_form.get_value('custom_data_processing_consent')) {
     frappe.msgprint('Debes aceptar el aviso de privacidad para enviar la solicitud.');
     return false;
@@ -400,7 +412,12 @@ def ensure_recruitment_web_form() -> tuple[str, list[str]]:
 				"description": "Vacante a la que aplicas.",
 			},
 			{"fieldname": "applicant_name", "fieldtype": "Data", "label": "Nombre completo", "reqd": 1},
-			{"fieldname": "email_id", "fieldtype": "Data", "label": "Correo electrónico", "reqd": 1},
+			{
+				"fieldname": "email_id",
+				"fieldtype": "Data",
+				"label": "Correo electrónico (opcional)",
+				"reqd": 0,
+			},
 			{"fieldname": "phone_number", "fieldtype": "Data", "label": "Teléfono", "reqd": 1},
 			{
 				"fieldname": "custom_years_sales_experience",
@@ -419,10 +436,13 @@ def ensure_recruitment_web_form() -> tuple[str, list[str]]:
 			{
 				"fieldname": "custom_schedule_availability",
 				"fieldtype": "Select",
-				"label": "¿Tienes disponibilidad dentro del horario de tienda?",
+				"label": "¿Tienes disponibilidad para trabajar en este horario?",
 				"options": RECRUITMENT_SELECT_OPTIONS["custom_schedule_availability"],
 				"reqd": 1,
-				"description": "La jornada, los descansos y la rotación se coordinan conforme a la planificación interna y la legislación.",
+				"description": (
+					"Lunes a viernes de 9:00 a. m. a 6:00 p. m. y sábados de 10:00 a. m. a 4:00 p. m. "
+					"La jornada, los descansos y la rotación se coordinan conforme a la planificación interna y la legislación."
+				),
 			},
 			{
 				"fieldname": "custom_start_availability",
@@ -448,8 +468,8 @@ def ensure_recruitment_web_form() -> tuple[str, list[str]]:
 			{
 				"fieldname": "resume_attachment",
 				"fieldtype": "Attach",
-				"label": "Currículum (opcional, recomendado)",
-				"reqd": 0,
+				"label": "Currículum (obligatorio)",
+				"reqd": 1,
 				"description": "PDF o DOCX, máximo 5 MB. Se almacena de forma privada y pasa por antivirus.",
 			},
 			{
