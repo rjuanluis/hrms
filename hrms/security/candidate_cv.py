@@ -225,6 +225,7 @@ def _verified_candidate_cv_sha256(file_record) -> str:
 	content = file_doc.get_content()
 	if isinstance(content, str):
 		content = content.encode()
+	validate_cv_file(file_record.file_name, content)
 	actual_sha256 = hashlib.sha256(content).hexdigest()
 	if len(content) != file_record.file_size or (
 		file_record.custom_cv_sha256 and file_record.custom_cv_sha256 != actual_sha256
@@ -272,6 +273,8 @@ def validate_job_applicant_cv(doc, method=None) -> None:
 		"content_hash",
 		"is_private",
 		"custom_av_scan_status",
+		"custom_av_scan_engine",
+		"custom_av_scanned_on",
 		"attached_to_doctype",
 		"attached_to_name",
 		"attached_to_field",
@@ -293,6 +296,8 @@ def validate_job_applicant_cv(doc, method=None) -> None:
 		or not file_record.file_size
 		or file_record.file_size > MAX_CV_BYTES
 		or file_record.custom_av_scan_status != "Clean"
+		or file_record.custom_av_scan_engine != "ClamAV"
+		or not file_record.custom_av_scanned_on
 		or file_record.attached_to_doctype not in (None, "", "Job Applicant")
 		or (file_record.attached_to_name and file_record.attached_to_name != doc.name)
 		or file_record.attached_to_field not in (None, "", "resume_attachment")

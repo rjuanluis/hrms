@@ -29,3 +29,10 @@ class TestAYPCandidateProfile(UnitTestCase):
 		profile = self._new_profile()
 		with self.assertRaises(frappe.ValidationError):
 			profile.on_trash()
+
+	def test_disposed_profile_still_requires_privacy_workflow_for_deletion(self):
+		profile = self._new_profile()
+		profile.talent_pool_status = "Eliminación solicitada"
+		profile.disposition_reason = "Solicitud de prueba"
+		with self.assertRaises(frappe.ValidationError):
+			profile.on_trash()

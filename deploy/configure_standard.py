@@ -492,6 +492,13 @@ def ensure_recruitment_web_form() -> tuple[str, list[str]]:
 		retired.append(other_name)
 		if frappe.db.get_value("Web Form", other_name, "published"):
 			frappe.db.set_value("Web Form", other_name, "published", 0, update_modified=False)
+	published_forms = frappe.get_all(
+		"Web Form",
+		filters={"doc_type": "Job Applicant", "published": 1},
+		pluck="name",
+	)
+	if published_forms != [web_form.name]:
+		raise RuntimeError(f"Expected exactly one published Job Applicant Web Form; found {published_forms}")
 	return web_form.name, retired
 
 

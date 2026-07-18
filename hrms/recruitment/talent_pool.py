@@ -19,6 +19,7 @@ from hrms.recruitment.matching import (
 PROFILE_DOCTYPE = "AYP Candidate Profile"
 STATUS_ACTIVE = "Activo"
 LOCK_TIMEOUT_SECONDS = 10
+GLOBAL_CANDIDATE_LOCK = "ayp-candidate-pool-global"
 
 
 def _release_candidate_locks(lock_names: tuple[str, ...]) -> None:
@@ -29,9 +30,7 @@ def _release_candidate_locks(lock_names: tuple[str, ...]) -> None:
 
 
 def _acquire_candidate_locks(*, email: str, phone: str, cv_sha256: str) -> None:
-	lock_names = candidate_lock_names(email=email, phone=phone, cv_sha256=cv_sha256)
-	if not lock_names:
-		return
+	lock_names = (GLOBAL_CANDIDATE_LOCK, *candidate_lock_names(email=email, phone=phone, cv_sha256=cv_sha256))
 	held_locks = getattr(frappe.local, "ayp_candidate_locks", set())
 	frappe.local.ayp_candidate_locks = held_locks
 	new_locks = tuple(lock_name for lock_name in lock_names if lock_name not in held_locks)
@@ -56,14 +55,23 @@ def _acquire_candidate_locks(*, email: str, phone: str, cv_sha256: str) -> None:
 def _profile_matches(fieldname: str, value: str) -> set[str]:
 	if not value:
 		return set()
-	return set(
-		frappe.get_all(
-			PROFILE_DOCTYPE,
-			filters={fieldname: value},
-			pluck="name",
-			limit_page_length=3,
-		)
-	)
+	queries = {
+		"normalized_email": """
+			SELECT name FROM `tabAYP Candidate Profile`
+			WHERE normalized_email = %s LIMIT 3 FOR UPDATE
+		""",
+		"normalized_phone": """
+			SELECT name FROM `tabAYP Candidate Profile`
+			WHERE normalized_phone = %s LIMIT 3 FOR UPDATE
+		""",
+		"latest_cv_sha256": """
+			SELECT name FROM `tabAYP Candidate Profile`
+			WHERE latest_cv_sha256 = %s LIMIT 3 FOR UPDATE
+		""",
+	}
+	if fieldname not in queries:
+		raise ValueError(f"Unsupported candidate profile match field: {fieldname}")
+	return set(frappe.db.sql(queries[fieldname], (value,), pluck=True))
 
 
 def _cv_profile_matches(cv_sha256: str) -> set[str]:
@@ -73,15 +81,45 @@ def _cv_profile_matches(cv_sha256: str) -> set[str]:
 		for fieldname in ("custom_cv_sha256", "custom_candidate_profile")
 	):
 		return matches
-	for profile_name in frappe.get_all(
-		"Job Applicant",
-		filters={"custom_cv_sha256": cv_sha256, "custom_candidate_profile": ["!=", ""]},
-		pluck="custom_candidate_profile",
-		limit_page_length=3,
+	for profile_name in frappe.db.sql(
+		"""
+		SELECT custom_candidate_profile FROM `tabJob Applicant`
+		WHERE custom_cv_sha256 = %s AND COALESCE(custom_candidate_profile, '') != ''
+		LIMIT 3 FOR UPDATE
+		""",
+		(cv_sha256,),
+		pluck=True,
 	):
 		if profile_name:
 			matches.add(profile_name)
 	return matches
+
+
+def _persisted_applicant_for_update(applicant_name: str):
+	rows = frappe.db.sql(
+		"""
+		SELECT custom_candidate_profile, custom_normalized_email,
+			custom_normalized_phone, custom_cv_sha256, custom_dedupe_status
+		FROM `tabJob Applicant` WHERE name = %s FOR UPDATE
+		""",
+		(applicant_name,),
+		as_dict=True,
+	)
+	return rows[0] if rows else None
+
+
+def _profile_name_for_update(profile_name: str | None):
+	if not profile_name:
+		return None
+	rows = frappe.db.sql(
+		"""
+		SELECT name, candidate_name FROM `tabAYP Candidate Profile`
+		WHERE name = %s FOR UPDATE
+		""",
+		(profile_name,),
+		as_dict=True,
+	)
+	return rows[0] if rows else None
 
 
 def _job_applicant_has_field(doc, fieldname: str) -> bool:
@@ -122,29 +160,40 @@ def link_job_applicant_profile(doc, method=None) -> None:
 	if not _job_applicant_has_field(doc, "custom_candidate_profile"):
 		return
 
-	existing_profile = doc.get("custom_candidate_profile")
-	persisted_profile = None
-	if not doc.is_new():
-		persisted_profile = frappe.db.get_value("Job Applicant", doc.name, "custom_candidate_profile")
-	if frappe.session.user == "Guest":
-		existing_profile = None
-		doc.set("custom_candidate_profile", None)
-	elif (
-		existing_profile
-		and existing_profile == persisted_profile
-		and frappe.db.exists(PROFILE_DOCTYPE, existing_profile)
-	):
-		return
-	else:
-		doc.set("custom_candidate_profile", None)
-
 	email = normalize_email(doc.email_id)
 	phone = normalize_phone(doc.phone_number)
 	cv_sha256 = (doc.get("custom_cv_sha256") or "").strip().lower()
 	_set_if_supported(doc, "custom_normalized_email", email)
 	_set_if_supported(doc, "custom_normalized_phone", phone)
-	if not getattr(frappe.flags, "in_candidate_profile_backfill", False):
-		_acquire_candidate_locks(email=email, phone=phone, cv_sha256=cv_sha256)
+	_acquire_candidate_locks(email=email, phone=phone, cv_sha256=cv_sha256)
+
+	persisted = None if doc.is_new() else _persisted_applicant_for_update(doc.name)
+	persisted_profile = persisted.custom_candidate_profile if persisted else None
+	persisted_profile_row = _profile_name_for_update(persisted_profile)
+	if persisted and persisted_profile_row:
+		identity_changed = any(
+			(
+				(persisted.custom_normalized_email or "") != email,
+				(persisted.custom_normalized_phone or "") != phone,
+				(persisted.custom_cv_sha256 or "").strip().lower() != cv_sha256,
+			)
+		)
+		doc.set("custom_candidate_profile", persisted_profile)
+		if identity_changed:
+			_set_if_supported(doc, "custom_dedupe_status", DEDUPE_REVIEW)
+			frappe.db.set_value(
+				PROFILE_DOCTYPE,
+				persisted_profile,
+				"dedupe_status",
+				DEDUPE_REVIEW,
+				update_modified=False,
+			)
+		else:
+			_set_if_supported(doc, "custom_dedupe_status", persisted.custom_dedupe_status or DEDUPE_NEW)
+		return
+
+	# New or previously unlinked applications never trust a supplied link.
+	doc.set("custom_candidate_profile", None)
 
 	matches = {
 		"email": _profile_matches("normalized_email", email),
@@ -154,8 +203,8 @@ def link_job_applicant_profile(doc, method=None) -> None:
 	profile_name, dedupe_status = choose_profile_match(matches)
 	matching_signals = [signal for signal, names in matches.items() if profile_name and profile_name in names]
 	if profile_name and requires_name_compatibility(matching_signals):
-		existing_name = frappe.db.get_value(PROFILE_DOCTYPE, profile_name, "candidate_name")
-		if not names_are_compatible(doc.applicant_name, existing_name):
+		profile_row = _profile_name_for_update(profile_name)
+		if not profile_row or not names_are_compatible(doc.applicant_name, profile_row.candidate_name):
 			profile_name, dedupe_status = None, DEDUPE_REVIEW
 	if not profile_name:
 		profile_name = _create_candidate_profile(
@@ -183,43 +232,39 @@ def backfill_candidate_profiles() -> int:
 	if not all(frappe.db.has_column("Job Applicant", fieldname) for fieldname in required_fields):
 		frappe.throw(_("Los campos canónicos de candidatos no están disponibles."))
 
+	_acquire_candidate_locks(email="", phone="", cv_sha256="")
 	updated = 0
-	previous_backfill_flag = getattr(frappe.flags, "in_candidate_profile_backfill", False)
-	frappe.flags.in_candidate_profile_backfill = True
-	try:
-		for applicant_name in frappe.get_all("Job Applicant", pluck="name"):
-			applicant = frappe.get_doc("Job Applicant", applicant_name)
-			if applicant.get("custom_candidate_profile"):
-				continue
-			if applicant.resume_attachment and frappe.db.has_column("File", "custom_cv_sha256"):
-				applicant.custom_cv_sha256 = (
-					frappe.db.get_value("File", {"file_url": applicant.resume_attachment}, "custom_cv_sha256")
-					or ""
-				)
-			link_job_applicant_profile(applicant)
-			if applicant.resume_attachment and not applicant.custom_cv_sha256:
-				applicant.custom_dedupe_status = DEDUPE_REVIEW
-			profile_name = applicant.get("custom_candidate_profile")
-			if not profile_name:
-				frappe.throw(_("No se pudo crear el perfil canónico para {0}.").format(applicant.name))
-			frappe.db.set_value(
-				"Job Applicant",
-				applicant.name,
-				{
-					"custom_candidate_profile": profile_name,
-					"custom_normalized_email": applicant.custom_normalized_email,
-					"custom_normalized_phone": applicant.custom_normalized_phone,
-					"custom_dedupe_status": applicant.custom_dedupe_status or DEDUPE_NEW,
-					"custom_cv_sha256": applicant.custom_cv_sha256 or "",
-				},
-				update_modified=False,
+	for applicant_name in frappe.get_all("Job Applicant", pluck="name"):
+		applicant = frappe.get_doc("Job Applicant", applicant_name)
+		if applicant.get("custom_candidate_profile"):
+			continue
+		if applicant.resume_attachment and frappe.db.has_column("File", "custom_cv_sha256"):
+			applicant.custom_cv_sha256 = (
+				frappe.db.get_value("File", {"file_url": applicant.resume_attachment}, "custom_cv_sha256")
+				or ""
 			)
-			if applicant.custom_dedupe_status == DEDUPE_REVIEW:
-				frappe.db.set_value(PROFILE_DOCTYPE, profile_name, "dedupe_status", DEDUPE_REVIEW)
-			sync_candidate_profile(applicant)
-			updated += 1
-	finally:
-		frappe.flags.in_candidate_profile_backfill = previous_backfill_flag
+		link_job_applicant_profile(applicant)
+		if applicant.resume_attachment and not applicant.custom_cv_sha256:
+			applicant.custom_dedupe_status = DEDUPE_REVIEW
+		profile_name = applicant.get("custom_candidate_profile")
+		if not profile_name:
+			frappe.throw(_("No se pudo crear el perfil canónico para {0}.").format(applicant.name))
+		frappe.db.set_value(
+			"Job Applicant",
+			applicant.name,
+			{
+				"custom_candidate_profile": profile_name,
+				"custom_normalized_email": applicant.custom_normalized_email,
+				"custom_normalized_phone": applicant.custom_normalized_phone,
+				"custom_dedupe_status": applicant.custom_dedupe_status or DEDUPE_NEW,
+				"custom_cv_sha256": applicant.custom_cv_sha256 or "",
+			},
+			update_modified=False,
+		)
+		if applicant.custom_dedupe_status == DEDUPE_REVIEW:
+			frappe.db.set_value(PROFILE_DOCTYPE, profile_name, "dedupe_status", DEDUPE_REVIEW)
+		sync_candidate_profile(applicant)
+		updated += 1
 	return updated
 
 

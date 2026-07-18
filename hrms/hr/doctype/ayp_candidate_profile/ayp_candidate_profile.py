@@ -6,7 +6,6 @@ from frappe.model.document import Document
 from frappe.utils import now_datetime
 
 DISPOSITION_STATUSES = {"Sin interés", "Eliminación solicitada", "Dispuesto"}
-DELETION_ELIGIBLE_STATUSES = {"Sin interés", "Eliminación solicitada"}
 
 
 class AYPCandidateProfile(Document):
@@ -18,10 +17,9 @@ class AYPCandidateProfile(Document):
 		self._bind_private_photo()
 
 	def on_trash(self):
-		if self.talent_pool_status not in DELETION_ELIGIBLE_STATUSES:
-			frappe.throw(
-				_("Solo puedes eliminar un perfil marcado como Sin interés o Eliminación solicitada.")
-			)
+		frappe.throw(
+			_("La eliminación directa está deshabilitada. Usa el flujo aprobado de privacidad y retención.")
+		)
 
 	def _validate_disposition(self) -> None:
 		requires_reason = self.talent_pool_status in DISPOSITION_STATUSES or self.do_not_contact

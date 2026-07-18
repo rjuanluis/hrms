@@ -168,11 +168,14 @@ if [[ "$canonical_form" != *"Solicitud de empleo — Aro y Pedal"* ]] \
   echo "Canonical recruitment form is missing the expected title or privacy consent" >&2
   exit 6
 fi
-legacy_form="$(curl -sSL --max-time 30 "https://$SITE_NAME/job_application/new" || true)"
-if [[ "$legacy_form" == *"Resume Link"* ]] || [[ "$legacy_form" == *"Expected Salary Range per month"* ]]; then
-  echo "Legacy recruitment form is still publicly available" >&2
-  exit 7
-fi
+legacy_status="$(curl -sS -L -o /dev/null -w '%{http_code}' --max-time 30 "https://$SITE_NAME/job_application/new")"
+case "$legacy_status" in
+  403|404|410) ;;
+  *)
+    echo "Legacy recruitment route returned unexpected HTTP $legacy_status" >&2
+    exit 7
+    ;;
+esac
 
 python3 - "$IMAGE" <<'PY'
 import json, sys

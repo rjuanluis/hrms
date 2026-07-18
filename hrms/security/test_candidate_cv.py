@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import struct
 import unittest
@@ -12,6 +13,7 @@ import frappe
 from hrms.security.candidate_cv import (
 	CandidateCVSecurityError,
 	_mark_file_clean,
+	_verified_candidate_cv_sha256,
 	guard_candidate_cv_upload,
 	scan_bytes_with_clamd,
 	validate_cv_file,
@@ -124,6 +126,34 @@ class TestCandidateCVSecurity(unittest.TestCase):
 			_mark_file_clean(file_doc, sha256="a" * 64)
 		self.assertEqual(file_doc.values["custom_cv_sha256"], "a" * 64)
 		self.assertEqual(file_doc.values["custom_av_scan_status"], "Clean")
+
+	def test_verified_hash_revalidates_pdf_content(self):
+		content = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF"
+		file_record = SimpleNamespace(
+			name="FILE-1",
+			file_name="cv.pdf",
+			file_size=len(content),
+			custom_cv_sha256="",
+		)
+		with (
+			patch("frappe.get_doc", return_value=SimpleNamespace(get_content=lambda: content)),
+			patch("frappe.db.set_value") as set_value,
+		):
+			sha256 = _verified_candidate_cv_sha256(file_record)
+		self.assertEqual(sha256, hashlib.sha256(content).hexdigest())
+		set_value.assert_called_once()
+
+	def test_verified_hash_rejects_invalid_pdf_signature(self):
+		content = b"not-a-pdf"
+		file_record = SimpleNamespace(
+			name="FILE-2",
+			file_name="cv.pdf",
+			file_size=len(content),
+			custom_cv_sha256="",
+		)
+		with patch("frappe.get_doc", return_value=SimpleNamespace(get_content=lambda: content)):
+			with self.assertRaises(CandidateCVSecurityError):
+				_verified_candidate_cv_sha256(file_record)
 
 
 if __name__ == "__main__":
