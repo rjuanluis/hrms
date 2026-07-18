@@ -1,4 +1,5 @@
 import frappe
+from frappe import _
 from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
 
 from hrms.recruitment.talent_pool import backfill_candidate_profiles
@@ -62,7 +63,7 @@ CANDIDATE_PROFILE_FIELDS = {
 
 def execute():
 	if not frappe.db.exists("DocType", "AYP Candidate Profile"):
-		frappe.throw("AYP Candidate Profile no está disponible después de model sync.")
+		frappe.throw(_("AYP Candidate Profile no está disponible después de model sync."))
 	create_custom_fields(CANDIDATE_PROFILE_FIELDS, update=True)
 	frappe.clear_cache()
 	backfill_candidate_profiles()
