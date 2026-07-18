@@ -36,6 +36,20 @@ class CandidateCVSecurityError(frappe.ValidationError):
 	pass
 
 
+def _file_has_column(fieldname: str) -> bool:
+	return frappe.db.has_column("File", fieldname)
+
+
+def _persist_file_cv_sha256(file_name: str, sha256: str) -> None:
+	frappe.db.set_value(
+		"File",
+		file_name,
+		"custom_cv_sha256",
+		sha256,
+		update_modified=False,
+	)
+
+
 def _is_candidate_cv_upload() -> bool:
 	return (
 		frappe.form_dict.get("doctype") == "Job Applicant"
@@ -161,7 +175,7 @@ def _mark_file_clean(file_doc, *, sha256: str = "") -> None:
 		"custom_av_scan_engine": "ClamAV",
 		"custom_av_scanned_on": now_datetime(),
 	}
-	if sha256 and frappe.db.has_column("File", "custom_cv_sha256"):
+	if sha256 and _file_has_column("custom_cv_sha256"):
 		values["custom_cv_sha256"] = sha256
 	file_doc.db_set(values, update_modified=False)
 
@@ -232,13 +246,7 @@ def _verified_candidate_cv_sha256(file_record) -> str:
 	):
 		raise CandidateCVSecurityError(_("No se pudo verificar la integridad del CV cargado."))
 	if not file_record.custom_cv_sha256:
-		frappe.db.set_value(
-			"File",
-			file_record.name,
-			"custom_cv_sha256",
-			actual_sha256,
-			update_modified=False,
-		)
+		_persist_file_cv_sha256(file_record.name, actual_sha256)
 	return actual_sha256
 
 

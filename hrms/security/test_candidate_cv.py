@@ -122,7 +122,10 @@ class TestCandidateCVSecurity(unittest.TestCase):
 		file_doc = SimpleNamespace(
 			db_set=lambda values, update_modified=False: setattr(file_doc, "values", values)
 		)
-		with patch("frappe.db.has_column", return_value=True):
+		with (
+			patch("hrms.security.candidate_cv._file_has_column", return_value=True),
+			patch("hrms.security.candidate_cv.now_datetime", return_value="2026-07-18 10:00:00"),
+		):
 			_mark_file_clean(file_doc, sha256="a" * 64)
 		self.assertEqual(file_doc.values["custom_cv_sha256"], "a" * 64)
 		self.assertEqual(file_doc.values["custom_av_scan_status"], "Clean")
@@ -137,11 +140,11 @@ class TestCandidateCVSecurity(unittest.TestCase):
 		)
 		with (
 			patch("frappe.get_doc", return_value=SimpleNamespace(get_content=lambda: content)),
-			patch("frappe.db.set_value") as set_value,
+			patch("hrms.security.candidate_cv._persist_file_cv_sha256") as persist_sha256,
 		):
 			sha256 = _verified_candidate_cv_sha256(file_record)
 		self.assertEqual(sha256, hashlib.sha256(content).hexdigest())
-		set_value.assert_called_once()
+		persist_sha256.assert_called_once_with(file_record.name, sha256)
 
 	def test_verified_hash_rejects_invalid_pdf_signature(self):
 		content = b"not-a-pdf"
