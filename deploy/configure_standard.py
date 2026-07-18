@@ -54,7 +54,7 @@ DEPARTMENT_RENAMES = {
     "Taller y Servicio Técnico": "Centros de Servicio",
 }
 
-RECRUITMENT_PRIVACY_NOTICE_VERSION = "AYP-RH-2026-07-16-v2"
+RECRUITMENT_PRIVACY_NOTICE_VERSION = "AYP-RH-2026-07-17-v3"
 RECRUITMENT_WEB_FORM_ROUTE = "empleos/solicitud"
 RECRUITMENT_WEB_FORM_TITLE = "Solicitud de empleo — Aro y Pedal"
 RECRUITMENT_SELECT_OPTIONS = {
@@ -72,9 +72,10 @@ RECRUITMENT_SELECT_OPTIONS = {
 
 RECRUITMENT_INTRODUCTION = """
 <p><strong>Uso de tus datos:</strong> ARO Y PEDAL SRL utilizará la información que compartas
-únicamente para evaluar esta candidatura, contactarte sobre esta vacante y documentar el proceso
-de selección. El acceso se limita a RRHH, entrevistadores autorizados y Gerencia. No usaremos tus
-datos para marketing ni para una bolsa de empleo futura sin una autorización separada. Puedes
+para evaluar esta candidatura, documentar el proceso de selección y considerar tu perfil para
+esta u otras vacantes futuras de Aro y Pedal. Todo candidato real entra al talent pool interno; esto
+no autoriza mensajes ilimitados ni uso para marketing. El acceso se limita a RRHH, entrevistadores
+autorizados y Gerencia. Puedes
 solicitar acceso, corrección, cancelación u oposición escribiendo a
 <a href="mailto:recursoshumanos@aroypedal.com">recursoshumanos@aroypedal.com</a>.</p>
 <p>El currículum es opcional pero recomendado. Solo se aceptan PDF o DOCX, máximo 5 MB; se almacena
@@ -252,6 +253,14 @@ def ensure_recruitment_security_fields() -> None:
                     "read_only": 1,
                     "insert_after": "custom_av_scan_engine",
                 },
+                {
+                    "fieldname": "custom_cv_sha256",
+                    "label": "Candidate CV SHA-256",
+                    "fieldtype": "Data",
+                    "read_only": 1,
+                    "hidden": 1,
+                    "insert_after": "custom_av_scanned_on",
+                },
             ],
             "Job Applicant": [
                 {
@@ -305,10 +314,66 @@ def ensure_recruitment_security_fields() -> None:
                     "hidden": 1,
                     "insert_after": "custom_data_processing_consent",
                 },
+                {
+                    "fieldname": "custom_candidate_profile",
+                    "label": "Perfil canónico del candidato",
+                    "fieldtype": "Link",
+                    "options": "AYP Candidate Profile",
+                    "read_only": 1,
+                    "insert_after": "custom_privacy_notice_version",
+                },
+                {
+                    "fieldname": "custom_dedupe_status",
+                    "label": "Estado de deduplicación",
+                    "fieldtype": "Select",
+                    "options": "\nNuevo\nCoincidencia\nRevisión requerida\nManual",
+                    "read_only": 1,
+                    "insert_after": "custom_candidate_profile",
+                },
+                {
+                    "fieldname": "custom_cv_sha256",
+                    "label": "SHA-256 del CV",
+                    "fieldtype": "Data",
+                    "read_only": 1,
+                    "hidden": 1,
+                    "insert_after": "custom_dedupe_status",
+                },
+                {
+                    "fieldname": "custom_normalized_email",
+                    "label": "Correo normalizado",
+                    "fieldtype": "Data",
+                    "read_only": 1,
+                    "hidden": 1,
+                    "insert_after": "custom_cv_sha256",
+                },
+                {
+                    "fieldname": "custom_normalized_phone",
+                    "label": "Teléfono normalizado",
+                    "fieldtype": "Data",
+                    "read_only": 1,
+                    "hidden": 1,
+                    "insert_after": "custom_normalized_email",
+                },
             ],
         },
         update=True,
     )
+
+
+def backfill_candidate_profiles() -> int:
+    if not frappe.db.exists("DocType", "AYP Candidate Profile"):
+        raise RuntimeError("AYP Candidate Profile DocType is unavailable; run bench migrate first")
+
+    updated = 0
+    for applicant_name in frappe.get_all("Job Applicant", pluck="name"):
+        applicant = frappe.get_doc("Job Applicant", applicant_name)
+        if applicant.get("custom_candidate_profile"):
+            continue
+        applicant.save(ignore_permissions=True)
+        if not applicant.get("custom_candidate_profile"):
+            raise RuntimeError(f"Job Applicant {applicant.name} did not receive a candidate profile")
+        updated += 1
+    return updated
 
 
 def ensure_recruitment_web_form() -> str:
@@ -404,7 +469,7 @@ def ensure_recruitment_web_form() -> str:
             {
                 "fieldname": "custom_data_processing_consent",
                 "fieldtype": "Check",
-                "label": "He leído el aviso y acepto el tratamiento de mis datos para esta vacante",
+                "label": "He leído el aviso y autorizo el tratamiento de mis datos para esta vacante y futuras oportunidades de Aro y Pedal",
                 "reqd": 1,
             },
             {
@@ -479,6 +544,7 @@ def main() -> None:
         departments = ensure_departments()
         leave_period = ensure_active_leave_period()
         ensure_recruitment_security_fields()
+        candidate_profiles_backfilled = backfill_candidate_profiles()
         recruitment_web_form = ensure_recruitment_web_form()
         enable_restricted_guest_cv_uploads()
         set_default_language("es")
@@ -497,6 +563,7 @@ def main() -> None:
                 "departments": departments,
                 "leave_period": leave_period,
                 "recruitment_web_form": recruitment_web_form,
+                "candidate_profiles_backfilled": candidate_profiles_backfilled,
                 "guest_upload_doctypes": ["Job Applicant"],
                 "country": "Dominican Republic",
                 "currency": "DOP",

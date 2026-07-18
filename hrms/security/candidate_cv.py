@@ -29,7 +29,7 @@ PDF_ACTIVE_MARKERS = (
 	b"/aa",
 	b"/acroform",
 )
-PRIVACY_NOTICE_VERSION = "AYP-RH-2026-07-16-v2"
+PRIVACY_NOTICE_VERSION = "AYP-RH-2026-07-17-v3"
 
 
 class CandidateCVSecurityError(frappe.ValidationError):
@@ -155,12 +155,14 @@ def _scan_candidate_cv(content: bytes) -> None:
 		) from exc
 
 
-def _mark_file_clean(file_doc) -> None:
+def _mark_file_clean(file_doc, *, sha256: str = "") -> None:
 	values = {
 		"custom_av_scan_status": "Clean",
 		"custom_av_scan_engine": "ClamAV",
 		"custom_av_scanned_on": now_datetime(),
 	}
+	if sha256 and frappe.db.has_column("File", "custom_cv_sha256"):
+		values["custom_cv_sha256"] = sha256
 	file_doc.db_set(values, update_modified=False)
 
 
@@ -214,7 +216,7 @@ def mark_scanned_candidate_cv_file(file_doc, method=None) -> None:
 	):
 		raise CandidateCVSecurityError(_("No se pudo verificar la integridad del CV cargado."))
 
-	_mark_file_clean(file_doc)
+	_mark_file_clean(file_doc, sha256=preflight["sha256"])
 	frappe.local.candidate_cv_preflight = None
 
 
@@ -225,6 +227,8 @@ def validate_job_applicant_cv(doc, method=None) -> None:
 		doc.custom_privacy_notice_version = PRIVACY_NOTICE_VERSION
 
 	if not doc.resume_attachment:
+		if frappe.db.has_column("Job Applicant", "custom_cv_sha256"):
+			doc.custom_cv_sha256 = ""
 		return
 	av_fields = ("custom_av_scan_status", "custom_av_scan_engine", "custom_av_scanned_on")
 	if not all(frappe.db.has_column("File", fieldname) for fieldname in av_fields):
@@ -232,21 +236,24 @@ def validate_job_applicant_cv(doc, method=None) -> None:
 			_("El control antivirus todavía no está disponible. Intenta nuevamente en unos minutos.")
 		)
 
+	file_fields = [
+		"name",
+		"file_name",
+		"file_url",
+		"file_size",
+		"content_hash",
+		"is_private",
+		"custom_av_scan_status",
+		"attached_to_doctype",
+		"attached_to_name",
+		"attached_to_field",
+	]
+	if frappe.db.has_column("File", "custom_cv_sha256"):
+		file_fields.append("custom_cv_sha256")
 	file_record = frappe.db.get_value(
 		"File",
 		{"file_url": doc.resume_attachment},
-		[
-			"name",
-			"file_name",
-			"file_url",
-			"file_size",
-			"content_hash",
-			"is_private",
-			"custom_av_scan_status",
-			"attached_to_doctype",
-			"attached_to_name",
-			"attached_to_field",
-		],
+		file_fields,
 		as_dict=True,
 	)
 	invalid_attachment = (
@@ -267,6 +274,8 @@ def validate_job_applicant_cv(doc, method=None) -> None:
 		raise CandidateCVSecurityError(
 			_("El CV debe cargarse como archivo privado y pasar el control antivirus.")
 		)
+	if frappe.db.has_column("Job Applicant", "custom_cv_sha256"):
+		doc.custom_cv_sha256 = file_record.get("custom_cv_sha256") or ""
 
 
 def attach_job_applicant_cv(doc, method=None) -> None:

@@ -11,6 +11,7 @@ import frappe
 
 from hrms.security.candidate_cv import (
 	CandidateCVSecurityError,
+	_mark_file_clean,
 	guard_candidate_cv_upload,
 	scan_bytes_with_clamd,
 	validate_cv_file,
@@ -114,6 +115,15 @@ class TestCandidateCVSecurity(unittest.TestCase):
 		with patch("socket.create_connection", return_value=connection):
 			with self.assertRaises(CandidateCVSecurityError):
 				scan_bytes_with_clamd(b"eicar", host="clamav", port=3310)
+
+	def test_clean_file_persists_preflight_sha256_when_field_exists(self):
+		file_doc = SimpleNamespace(
+			db_set=lambda values, update_modified=False: setattr(file_doc, "values", values)
+		)
+		with patch("frappe.db.has_column", return_value=True):
+			_mark_file_clean(file_doc, sha256="a" * 64)
+		self.assertEqual(file_doc.values["custom_cv_sha256"], "a" * 64)
+		self.assertEqual(file_doc.values["custom_av_scan_status"], "Clean")
 
 
 if __name__ == "__main__":
