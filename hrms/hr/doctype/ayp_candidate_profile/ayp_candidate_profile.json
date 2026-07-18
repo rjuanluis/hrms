@@ -1,0 +1,209 @@
+{
+ "actions": [],
+ "allow_import": 0,
+ "allow_rename": 0,
+ "autoname": "format:AYP-CAND-{YYYY}-{#####}",
+ "creation": "2026-07-17 20:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "candidate_name",
+  "candidate_photo",
+  "contact_section",
+  "primary_email",
+  "primary_phone",
+  "normalized_email",
+  "normalized_phone",
+  "talent_pool_section",
+  "talent_pool_status",
+  "dedupe_status",
+  "do_not_contact",
+  "disposition_reason",
+  "disposition_column",
+  "disposition_on",
+  "disposition_by",
+  "applications_section",
+  "latest_application",
+  "application_count",
+  "latest_cv_sha256",
+  "privacy_notice_version"
+ ],
+ "fields": [
+  {
+   "fieldname": "candidate_name",
+   "fieldtype": "Data",
+   "in_global_search": 1,
+   "in_list_view": 1,
+   "label": "Nombre del candidato",
+   "reqd": 1
+  },
+  {
+   "fieldname": "candidate_photo",
+   "fieldtype": "Attach Image",
+   "label": "Foto privada del candidato"
+  },
+  {
+   "fieldname": "contact_section",
+   "fieldtype": "Section Break",
+   "label": "Contacto"
+  },
+  {
+   "fieldname": "primary_email",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Correo principal",
+   "options": "Email"
+  },
+  {
+   "fieldname": "primary_phone",
+   "fieldtype": "Data",
+   "label": "Teléfono principal",
+   "options": "Phone"
+  },
+  {
+   "fieldname": "normalized_email",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Correo normalizado",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "normalized_phone",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Teléfono normalizado",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "talent_pool_section",
+   "fieldtype": "Section Break",
+   "label": "Talent Pool"
+  },
+  {
+   "default": "Activo",
+   "fieldname": "talent_pool_status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Estado en Talent Pool",
+   "options": "Activo\nPrioritario\nSin interés\nEliminación solicitada\nDispuesto",
+   "reqd": 1
+  },
+  {
+   "default": "Nuevo",
+   "fieldname": "dedupe_status",
+   "fieldtype": "Select",
+   "label": "Estado de deduplicación",
+   "options": "Nuevo\nCoincidencia\nRevisión requerida\nManual",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "do_not_contact",
+   "fieldtype": "Check",
+   "label": "No contactar"
+  },
+  {
+   "depends_on": "eval:doc.do_not_contact || doc.talent_pool_status=='Sin interés' || doc.talent_pool_status=='Dispuesto' || doc.talent_pool_status=='Eliminación solicitada'",
+   "fieldname": "disposition_reason",
+   "fieldtype": "Small Text",
+   "label": "Razón de disposición"
+  },
+  {
+   "fieldname": "disposition_column",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "disposition_on",
+   "fieldtype": "Datetime",
+   "label": "Disposición registrada el",
+   "read_only": 1
+  },
+  {
+   "fieldname": "disposition_by",
+   "fieldtype": "Link",
+   "label": "Disposición registrada por",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "applications_section",
+   "fieldtype": "Section Break",
+   "label": "Aplicaciones"
+  },
+  {
+   "fieldname": "latest_application",
+   "fieldtype": "Link",
+   "label": "Última aplicación",
+   "options": "Job Applicant",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "application_count",
+   "fieldtype": "Int",
+   "label": "Cantidad de aplicaciones",
+   "read_only": 1
+  },
+  {
+   "fieldname": "latest_cv_sha256",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "SHA-256 del último CV",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "privacy_notice_version",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Versión del aviso de privacidad",
+   "read_only": 1
+  }
+ ],
+ "image_field": "candidate_photo",
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-07-17 20:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "HR",
+ "name": "AYP Candidate Profile",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "read": 1,
+   "report": 1,
+   "role": "HR User",
+   "write": 1
+  },
+  {
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "HR Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 0,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "show_name_in_global_search": 1,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "candidate_name",
+ "track_changes": 1
+}

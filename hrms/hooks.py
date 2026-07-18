@@ -216,9 +216,18 @@ doc_events = {
 		"after_delete": "hrms.overrides.employee_master.publish_update",
 	},
 	"Job Applicant": {
-		"validate": "hrms.security.candidate_cv.validate_job_applicant_cv",
-		"after_insert": "hrms.security.candidate_cv.attach_job_applicant_cv",
-		"on_update": "hrms.security.candidate_cv.attach_job_applicant_cv",
+		"validate": [
+			"hrms.security.candidate_cv.validate_job_applicant_cv",
+			"hrms.recruitment.talent_pool.link_job_applicant_profile",
+		],
+		"after_insert": [
+			"hrms.security.candidate_cv.attach_job_applicant_cv",
+			"hrms.recruitment.talent_pool.sync_candidate_profile",
+		],
+		"on_update": [
+			"hrms.security.candidate_cv.attach_job_applicant_cv",
+			"hrms.recruitment.talent_pool.sync_candidate_profile",
+		],
 	},
 	"File": {"after_insert": "hrms.security.candidate_cv.mark_scanned_candidate_cv_file"},
 	"Project": {"validate": "hrms.controllers.employee_boarding_controller.update_employee_boarding_status"},

@@ -26,7 +26,7 @@
  "module": "HR",
  "name": "job-application",
  "owner": "Administrator",
- "published": 1,
+ "published": 0,
  "route": "job_application",
  "show_attachments": 0,
  "show_list": 0,

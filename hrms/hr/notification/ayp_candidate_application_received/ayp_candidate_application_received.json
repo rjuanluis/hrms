@@ -1,0 +1,28 @@
+{
+ "attach_print": 0,
+ "channel": "Email",
+ "condition": "doc.email_id and doc.get('custom_data_processing_consent')",
+ "creation": "2026-07-17 20:30:00.000000",
+ "days_in_advance": 0,
+ "docstatus": 0,
+ "doctype": "Notification",
+ "document_type": "Job Applicant",
+ "enabled": 1,
+ "event": "New",
+ "idx": 0,
+ "is_standard": 1,
+ "message": "<p>Hola,</p><p>Recibimos tu solicitud de empleo en Aro y Pedal.</p><p>El equipo de Recursos Humanos revisará la información. Si tu perfil avanza o necesitamos completar algún dato, nos comunicaremos contigo. No necesitas crear una cuenta ni reservar una cita en un calendario: RRHH coordinará directamente contigo cuando corresponda.</p><p>Tu perfil quedará disponible en el talent pool interno de Aro y Pedal para esta y futuras oportunidades, según el aviso aceptado al enviar la solicitud. Puedes solicitar acceso, corrección, cancelación u oposición escribiendo a <a href=\"mailto:recursoshumanos@aroypedal.com\">recursoshumanos@aroypedal.com</a>.</p><p>Gracias por tu interés en Aro y Pedal.</p>",
+ "modified": "2026-07-17 20:30:00.000000",
+ "modified_by": "Administrator",
+ "module": "HR",
+ "name": "AYP Candidate Application Received",
+ "owner": "Administrator",
+ "recipients": [
+  {
+   "receiver_by_document_field": "email_id"
+  }
+ ],
+ "send_system_notification": 0,
+ "send_to_all_assignees": 0,
+ "subject": "Recibimos tu solicitud — Aro y Pedal"
+}

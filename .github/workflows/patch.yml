@@ -20,6 +20,10 @@ concurrency:
   group: patch-develop-${{ github.event_name }}-${{ github.event.number || github.event_name == 'workflow_dispatch' && github.run_id || '' }}
   cancel-in-progress: true
 
+env:
+  FRAPPE_BRANCH: version-16
+  ERPNEXT_BRANCH: version-16
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -150,9 +154,9 @@ jobs:
           update_to_version 15 3.13
 
           echo "Updating to latest version"
-          git -C "apps/frappe" fetch --depth 1 upstream "${GITHUB_BASE_REF:-${GITHUB_REF##*/}}"
+          git -C "apps/frappe" fetch --depth 1 upstream "$FRAPPE_BRANCH"
           git -C "apps/frappe" checkout -q -f FETCH_HEAD
-          git -C "apps/erpnext" fetch --depth 1 upstream "${GITHUB_BASE_REF:-${GITHUB_REF##*/}}"
+          git -C "apps/erpnext" fetch --depth 1 upstream "$ERPNEXT_BRANCH"
           git -C "apps/erpnext" checkout -q -f FETCH_HEAD
           git -C "apps/hrms" checkout -q -f "$GITHUB_SHA"
 
@@ -164,6 +168,81 @@ jobs:
           bench start &>> ~/frappe-bench/bench_start.log &
 
           bench --site test_site migrate
+
+      - name: Run disposable AyP configuration smoke
+        env:
+          AYP_SITE_NAME: ayp-smoke.local
+          AYP_SITES_DIR: /home/runner/frappe-bench/sites
+        run: |
+          set -Eeuo pipefail
+          cd ~/frappe-bench
+          export AYP_ADMIN_PASSWORD="$(./env/bin/python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+
+          bench new-site "$AYP_SITE_NAME" \
+            --db-type mariadb \
+            --mariadb-root-password root \
+            --admin-password "$AYP_ADMIN_PASSWORD" \
+            --no-mariadb-socket
+          bench --site "$AYP_SITE_NAME" install-app erpnext
+          bench --site "$AYP_SITE_NAME" install-app hrms
+          bench --site "$AYP_SITE_NAME" migrate
+
+          ./env/bin/python "$GITHUB_WORKSPACE/deploy/configure_standard.py"
+          ./env/bin/python "$GITHUB_WORKSPACE/deploy/configure_standard.py"
+
+          ./env/bin/python - <<'PY'
+          import os
+
+          import frappe
+
+          site = os.environ["AYP_SITE_NAME"]
+          sites_path = os.environ["AYP_SITES_DIR"]
+          os.chdir(sites_path)
+          frappe.init(site=site)
+          frappe.connect()
+          try:
+              assert frappe.db.exists("Company", "ARO Y PEDAL SRL")
+
+              published_forms = frappe.get_all(
+                  "Web Form",
+                  filters={"doc_type": "Job Applicant", "published": 1},
+                  fields=["name", "route"],
+              )
+              assert len(published_forms) == 1, published_forms
+              assert published_forms[0]["route"] == "empleos/solicitud", published_forms
+
+              for doctype, fieldname in (
+                  ("File", "custom_av_scan_status"),
+                  ("File", "custom_cv_sha256"),
+                  ("Job Applicant", "custom_candidate_profile"),
+                  ("Job Applicant", "custom_data_processing_consent"),
+              ):
+                  assert frappe.get_meta(doctype).has_field(fieldname), (doctype, fieldname)
+
+              notification = frappe.get_doc("Notification", "AYP Candidate Application Received")
+              assert notification.enabled == 1
+              assert notification.document_type == "Job Applicant"
+              assert notification.event == "New"
+              assert len(notification.recipients) == 1
+              assert notification.recipients[0].receiver_by_document_field == "email_id"
+
+              sent_count = frappe.db.count("Email Queue", {"status": "Sent"})
+              assert sent_count == 0
+              queue_count = frappe.db.count("Email Queue")
+              print(
+                  {
+                      "status": "configuration-smoke-pass",
+                      "site": site,
+                      "published_job_applicant_forms": published_forms,
+                      "notification": notification.name,
+                      "email_queue_count": queue_count,
+                      "sent_email_count": sent_count,
+                      "configure_runs": 2,
+                  }
+              )
+          finally:
+              frappe.destroy()
+          PY
 
       - name: Show bench output
         if: ${{ always() }}
