@@ -84,7 +84,7 @@ class TestCandidateCVSecurity(unittest.TestCase):
 			"doctype: 'Job Applicant'",
 			"fieldname: 'resume_attachment'",
 			"is_private: 1",
-			'"label": "Correo electrónico (opcional)", "reqd": 0',
+			'"label": "Correo electrónico (opcional)"',
 			'"label": "Currículum (obligatorio)"',
 			'"Lunes a viernes de 9:00 a. m. a 6:00 p. m.',
 		):

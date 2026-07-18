@@ -412,7 +412,12 @@ def ensure_recruitment_web_form() -> tuple[str, list[str]]:
 				"description": "Vacante a la que aplicas.",
 			},
 			{"fieldname": "applicant_name", "fieldtype": "Data", "label": "Nombre completo", "reqd": 1},
-			{"fieldname": "email_id", "fieldtype": "Data", "label": "Correo electrónico (opcional)", "reqd": 0},
+			{
+				"fieldname": "email_id",
+				"fieldtype": "Data",
+				"label": "Correo electrónico (opcional)",
+				"reqd": 0,
+			},
 			{"fieldname": "phone_number", "fieldtype": "Data", "label": "Teléfono", "reqd": 1},
 			{
 				"fieldname": "custom_years_sales_experience",

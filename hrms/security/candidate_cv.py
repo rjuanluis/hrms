@@ -194,9 +194,7 @@ def guard_candidate_cv_upload() -> None:
 		return
 
 	if frappe.session.user == "Guest" and not _is_candidate_cv_upload():
-		raise CandidateCVSecurityError(
-			_("Los visitantes solo pueden cargar un CV en el campo autorizado.")
-		)
+		raise CandidateCVSecurityError(_("Los visitantes solo pueden cargar un CV en el campo autorizado."))
 	if _is_candidate_cv_upload():
 		_preflight_candidate_cv_upload()
 
