@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import unicodedata
 from collections.abc import Mapping
@@ -7,6 +8,21 @@ from collections.abc import Mapping
 DEDUPE_NEW = "Nuevo"
 DEDUPE_MATCHED = "Coincidencia"
 DEDUPE_REVIEW = "Revisión requerida"
+
+
+def candidate_lock_names(*, email: str, phone: str, cv_sha256: str) -> tuple[str, ...]:
+	signals = {"email": email, "phone": phone, "cv": cv_sha256}
+	return tuple(
+		sorted(
+			f"ayp-candidate-{kind}-{hashlib.sha256(value.encode()).hexdigest()[:32]}"
+			for kind, value in signals.items()
+			if value
+		)
+	)
+
+
+def requires_name_compatibility(matching_signals: list[str]) -> bool:
+	return len(matching_signals) == 1
 
 
 def normalize_email(value: str | None) -> str:

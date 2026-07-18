@@ -7,22 +7,26 @@ if __package__:
 		DEDUPE_MATCHED,
 		DEDUPE_NEW,
 		DEDUPE_REVIEW,
+		candidate_lock_names,
 		choose_profile_match,
 		names_are_compatible,
 		normalize_email,
 		normalize_name,
 		normalize_phone,
+		requires_name_compatibility,
 	)
 else:
 	from matching import (
 		DEDUPE_MATCHED,
 		DEDUPE_NEW,
 		DEDUPE_REVIEW,
+		candidate_lock_names,
 		choose_profile_match,
 		names_are_compatible,
 		normalize_email,
 		normalize_name,
 		normalize_phone,
+		requires_name_compatibility,
 	)
 
 
@@ -85,6 +89,23 @@ class TestTalentPoolMatching(unittest.TestCase):
 			),
 			(None, DEDUPE_REVIEW),
 		)
+
+	def test_same_email_uses_overlapping_lock_even_when_phone_changes(self):
+		first = set(
+			candidate_lock_names(email="persona@example.com", phone="+18095550123", cv_sha256="a" * 64)
+		)
+		second = set(
+			candidate_lock_names(email="persona@example.com", phone="+18295550123", cv_sha256="b" * 64)
+		)
+		self.assertEqual(len(first & second), 1)
+		self.assertTrue(all("persona@example.com" not in lock_name for lock_name in first | second))
+		self.assertTrue(all(len(lock_name) <= 64 for lock_name in first | second))
+
+	def test_single_cv_signal_requires_name_compatibility(self):
+		self.assertTrue(requires_name_compatibility(["cv"]))
+
+	def test_multiple_matching_signals_do_not_require_name_gate(self):
+		self.assertFalse(requires_name_compatibility(["email", "cv"]))
 
 
 if __name__ == "__main__":

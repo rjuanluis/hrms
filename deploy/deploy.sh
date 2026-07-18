@@ -161,6 +161,19 @@ compose run --rm \
 compose restart backend frontend websocket queue-short queue-long scheduler >/dev/null
 wait_for_compose
 
+echo "Verifying public recruitment routes"
+canonical_form="$(curl -fsSL --max-time 30 "https://$SITE_NAME/empleos/solicitud/new")"
+if [[ "$canonical_form" != *"Solicitud de empleo — Aro y Pedal"* ]] \
+  || [[ "$canonical_form" != *"futuras oportunidades de Aro y Pedal"* ]]; then
+  echo "Canonical recruitment form is missing the expected title or privacy consent" >&2
+  exit 6
+fi
+legacy_form="$(curl -sSL --max-time 30 "https://$SITE_NAME/job_application/new" || true)"
+if [[ "$legacy_form" == *"Resume Link"* ]] || [[ "$legacy_form" == *"Expected Salary Range per month"* ]]; then
+  echo "Legacy recruitment form is still publicly available" >&2
+  exit 7
+fi
+
 python3 - "$IMAGE" <<'PY'
 import json, sys
 from datetime import datetime, timezone

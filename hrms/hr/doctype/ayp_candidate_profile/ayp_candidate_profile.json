@@ -1,7 +1,7 @@
 {
  "actions": [],
- "allow_import": 1,
- "allow_rename": 1,
+ "allow_import": 0,
+ "allow_rename": 0,
  "autoname": "format:AYP-CAND-{YYYY}-{#####}",
  "creation": "2026-07-17 20:00:00.000000",
  "doctype": "DocType",
@@ -87,7 +87,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Estado en Talent Pool",
-   "options": "Activo\nPrioritario\nNo contactar\nSin interés\nEliminación solicitada\nDispuesto",
+   "options": "Activo\nPrioritario\nSin interés\nEliminación solicitada\nDispuesto",
    "reqd": 1
   },
   {
@@ -105,7 +105,7 @@
    "label": "No contactar"
   },
   {
-   "depends_on": "eval:doc.talent_pool_status=='Sin interés' || doc.talent_pool_status=='Dispuesto' || doc.talent_pool_status=='Eliminación solicitada'",
+   "depends_on": "eval:doc.do_not_contact || doc.talent_pool_status=='Sin interés' || doc.talent_pool_status=='Dispuesto' || doc.talent_pool_status=='Eliminación solicitada'",
    "fieldname": "disposition_reason",
    "fieldtype": "Small Text",
    "label": "Razón de disposición"
@@ -172,14 +172,12 @@
  "owner": "Administrator",
  "permissions": [
   {
-   "create": 1,
    "read": 1,
    "report": 1,
    "role": "HR User",
    "write": 1
   },
   {
-   "create": 1,
    "email": 1,
    "export": 1,
    "print": 1,

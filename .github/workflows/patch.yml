@@ -20,6 +20,10 @@ concurrency:
   group: patch-develop-${{ github.event_name }}-${{ github.event.number || github.event_name == 'workflow_dispatch' && github.run_id || '' }}
   cancel-in-progress: true
 
+env:
+  FRAPPE_BRANCH: version-16
+  ERPNEXT_BRANCH: version-16
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -150,9 +154,9 @@ jobs:
           update_to_version 15 3.13
 
           echo "Updating to latest version"
-          git -C "apps/frappe" fetch --depth 1 upstream "${GITHUB_BASE_REF:-${GITHUB_REF##*/}}"
+          git -C "apps/frappe" fetch --depth 1 upstream "$FRAPPE_BRANCH"
           git -C "apps/frappe" checkout -q -f FETCH_HEAD
-          git -C "apps/erpnext" fetch --depth 1 upstream "${GITHUB_BASE_REF:-${GITHUB_REF##*/}}"
+          git -C "apps/erpnext" fetch --depth 1 upstream "$ERPNEXT_BRANCH"
           git -C "apps/erpnext" checkout -q -f FETCH_HEAD
           git -C "apps/hrms" checkout -q -f "$GITHUB_SHA"
 
