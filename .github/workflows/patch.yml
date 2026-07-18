@@ -197,7 +197,8 @@ jobs:
 
           site = os.environ["AYP_SITE_NAME"]
           sites_path = os.environ["AYP_SITES_DIR"]
-          frappe.init(site=site, sites_path=sites_path)
+          os.chdir(sites_path)
+          frappe.init(site=site)
           frappe.connect()
           try:
               assert frappe.db.exists("Company", "ARO Y PEDAL SRL")
