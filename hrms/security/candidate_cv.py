@@ -193,9 +193,10 @@ def guard_candidate_cv_upload() -> None:
 	if not _is_upload_endpoint():
 		return
 
-	is_job_applicant_upload = frappe.form_dict.get("doctype") == "Job Applicant"
-	if frappe.session.user == "Guest" and is_job_applicant_upload and not _is_candidate_cv_upload():
-		raise CandidateCVSecurityError(_("Los visitantes solo pueden cargar un CV en el campo autorizado."))
+	if frappe.session.user == "Guest" and not _is_candidate_cv_upload():
+		raise CandidateCVSecurityError(
+			_("Los visitantes solo pueden cargar un CV en el campo autorizado.")
+		)
 	if _is_candidate_cv_upload():
 		_preflight_candidate_cv_upload()
 

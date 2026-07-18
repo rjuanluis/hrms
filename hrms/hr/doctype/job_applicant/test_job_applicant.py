@@ -33,6 +33,18 @@ class TestJobApplicant(HRMSTestSuite):
 		).insert()
 		self.assertEqual(applicant.name, "job_applicant_naming@example.com-1")
 
+	def test_job_applicant_without_email_uses_series_name(self):
+		applicant = frappe.get_doc(
+			{
+				"doctype": "Job Applicant",
+				"status": "Open",
+				"applicant_name": "_Test Applicant Without Email",
+				"phone_number": "+18095550199",
+			}
+		).insert()
+		self.assertTrue(applicant.name.startswith(f"HR-APP-{nowdate()[:4]}-"))
+		self.assertFalse(applicant.email_id)
+
 	def test_update_applicant_to_employee(self):
 		applicant = create_job_applicant()
 		job_offer = create_job_offer(
