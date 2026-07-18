@@ -19,7 +19,7 @@ TAX_ID = "101-57005-9"
 ADMIN_EMAIL = "juanluis@aroypedal.com"
 LEAVE_PERIOD_START = "2026-01-01"
 LEAVE_PERIOD_END = "2026-12-31"
-SITES_DIR = Path("/home/frappe/frappe-bench/sites")
+SITES_DIR = Path(os.environ.get("AYP_SITES_DIR", "/home/frappe/frappe-bench/sites"))
 SECRETS_DIR = Path(os.environ.get("AYP_SECRETS_DIR", "/run/ayp-secrets"))
 BRANCHES = (
 	{
