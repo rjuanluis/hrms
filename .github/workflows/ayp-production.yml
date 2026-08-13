@@ -98,12 +98,22 @@ jobs:
         id: image
         run: echo "value=${REGISTRY}/${IMAGE_NAME}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
-      - name: Stage AyP document queue executable in production build context
+      - name: Stage AyP document processing runtime in production build context
         run: |
           install -m 0755 docker/configure_ayp_document_queue.py \
             frappe_docker/configure_ayp_document_queue.py
           cat >> frappe_docker/images/layered/Containerfile <<'EOF'
           USER root
+          RUN mkdir -p /var/lib/apt/lists/partial \
+              && apt-get update -qq \
+              && apt-get install -y --no-install-recommends \
+                antiword \
+                libheif-examples \
+                poppler-utils \
+                tesseract-ocr \
+                tesseract-ocr-eng \
+                tesseract-ocr-spa \
+              && rm -rf /var/lib/apt/lists/*
           COPY --chown=frappe:frappe configure_ayp_document_queue.py /usr/local/bin/configure-ayp-document-queue
           RUN chmod 0755 /usr/local/bin/configure-ayp-document-queue
           USER frappe
@@ -140,6 +150,18 @@ jobs:
       - name: Test candidate CV security in production image
         run: |
           docker pull "${{ steps.image.outputs.value }}"
+          docker run --rm --entrypoint bash "${{ steps.image.outputs.value }}" -ec '
+            for executable in pdfinfo pdftotext pdftoppm tesseract antiword heif-convert; do
+              command -v "$executable" >/dev/null
+            done
+            tesseract --list-langs 2>&1 | grep -Fxq eng
+            tesseract --list-langs 2>&1 | grep -Fxq spa
+            pdfinfo -v 2>&1 | grep -q "pdfinfo version"
+            pdftotext -v 2>&1 | grep -q "pdftotext version"
+            pdftoppm -v 2>&1 | grep -q "pdftoppm version"
+            antiword -h 2>&1 | grep -q "Antiword"
+            heif-convert --help 2>&1 | grep -q "heif-convert"
+          '
           docker run --rm --entrypoint /usr/local/bin/configure-ayp-document-queue \
             "${{ steps.image.outputs.value }}" /tmp/common_site_config.json | \
             python -c 'import json,sys; result=json.load(sys.stdin); assert result == {"background_workers": 1, "queue": "documents", "timeout": 600}'
