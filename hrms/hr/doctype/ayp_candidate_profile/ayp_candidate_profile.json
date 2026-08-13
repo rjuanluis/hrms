@@ -17,6 +17,9 @@
   "talent_pool_section",
   "talent_pool_status",
   "dedupe_status",
+  "merged_into",
+  "merged_on",
+  "merged_by",
   "do_not_contact",
   "disposition_reason",
   "disposition_column",
@@ -87,7 +90,8 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Estado en Talent Pool",
-   "options": "Activo\nPrioritario\nSin interés\nEliminación solicitada\nDispuesto",
+   "options": "Activo\nPrioritario\nSin interés\nEliminación solicitada\nDispuesto\nFusionado",
+   "read_only": 1,
    "reqd": 1
   },
   {
@@ -99,16 +103,42 @@
    "read_only": 1
   },
   {
+   "fieldname": "merged_into",
+   "fieldtype": "Link",
+   "label": "Fusionado en",
+   "no_copy": 1,
+   "options": "AYP Candidate Profile",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "merged_on",
+   "fieldtype": "Datetime",
+   "label": "Fusionado el",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "merged_by",
+   "fieldtype": "Link",
+   "label": "Fusionado por",
+   "no_copy": 1,
+   "options": "User",
+   "read_only": 1
+  },
+  {
    "default": "0",
    "fieldname": "do_not_contact",
    "fieldtype": "Check",
-   "label": "No contactar"
+   "label": "No contactar",
+   "read_only": 1
   },
   {
    "depends_on": "eval:doc.do_not_contact || doc.talent_pool_status=='Sin interés' || doc.talent_pool_status=='Dispuesto' || doc.talent_pool_status=='Eliminación solicitada'",
    "fieldname": "disposition_reason",
    "fieldtype": "Small Text",
-   "label": "Razón de disposición"
+   "label": "Razón de disposición",
+   "read_only": 1
   },
   {
    "fieldname": "disposition_column",

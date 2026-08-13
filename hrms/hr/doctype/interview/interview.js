@@ -129,6 +129,17 @@ frappe.ui.form.on("Interview", {
 
 	show_feedback_dialog: async function (frm, data) {
 		let fields = await frm.events.get_fields_for_feedback();
+		const structured_questions = (frm.doc.custom_ayp_questions_snapshot || "")
+			.split("\n")
+			.map((line) => line.trim())
+			.filter((line) => /^\d+\./.test(line));
+		const evidence_fields = structured_questions.map((question, index) => ({
+			fieldname: `ayp_evidence_${index + 1}`,
+			fieldtype: "Small Text",
+			label: question,
+			description: __("Registra una observación concreta de al menos 10 caracteres."),
+			reqd: 1,
+		}));
 
 		let d = new frappe.ui.Dialog({
 			title: __("Submit Feedback"),
@@ -155,13 +166,24 @@ frappe.ui.form.on("Interview", {
 					fieldtype: "Small Text",
 					label: __("Feedback"),
 				},
+				...(evidence_fields.length
+					? [
+							{
+								fieldtype: "Section Break",
+								label: __("Evidencia estructurada AyP"),
+							},
+							...evidence_fields,
+						]
+					: []),
 			],
 			size: "large",
 			minimizable: true,
 			static: true,
-			primary_action: function (values) {
-				frappe
-					.call({
+			primary_action: async function (values) {
+				values.custom_ayp_question_evidence = evidence_fields
+					.map((_field, index) => values[`ayp_evidence_${index + 1}`])
+					.join("\n");
+				await frappe.call({
 						method: "hrms.hr.doctype.interview.interview.create_interview_feedback",
 						args: {
 							data: values,
@@ -169,11 +191,9 @@ frappe.ui.form.on("Interview", {
 							interviewer: frappe.session.user,
 							job_applicant: frm.doc.job_applicant,
 						},
-					})
-					.then(() => {
-						frm.refresh();
 					});
 				d.hide();
+				await frm.refresh();
 			},
 		});
 		d.show();

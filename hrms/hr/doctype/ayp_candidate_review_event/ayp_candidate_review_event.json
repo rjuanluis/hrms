@@ -1,0 +1,117 @@
+{
+ "actions": [],
+ "allow_import": 0,
+ "allow_rename": 0,
+ "autoname": "hash",
+ "creation": "2026-08-11 20:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "batch_id",
+  "applicant",
+  "candidate_profile",
+  "job_opening",
+  "action",
+  "previous_status",
+  "new_status",
+  "reason",
+  "actor",
+  "occurred_on"
+ ],
+ "fields": [
+  {
+   "fieldname": "batch_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Lote",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "applicant",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Aplicación",
+   "options": "Job Applicant",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "candidate_profile",
+   "fieldtype": "Link",
+   "label": "Perfil canónico",
+   "options": "AYP Candidate Profile"
+  },
+  {
+   "fieldname": "job_opening",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Vacante",
+   "options": "Job Opening",
+   "search_index": 1
+  },
+  {
+   "default": "Cambio de estado",
+   "fieldname": "action",
+   "fieldtype": "Data",
+   "label": "Acción",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "previous_status",
+   "fieldtype": "Data",
+   "label": "Estado anterior",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "new_status",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Estado nuevo",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "reason",
+   "fieldtype": "Small Text",
+   "label": "Motivo",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "actor",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Revisado por",
+   "options": "User",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "occurred_on",
+   "fieldtype": "Datetime",
+   "in_list_view": 1,
+   "label": "Fecha de revisión",
+   "read_only": 1,
+   "reqd": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-08-11 20:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "HR",
+ "name": "AYP Candidate Review Event",
+ "owner": "Administrator",
+ "permissions": [
+  {"read": 1, "report": 1, "role": "HR User"},
+  {"export": 1, "read": 1, "report": 1, "role": "HR Manager"},
+  {"export": 1, "read": 1, "report": 1, "role": "System Manager"}
+ ],
+ "sort_field": "occurred_on",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}

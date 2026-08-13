@@ -3,6 +3,8 @@
 
 
 import datetime
+import hashlib
+from functools import partial
 
 import frappe
 from frappe import _
@@ -10,9 +12,43 @@ from frappe.model.document import Document
 from frappe.query_builder.functions import Avg
 from frappe.utils import cint, cstr, get_datetime, get_link_to_form, getdate, nowtime
 
+from hrms.recruitment.interview_decision_domain import (
+	InterviewDecisionValidationError,
+	validate_interview_backed_application_decision,
+)
+from hrms.recruitment.interview_governance import (
+	CONCURRENT_CHANGE_MESSAGE,
+	lock_ayp_interview_decision_dependencies,
+)
+
 
 class DuplicateInterviewRoundError(frappe.ValidationError):
 	pass
+
+
+AYP_INTERVIEW_TYPE = "AyP - Entrevista estructurada"
+INTERVIEW_LOCK_TIMEOUT_SECONDS = 10
+
+
+def _release_interview_lock(lock_name: str) -> None:
+	frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_name,))
+	getattr(frappe.local, "ayp_interview_locks", set()).discard(lock_name)
+
+
+def acquire_ayp_interview_lock(job_applicant: str, interview_type: str) -> None:
+	digest = hashlib.sha256(f"{job_applicant}\0{interview_type}".encode()).hexdigest()[:40]
+	lock_name = f"ayp-interview:{digest}"
+	held = getattr(frappe.local, "ayp_interview_locks", set())
+	frappe.local.ayp_interview_locks = held
+	if lock_name in held:
+		return
+	result = frappe.db.sql("SELECT GET_LOCK(%s, %s)", (lock_name, INTERVIEW_LOCK_TIMEOUT_SECONDS))
+	if not result or result[0][0] != 1:
+		frappe.throw(_("No pudimos reservar la entrevista. Intenta nuevamente."), frappe.ValidationError)
+	held.add(lock_name)
+	release = partial(_release_interview_lock, lock_name)
+	frappe.db.after_commit.add(release)
+	frappe.db.after_rollback.add(release)
 
 
 class Interview(Document):
@@ -55,10 +91,26 @@ class Interview(Document):
 			)
 		self.show_job_applicant_update_dialog()
 
+	def cancel(self):
+		is_ayp = bool(str(self.get("custom_ayp_questions_snapshot") or "").strip())
+		try:
+			return super().cancel()
+		except frappe.QueryDeadlockError:
+			if is_ayp:
+				raise frappe.ValidationError(CONCURRENT_CHANGE_MESSAGE)
+			raise
+
 	def validate_duplicate_interview(self):
+		if self.interview_type == AYP_INTERVIEW_TYPE:
+			acquire_ayp_interview_lock(self.job_applicant, self.interview_type)
 		duplicate_interview = frappe.db.exists(
 			"Interview",
-			{"job_applicant": self.job_applicant, "interview_type": self.interview_type, "docstatus": 1},
+			{
+				"name": ["!=", self.name],
+				"job_applicant": self.job_applicant,
+				"interview_type": self.interview_type,
+				"docstatus": ["!=", 2] if self.interview_type == AYP_INTERVIEW_TYPE else 1,
+			},
 		)
 
 		if duplicate_interview:
@@ -99,7 +151,11 @@ class Interview(Document):
 			primary_action={
 				"label": _("Mark as {0}").format(job_applicant_status),
 				"server_action": "hrms.hr.doctype.interview.interview.update_job_applicant_status",
-				"args": {"job_applicant": self.job_applicant, "status": job_applicant_status},
+				"args": {
+					"job_applicant": self.job_applicant,
+					"status": job_applicant_status,
+					"interview": self.name,
+				},
 			},
 		)
 
@@ -107,7 +163,7 @@ class Interview(Document):
 		status_map = {"Cleared": "Accepted", "Rejected": "Rejected"}
 		return status_map.get(self.status, None)
 
-	@frappe.whitelist()
+	@frappe.whitelist(methods=["POST"])
 	def reschedule_interview(
 		self, scheduled_on: datetime.date, from_time: datetime.time, to_time: datetime.time
 	) -> None:
@@ -171,13 +227,22 @@ def get_recipients(name, for_feedback=0):
 		recipients = [d for d in interviewers if d not in feedback_given_interviewers]
 	else:
 		recipients = interviewers
-		recipients.append(frappe.db.get_value("Job Applicant", interview.job_applicant, "email_id"))
+		if not candidate_contact_is_blocked(interview.job_applicant):
+			recipients.append(frappe.db.get_value("Job Applicant", interview.job_applicant, "email_id"))
 
-	return recipients
+	return [recipient for recipient in recipients if recipient]
+
+
+def candidate_contact_is_blocked(job_applicant: str) -> bool:
+	profile = frappe.db.get_value("Job Applicant", job_applicant, "custom_candidate_profile")
+	if not profile:
+		return False
+	return bool(frappe.db.get_value("AYP Candidate Profile", profile, "do_not_contact"))
 
 
 @frappe.whitelist()
 def get_feedback(interview: str) -> list[dict]:
+	frappe.has_permission("Interview", "read", interview, throw=True)
 	frappe.has_permission("Interview Feedback", "read", throw=True)
 
 	interview_feedback = frappe.qb.DocType("Interview Feedback")
@@ -187,6 +252,7 @@ def get_feedback(interview: str) -> list[dict]:
 		frappe.qb.from_(interview_feedback)
 		.select(
 			interview_feedback.name,
+			interview_feedback.result,
 			interview_feedback.modified.as_("added_on"),
 			interview_feedback.interviewer.as_("user"),
 			interview_feedback.feedback,
@@ -220,28 +286,84 @@ def get_skill_wise_average_rating(interview: str) -> list[dict]:
 	).run(as_dict=True)
 
 
-@frappe.whitelist()
-def update_job_applicant_status(status: str, job_applicant: str):
+@frappe.whitelist(methods=["POST"])
+def update_job_applicant_status(status: str, job_applicant: str, interview: str | None = None):
+	if not job_applicant:
+		frappe.throw(_("Please specify the job applicant to be updated."))
+	if status not in {"Accepted", "Rejected"}:
+		frappe.throw(_("Only final interview decisions can update the applicant from this action."))
+	if not interview:
+		frappe.throw(_("A submitted interview is required for the final decision."), frappe.ValidationError)
+
+	frappe.has_permission("Job Applicant", "write", job_applicant, throw=True)
 	try:
-		if not job_applicant:
-			frappe.throw(_("Please specify the job applicant to be updated."))
-
-		job_applicant = frappe.get_doc("Job Applicant", job_applicant)
-		job_applicant.status = status
-		job_applicant.save()
-
-		frappe.msgprint(
-			_("Updated the Job Applicant status to {0}").format(job_applicant.status),
-			alert=True,
-			indicator="green",
+		interview_doc, applicant_doc, feedback_rows = lock_ayp_interview_decision_dependencies(
+			interview,
+			job_applicant,
 		)
-	except Exception:
-		job_applicant.log_error("Failed to update Job Applicant status")
-		frappe.msgprint(
-			_("Failed to update the Job Applicant status"),
-			alert=True,
-			indicator="red",
+		frappe.has_permission("Interview", "read", interview_doc, throw=True)
+		locked_feedback_names = {row.name for row in feedback_rows if row.docstatus == 1}
+		locked_feedback_interviewers = {row.interviewer for row in feedback_rows if row.docstatus == 1}
+		if applicant_doc.get("custom_ayp_governed"):
+			assigned_interviewers = {row.interviewer for row in interview_doc.interview_details if row.interviewer}
+			if not locked_feedback_names or not assigned_interviewers.issubset(locked_feedback_interviewers):
+				frappe.throw(
+					_("La decisión final exige feedback enviado y vigente de todas las personas entrevistadoras."),
+					frappe.ValidationError,
+				)
+		try:
+			validate_interview_backed_application_decision(
+				job_applicant,
+				status,
+				interview_doc,
+				require_ayp=bool(applicant_doc.get("custom_ayp_governed")),
+			)
+		except InterviewDecisionValidationError as exc:
+			frappe.throw(_(str(exc)), frappe.ValidationError)
+
+		previous_status = applicant_doc.status
+		if previous_status == status:
+			frappe.msgprint(_("The Job Applicant is already marked as {0}.").format(status), alert=True)
+			return
+		frappe.flags.ayp_interview_decision = True
+		try:
+			applicant_doc.status = status
+			if applicant_doc.get("custom_ayp_governed"):
+				applicant_doc.custom_ayp_final_interview = interview_doc.name
+			applicant_doc.save()
+		finally:
+			frappe.flags.ayp_interview_decision = False
+		frappe.get_doc(
+			{
+				"doctype": "AYP Candidate Review Event",
+				"batch_id": "interview:{0}".format(interview_doc.name),
+				"applicant": applicant_doc.name,
+				"candidate_profile": applicant_doc.custom_candidate_profile or "",
+				"job_opening": applicant_doc.job_title or "",
+				"action": "Interview Decision",
+				"previous_status": previous_status,
+				"new_status": status,
+				"reason": interview_doc.custom_ayp_decision_rationale
+				or _("Decision recorded from a submitted standard interview."),
+				"actor": frappe.session.user,
+				"occurred_on": frappe.utils.now_datetime(),
+			}
+		).insert(ignore_permissions=True)
+		applicant_doc.add_comment(
+			comment_type="Info",
+			text=_("Final decision {0} confirmed from submitted Interview {1}.").format(
+				status,
+				interview_doc.name,
+			),
 		)
+	except frappe.QueryDeadlockError:
+		raise frappe.ValidationError(CONCURRENT_CHANGE_MESSAGE)
+
+	frappe.msgprint(
+		_("Updated the Job Applicant status to {0}").format(applicant_doc.status),
+		alert=True,
+		indicator="green",
+	)
 
 
 def send_interview_reminder():
@@ -348,15 +470,23 @@ def get_expected_skill_set(interview_type: str) -> list[dict]:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_interview_feedback(data: str | dict, interview_name: str, interviewer: str, job_applicant: str):
 	import json
 
 	if isinstance(data, str):
-		data = frappe._dict(json.loads(data))
+		data = json.loads(data)
+	data = frappe._dict(data)
 
 	if frappe.session.user != interviewer:
 		frappe.throw(_("Only Interviewer Are allowed to submit Interview Feedback"))
+	interview = frappe.get_doc("Interview", interview_name)
+	frappe.has_permission("Interview", "read", interview, throw=True)
+	if interview.job_applicant != job_applicant:
+		frappe.throw(_("Interview and Job Applicant do not match."), frappe.ValidationError)
+	assigned_interviewers = {row.interviewer for row in interview.interview_details if row.interviewer}
+	if interviewer not in assigned_interviewers:
+		frappe.throw(_("Only an assigned interviewer can submit feedback."), frappe.PermissionError)
 
 	interview_feedback = frappe.new_doc("Interview Feedback")
 	interview_feedback.interview = interview_name
@@ -369,6 +499,7 @@ def create_interview_feedback(data: str | dict, interview_name: str, interviewer
 
 	interview_feedback.feedback = data.feedback
 	interview_feedback.result = data.result
+	interview_feedback.custom_ayp_question_evidence = data.get("custom_ayp_question_evidence") or ""
 
 	interview_feedback.save()
 	interview_feedback.submit()

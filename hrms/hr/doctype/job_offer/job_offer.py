@@ -8,6 +8,8 @@ from frappe.model.document import Document
 from frappe.model.mapper import get_mapped_doc
 from frappe.utils import cint, flt, get_link_to_form
 
+from hrms.recruitment.interview_governance import update_job_applicant_from_downstream
+
 
 class JobOffer(Document):
 	def onload(self):
@@ -60,7 +62,7 @@ class JobOffer(Document):
 
 def update_job_applicant(status, job_applicant):
 	if status in ("Accepted", "Rejected"):
-		frappe.set_value("Job Applicant", job_applicant, "status", status)
+		update_job_applicant_from_downstream(job_applicant, status, _("Job Offer"))
 
 
 def get_staffing_plan_detail(designation, company, offer_date):

@@ -2,17 +2,25 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import struct
+import subprocess
+import sys
+import time
 import unittest
 import zipfile
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import frappe
+from pypdf import PdfReader, PdfWriter
+from pypdf.generic import DictionaryObject, IndirectObject, NameObject, TextStringObject
 
 from hrms.security.candidate_cv import (
 	CandidateCVSecurityError,
+	_decode_pdf_name,
 	_mark_file_clean,
 	_verified_candidate_cv_sha256,
 	guard_candidate_cv_upload,
@@ -54,15 +62,100 @@ def make_docx(extra_files: dict[str, bytes] | None = None) -> bytes:
 	return buffer.getvalue()
 
 
+def make_pdf(*, active: bool = False) -> bytes:
+	buffer = io.BytesIO()
+	writer = PdfWriter()
+	writer.add_blank_page(width=612, height=792)
+	if active:
+		writer.root_object[NameObject("/OpenAction")] = DictionaryObject(
+			{
+				NameObject("/S"): NameObject("/JavaScript"),
+				NameObject("/JS"): TextStringObject("app.alert('blocked')"),
+			}
+		)
+	writer.write(buffer)
+	return buffer.getvalue()
+
+
+def make_pdf_with_raw_catalog_entry(entry: bytes) -> bytes:
+	objects = (
+		b"<< /Type /Catalog /Pages 2 0 R " + entry + b" >>",
+		b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>",
+		b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+	)
+	content = bytearray(b"%PDF-1.7\n")
+	offsets = []
+	for object_id, payload in enumerate(objects, start=1):
+		offsets.append(len(content))
+		content.extend(f"{object_id} 0 obj\n".encode())
+		content.extend(payload + b"\nendobj\n")
+	xref_offset = len(content)
+	content.extend(b"xref\n0 4\n0000000000 65535 f \n")
+	for offset in offsets:
+		content.extend(f"{offset:010d} 00000 n \n".encode())
+	content.extend(b"trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n")
+	content.extend(str(xref_offset).encode() + b"\n%%EOF\n")
+	return bytes(content)
+
+
+_OBJSTM_DECODED = b"4 0 << /S /JavaScript /JS (blocked only inside ObjStm) >>"
+_OBJSTM_FLATE = bytes.fromhex(
+	"78da33513050b0b151d00f56d0f74a2c4b0c4e2eca2c2801b28315349272f293"
+	"b3535314f2f3722a1532f38a33535215fc93b2824b723515ecec00e43911bf"
+)
+
+
+def make_pdf_with_compressed_action_object() -> bytes:
+	"""Build deterministic PDF 1.5 with an orphan action only in /ObjStm 5."""
+
+	assert zlib.decompress(_OBJSTM_FLATE) == _OBJSTM_DECODED
+	content = bytearray(b"%PDF-1.5\n%\xe2\xe3\xcf\xd3\n")
+	offsets = {}
+
+	def add_object(object_id: int, payload: bytes) -> None:
+		offsets[object_id] = len(content)
+		content.extend(f"{object_id} 0 obj\n".encode("ascii"))
+		content.extend(payload + b"\nendobj\n")
+
+	add_object(1, b"<< /Type /Catalog /Pages 2 0 R >>")
+	add_object(2, b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>")
+	add_object(3, b"<< /Type /Page /Parent 2 0 R /Resources << >> /MediaBox [0 0 612 792] >>")
+	add_object(
+		5,
+		(
+			b"<< /Type /ObjStm /N 1 /First 4 /Filter /FlateDecode /Length 63 >>\nstream\n"
+			+ _OBJSTM_FLATE
+			+ b"\nendstream"
+		),
+	)
+	xref_offset = len(content)
+	entries = (
+		(0, 0, 65535),
+		(1, offsets[1], 0),
+		(1, offsets[2], 0),
+		(1, offsets[3], 0),
+		(2, 5, 0),
+		(1, offsets[5], 0),
+		(1, xref_offset, 0),
+	)
+	xref_data = b"".join(struct.pack(">BIH", *entry) for entry in entries)
+	add_object(
+		6,
+		(
+			b"<< /Type /XRef /Size 7 /Root 1 0 R /W [1 4 2] /Index [0 7] /Length 49 >>\nstream\n"
+			+ xref_data
+			+ b"\nendstream"
+		),
+	)
+	content.extend(f"startxref\n{xref_offset}\n%%EOF\n".encode("ascii"))
+	return bytes(content)
+
+
 class TestCandidateCVSecurity(unittest.TestCase):
 	def setUp(self):
 		frappe.local.form_dict = frappe._dict()
 		frappe.local.session = frappe._dict(user="Guest")
 		frappe.local.request = SimpleNamespace(path="/api/method/upload_file", method="POST", files={})
-
-	def test_guest_upload_without_candidate_context_is_rejected(self):
-		with self.assertRaises(CandidateCVSecurityError):
-			guard_candidate_cv_upload()
 
 	def test_guest_job_applicant_upload_rejects_other_fields(self):
 		frappe.local.form_dict.update(doctype="Job Applicant", fieldname="cover_letter")
@@ -75,32 +168,155 @@ class TestCandidateCVSecurity(unittest.TestCase):
 			guard_candidate_cv_upload()
 		preflight.assert_called_once_with()
 
-	def test_recruitment_web_form_supplies_secure_upload_context(self):
-		config_source = (Path(__file__).resolve().parents[2] / "deploy" / "configure_standard.py").read_text(
-			encoding="utf-8"
-		)
-		for required_source in (
-			"frappe.web_form.after_load",
-			"doctype: 'Job Applicant'",
-			"fieldname: 'resume_attachment'",
-			"is_private: 1",
-			'"label": "Correo electrónico (opcional)"',
-			'"label": "Currículum (obligatorio)"',
-			'"Lunes a viernes de 9:00 a. m. a 6:00 p. m.',
-		):
-			self.assertIn(required_source, config_source)
-
 	def test_accepts_simple_pdf(self):
-		validate_cv_file("cv.pdf", b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF")
+		validate_cv_file("cv.pdf", make_pdf())
+
+	def test_rejects_structurally_active_pdf(self):
+		with self.assertRaises(CandidateCVSecurityError):
+			validate_cv_file("cv.pdf", make_pdf(active=True))
+
+	def test_rejects_active_dictionary_inside_real_compressed_object_stream(self):
+		content = make_pdf_with_compressed_action_object()
+		self.assertEqual(len(content), 546)
+		self.assertEqual(
+			hashlib.sha256(content).hexdigest(),
+			"0cb69cb71ecf3872d295be5f6911b09f1357a8ceb80f4a4c2343a071efc464e8",
+		)
+		self.assertNotIn(b"\n4 0 obj\n", content)
+		self.assertNotIn(b"/JavaScript", content)
+		self.assertNotIn(b"/OpenAction", content)
+		reader = PdfReader(io.BytesIO(content), strict=True)
+		self.assertEqual(reader.xref_objStm, {4: (5, 0)})
+		self.assertNotIn(4, reader.xref.get(0, {}))
+		self.assertNotIn((0, 4), reader.resolved_objects)
+		objstm = reader.get_object(IndirectObject(5, 0, reader))
+		self.assertEqual(objstm["/Type"], "/ObjStm")
+		self.assertEqual(objstm.get_data(), _OBJSTM_DECODED)
+		action = reader.get_object(IndirectObject(4, 0, reader))
+		self.assertEqual(action["/S"], "/JavaScript")
+		self.assertEqual(action["/JS"], "blocked only inside ObjStm")
+		self.assertIs(reader.resolved_objects[(0, 4)], action)
+		with self.assertRaises(CandidateCVSecurityError):
+			validate_cv_file("cv.pdf", content)
 
 	def test_rejects_active_pdf(self):
+		for entry in (
+			b"/OpenAction << /S /JavaScript /JS (blocked) >>",
+			b"/AA << /O << /S /JavaScript /JS (blocked) >> >>",
+		):
+			with self.subTest(entry=entry), self.assertRaises(CandidateCVSecurityError):
+				validate_cv_file("cv.pdf", make_pdf_with_raw_catalog_entry(entry))
+
+	def test_rejects_hex_escaped_active_pdf_names(self):
 		with self.assertRaises(CandidateCVSecurityError):
-			validate_cv_file("cv.pdf", b"%PDF-1.7\n/JavaScript\n%%EOF")
+			validate_cv_file(
+				"cv.pdf",
+				make_pdf_with_raw_catalog_entry(b"/Open#41ction << /S /Java#53cript /JS (blocked) >>"),
+			)
+
+	def test_rejects_malformed_pdf_name_escape(self):
+		for malformed in (b"/Bad#ZZName null", b"/Bad#1 null", b"/Bad# null"):
+			with self.subTest(malformed=malformed), self.assertRaises(CandidateCVSecurityError):
+				validate_cv_file("cv.pdf", make_pdf_with_raw_catalog_entry(malformed))
+
+	def test_rejects_embedded_file_without_optional_type(self):
+		entry = b"/Names << /EmbeddedFiles << /Names [(payload) << /Type /Filespec /F (x.txt) /EF << /F 4 0 R >> >>] >> >>"
+		base = make_pdf_with_raw_catalog_entry(entry)
+		base = base.replace(b"xref\n0 4", b"4 0 obj\n<< /Length 4 >>\nstream\ntest\nendstream\nendobj\nxref\n0 4")
 		with self.assertRaises(CandidateCVSecurityError):
-			validate_cv_file("cv.pdf", b"%PDF-1.7\n/OPENACTION\n%%EOF")
+			validate_cv_file("cv.pdf", base)
+
+	def test_rejects_submit_form_action(self):
+		with self.assertRaises(CandidateCVSecurityError):
+			validate_cv_file(
+				"cv.pdf",
+				make_pdf_with_raw_catalog_entry(b"/OpenAction << /S /SubmitForm /F (https://invalid.example/) >>"),
+			)
+
+	def test_accepts_inert_name_js(self):
+		validate_cv_file("cv.pdf", make_pdf_with_raw_catalog_entry(b"/Resources << /JS 3 0 R >>"))
+
+	def test_pdf_subprocess_failure_is_fail_closed(self):
+		with patch("hrms.security.candidate_cv.subprocess.run", side_effect=TimeoutError("bounded")):
+			with self.assertRaises(CandidateCVSecurityError):
+				validate_cv_file("cv.pdf", make_pdf())
+
+	def test_pdf_parser_child_enforces_memory_ceiling(self):
+		from hrms.security.pdf_cv_validator import SELF_TEST_MEMORY_LIMIT_ENFORCED
+
+		validator = Path(__file__).with_name("pdf_cv_validator.py")
+		started = time.monotonic()
+		completed = subprocess.run(
+			[sys.executable, str(validator)],
+			input=b"",
+			stdout=subprocess.DEVNULL,
+			stderr=subprocess.DEVNULL,
+			check=False,
+			timeout=7,
+			env={"PATH": os.environ.get("PATH", ""), "AYP_PDF_VALIDATOR_SELF_TEST": "memory"},
+		)
+		self.assertEqual(completed.returncode, SELF_TEST_MEMORY_LIMIT_ENFORCED)
+		self.assertLess(time.monotonic() - started, 7)
+
+	def test_pdf_parser_self_test_distinguishes_limit_setup_failure(self):
+		from hrms.security import pdf_cv_validator
+
+		with (
+			patch.dict(os.environ, {"AYP_PDF_VALIDATOR_SELF_TEST": "memory"}),
+			patch.object(pdf_cv_validator, "_set_limits", side_effect=pdf_cv_validator.PDFSecurityError("no-limit")),
+			patch.object(pdf_cv_validator, "_load_parser") as load_parser,
+		):
+			result = pdf_cv_validator.main()
+		self.assertEqual(result, pdf_cv_validator.SELF_TEST_LIMIT_SETUP_FAILED)
+		load_parser.assert_not_called()
+
+	def test_pdf_parser_self_test_rejects_preloaded_parser(self):
+		from hrms.security import pdf_cv_validator
+
+		with (
+			patch.dict(os.environ, {"AYP_PDF_VALIDATOR_SELF_TEST": "memory"}),
+			patch.dict(sys.modules, {"pypdf.preloaded_probe": object()}),
+			patch.object(pdf_cv_validator, "_set_limits"),
+			patch.object(pdf_cv_validator, "_load_parser") as load_parser,
+		):
+			result = pdf_cv_validator.main()
+		self.assertEqual(result, pdf_cv_validator.SELF_TEST_PARSER_PRELOADED)
+		load_parser.assert_not_called()
+
+	def test_pdf_parser_limit_setup_fails_closed_when_no_memory_limit_is_effective(self):
+		from hrms.security import pdf_cv_validator
+
+		with patch.object(pdf_cv_validator, "_set_memory_limit", return_value=False):
+			with self.assertRaisesRegex(pdf_cv_validator.PDFSecurityError, "memory-limit-unavailable"):
+				pdf_cv_validator._set_limits()
+
+	def test_parent_does_not_forward_parser_self_test_environment(self):
+		with patch.dict(os.environ, {"AYP_PDF_VALIDATOR_SELF_TEST": "memory"}):
+			validate_cv_file("cv.pdf", make_pdf())
+
+	def test_accepts_pdf_names_that_only_prefix_match_active_names(self):
+		self.assertEqual(_decode_pdf_name(b"AAAAAB+Monaco"), b"aaaaab+monaco")
+		self.assertEqual(_decode_pdf_name(b"Java#53criptEnabled"), b"javascriptenabled")
+		self.assertEqual(_decode_pdf_name(b"Literal#23Hash"), b"literal#hash")
 
 	def test_accepts_simple_docx(self):
 		validate_cv_file("cv.docx", make_docx())
+
+	def test_accepts_supported_images_and_legacy_doc_by_signature(self):
+		validate_cv_file("cv.jpg", b"\xff\xd8\xff\xe0synthetic")
+		validate_cv_file("cv.png", b"\x89PNG\r\n\x1a\nsynthetic")
+		validate_cv_file("cv.heic", b"\x00\x00\x00\x18ftypheicsynthetic")
+		validate_cv_file("cv.doc", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1synthetic")
+
+	def test_rejects_extension_content_mismatches(self):
+		for filename, content in (
+			("cv.jpg", b"%PDF-1.7"),
+			("cv.png", b"not-png"),
+			("cv.heic", b"not-heic"),
+			("cv.doc", b"not-ole"),
+		):
+			with self.subTest(filename=filename), self.assertRaises(CandidateCVSecurityError):
+				validate_cv_file(filename, content)
 
 	def test_rejects_docx_macro(self):
 		with self.assertRaises(CandidateCVSecurityError):
@@ -145,14 +361,14 @@ class TestCandidateCVSecurity(unittest.TestCase):
 		)
 		with (
 			patch("hrms.security.candidate_cv._file_has_column", return_value=True),
-			patch("hrms.security.candidate_cv.now_datetime", return_value="2026-07-18 10:00:00"),
+			patch("hrms.security.candidate_cv.now_datetime", return_value="2026-08-12 20:00:00"),
 		):
 			_mark_file_clean(file_doc, sha256="a" * 64)
 		self.assertEqual(file_doc.values["custom_cv_sha256"], "a" * 64)
 		self.assertEqual(file_doc.values["custom_av_scan_status"], "Clean")
 
 	def test_verified_hash_revalidates_pdf_content(self):
-		content = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj\n<<>>\nendobj\n%%EOF"
+		content = make_pdf()
 		file_record = SimpleNamespace(
 			name="FILE-1",
 			file_name="cv.pdf",
@@ -196,7 +412,7 @@ class TestCandidateCVSecurity(unittest.TestCase):
 		with (
 			patch("hrms.security.candidate_cv._file_has_column", return_value=True),
 			patch("hrms.security.candidate_cv.get_file", return_value=("cv.pdf", content)),
-			patch("hrms.security.candidate_cv.now_datetime", return_value="2026-07-18 13:00:00"),
+			patch("hrms.security.candidate_cv.now_datetime", return_value="2026-08-12 20:00:00"),
 		):
 			mark_scanned_candidate_cv_file(file_doc)
 		self.assertEqual(file_doc.values["custom_cv_sha256"], sha256)

@@ -53,6 +53,7 @@ doctype_js = {
 	"Company": "public/js/erpnext/company.js",
 	"Department": "public/js/erpnext/department.js",
 	"Timesheet": "public/js/erpnext/timesheet.js",
+	"Interview": "public/js/ayp_interview.js",
 	"Payment Entry": "public/js/erpnext/payment_entry.js",
 	"Journal Entry": "public/js/erpnext/journal_entry.js",
 	"Delivery Trip": "public/js/erpnext/delivery_trip.js",
@@ -219,15 +220,28 @@ doc_events = {
 		"validate": [
 			"hrms.security.candidate_cv.validate_job_applicant_cv",
 			"hrms.recruitment.talent_pool.link_job_applicant_profile",
+			"hrms.recruitment.candidate_document_service.prepare_candidate_document_state",
+			"hrms.recruitment.interview_governance.validate_job_applicant_final_transition",
 		],
 		"after_insert": [
 			"hrms.security.candidate_cv.attach_job_applicant_cv",
 			"hrms.recruitment.talent_pool.sync_candidate_profile",
+			"hrms.recruitment.candidate_document_service.enqueue_candidate_document",
 		],
 		"on_update": [
 			"hrms.security.candidate_cv.attach_job_applicant_cv",
 			"hrms.recruitment.talent_pool.sync_candidate_profile",
+			"hrms.recruitment.candidate_document_service.enqueue_candidate_document",
 		],
+	},
+	"Interview": {
+		"validate": "hrms.recruitment.interview_governance.validate_interview",
+		"before_submit": "hrms.recruitment.interview_governance.validate_ayp_interview_submission",
+		"before_cancel": "hrms.recruitment.interview_governance.validate_ayp_interview_cancellation",
+	},
+	"Interview Feedback": {
+		"before_submit": "hrms.recruitment.interview_governance.validate_ayp_interview_feedback",
+		"before_cancel": "hrms.recruitment.interview_governance.validate_ayp_feedback_cancellation",
 	},
 	"File": {"after_insert": "hrms.security.candidate_cv.mark_scanned_candidate_cv_file"},
 	"Project": {"validate": "hrms.controllers.employee_boarding_controller.update_employee_boarding_status"},
@@ -245,6 +259,7 @@ scheduler_events = {
 		"hrms.hr.doctype.daily_work_summary_group.daily_work_summary_group.trigger_emails",
 	],
 	"hourly_long": [
+		"hrms.recruitment.candidate_document_service.recover_stale_candidate_document_jobs",
 		"hrms.hr.doctype.shift_type.shift_type.update_last_sync_of_checkin",
 		"hrms.hr.doctype.shift_type.shift_type.process_auto_attendance_for_all_shifts",
 		"hrms.hr.doctype.shift_schedule_assignment.shift_schedule_assignment.process_auto_shift_creation",

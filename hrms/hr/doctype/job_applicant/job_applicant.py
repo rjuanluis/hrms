@@ -94,7 +94,7 @@ class JobApplicant(Document):
 KANBAN_COLUMNS = ["Open", "Replied", "Shortlisted", "Accepted"]
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_kanban_board(board_name: str) -> dict:
 	frappe.has_permission("Job Applicant", throw=True)
 
@@ -116,9 +116,25 @@ def create_kanban_board(board_name: str) -> dict:
 	return board.as_dict()
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_interview(job_applicant: str, interview_type: str) -> Document:
+	frappe.has_permission("Job Applicant", "read", job_applicant, throw=True)
+	frappe.has_permission("Interview", "create", throw=True)
 	doc = frappe.get_doc("Job Applicant", job_applicant)
+	existing_interview = frappe.db.exists(
+		"Interview",
+		{
+			"job_applicant": job_applicant,
+			"interview_type": interview_type,
+			"docstatus": ["!=", 2] if interview_type == "AyP - Entrevista estructurada" else 1,
+		},
+	)
+	if existing_interview:
+		frappe.throw(
+			_("Interview {0} already exists for Job Applicant {1} and Interview Type {2}.").format(
+				frappe.bold(existing_interview), frappe.bold(job_applicant), frappe.bold(interview_type)
+			)
+		)
 
 	round_designation = frappe.db.get_value("Interview Type", interview_type, "designation")
 

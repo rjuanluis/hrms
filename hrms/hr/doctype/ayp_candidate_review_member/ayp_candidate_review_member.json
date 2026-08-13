@@ -1,0 +1,30 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "creation": "2026-08-12 09:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 0,
+ "engine": "InnoDB",
+ "field_order": ["applicant", "frozen_status", "member_status", "batch_id", "previous_status", "processed_on", "outcome_detail"],
+ "fields": [
+  {"fieldname": "applicant", "fieldtype": "Link", "in_list_view": 1, "label": "Aplicación", "options": "Job Applicant", "read_only": 1, "reqd": 1},
+  {"fieldname": "frozen_status", "fieldtype": "Data", "in_list_view": 1, "label": "Estado congelado", "read_only": 1, "reqd": 1},
+  {"default": "Pending", "fieldname": "member_status", "fieldtype": "Select", "in_list_view": 1, "label": "Resultado", "options": "Pending\nProcessed\nSkipped", "read_only": 1, "reqd": 1},
+  {"fieldname": "batch_id", "fieldtype": "Data", "label": "Lote de ejecución", "read_only": 1},
+  {"fieldname": "previous_status", "fieldtype": "Data", "label": "Estado al procesar", "read_only": 1},
+  {"fieldname": "processed_on", "fieldtype": "Datetime", "label": "Procesado el", "read_only": 1},
+  {"fieldname": "outcome_detail", "fieldtype": "Small Text", "label": "Detalle", "read_only": 1}
+ ],
+ "index_web_pages_for_search": 0,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-08-12 09:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "HR",
+ "name": "AYP Candidate Review Member",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "idx",
+ "sort_order": "ASC",
+ "states": []
+}

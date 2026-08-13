@@ -120,6 +120,12 @@ jobs:
               suite = unittest.TestSuite()
               for test_module in (
                   "hrms.security.test_candidate_cv",
+                  "hrms.recruitment.test_candidate_document_processing",
+                  "hrms.recruitment.test_candidate_review_api",
+                  "hrms.recruitment.test_candidate_review_security_contract",
+                  "hrms.recruitment.test_candidate_review_domain",
+                  "hrms.recruitment.test_candidate_scoring_domain",
+                  "hrms.recruitment.test_interview_decision_domain",
                   "hrms.recruitment.test_talent_pool",
               ):
                   suite.addTests(unittest.defaultTestLoader.loadTestsFromName(test_module))

@@ -1,0 +1,53 @@
+{
+ "actions": [],
+ "allow_import": 0,
+ "allow_rename": 0,
+ "autoname": "format:AYP-SCORE-{YYYY}-{#####}",
+ "creation": "2026-08-11 20:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "applicant",
+  "candidate_profile",
+  "job_opening",
+  "version",
+  "result_section",
+  "total_score",
+  "recommendation",
+  "explanation",
+  "audit_section",
+  "scored_by",
+  "scored_on",
+  "criteria"
+ ],
+ "fields": [
+  {"fieldname": "applicant", "fieldtype": "Link", "in_list_view": 1, "label": "Aplicación", "options": "Job Applicant", "reqd": 1, "search_index": 1},
+  {"fieldname": "candidate_profile", "fieldtype": "Link", "label": "Perfil canónico", "options": "AYP Candidate Profile"},
+  {"fieldname": "job_opening", "fieldtype": "Link", "in_list_view": 1, "label": "Vacante", "options": "Job Opening", "reqd": 1, "search_index": 1},
+  {"default": "1", "fieldname": "version", "fieldtype": "Int", "label": "Versión", "read_only": 1, "reqd": 1},
+  {"fieldname": "result_section", "fieldtype": "Section Break", "label": "Resultado explicable"},
+  {"fieldname": "total_score", "fieldtype": "Percent", "in_list_view": 1, "label": "Puntuación total", "read_only": 1, "reqd": 1},
+  {"fieldname": "recommendation", "fieldtype": "Select", "in_list_view": 1, "label": "Recomendación asistida", "options": "Recomendado para shortlist\nRevisión comparativa\nNo priorizar", "read_only": 1, "reqd": 1},
+  {"fieldname": "explanation", "fieldtype": "Long Text", "label": "Explicación del cálculo", "read_only": 1, "reqd": 1},
+  {"fieldname": "audit_section", "fieldtype": "Section Break", "label": "Auditoría"},
+  {"fieldname": "scored_by", "fieldtype": "Link", "in_list_view": 1, "label": "Evaluado por", "options": "User", "read_only": 1, "reqd": 1},
+  {"fieldname": "scored_on", "fieldtype": "Datetime", "in_list_view": 1, "label": "Evaluado el", "read_only": 1, "reqd": 1},
+  {"fieldname": "criteria", "fieldtype": "Table", "label": "Criterios y evidencia", "options": "AYP Candidate Score Criterion", "reqd": 1}
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-08-11 20:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "HR",
+ "name": "AYP Candidate Scorecard",
+ "owner": "Administrator",
+ "permissions": [
+  {"read": 1, "report": 1, "role": "HR User"},
+  {"export": 1, "read": 1, "report": 1, "role": "HR Manager"},
+  {"export": 1, "read": 1, "report": 1, "role": "System Manager"}
+ ],
+ "sort_field": "scored_on",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}

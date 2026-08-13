@@ -167,6 +167,7 @@ class TestInterview(HRMSTestSuite):
 		expected_data = [
 			{
 				"name": feedback_1.name,
+				"result": feedback_1.result,
 				"added_on": get_datetime(feedback_1.modified),
 				"user": feedback_1.interviewer,
 				"feedback": feedback_1.feedback,
@@ -176,6 +177,7 @@ class TestInterview(HRMSTestSuite):
 			},
 			{
 				"name": feedback_2.name,
+				"result": feedback_2.result,
 				"added_on": get_datetime(feedback_2.modified),
 				"user": feedback_2.interviewer,
 				"feedback": feedback_2.feedback,
@@ -189,9 +191,14 @@ class TestInterview(HRMSTestSuite):
 
 	def test_job_applicant_status_update_on_interview_submit(self):
 		job_applicant = create_job_applicant()
-		create_interview_and_dependencies(job_applicant.name, status="Cleared")
+		interview = create_interview_and_dependencies(job_applicant.name, status="Cleared")
+		interview.submit()
 
-		update_job_applicant_status(job_applicant=job_applicant.name, status="Accepted")
+		update_job_applicant_status(
+			job_applicant=job_applicant.name,
+			status="Accepted",
+			interview=interview.name,
+		)
 		job_applicant.reload()
 
 		self.assertEqual(job_applicant.status, "Accepted")

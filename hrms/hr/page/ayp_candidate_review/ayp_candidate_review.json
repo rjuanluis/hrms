@@ -1,0 +1,22 @@
+{
+ "content": null,
+ "creation": "2026-08-11 20:00:00.000000",
+ "docstatus": 0,
+ "doctype": "Page",
+ "idx": 0,
+ "modified": "2026-08-11 20:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "HR",
+ "name": "ayp-candidate-review",
+ "owner": "Administrator",
+ "page_name": "ayp-candidate-review",
+ "roles": [
+  {"role": "HR User"},
+  {"role": "HR Manager"},
+  {"role": "System Manager"}
+ ],
+ "script": null,
+ "standard": "Yes",
+ "style": null,
+ "title": "Candidate Review"
+}
