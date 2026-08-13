@@ -21,7 +21,7 @@ Server state is mutable, but every infrastructure manifest, bootstrap routine, m
 2. GitHub Actions connects using a restricted deployment key.
 3. `host-deploy-wrapper.sh` permits only an AyP HR image deployment.
 4. `deploy.sh` tags the immutable image locally as `production`, updates the versioned Compose source through EasyPanel's authenticated API with a service-scoped rollback artifact, and requests deployment through that same control plane. A failure before migration automatically retags the previous image, restores the prior inline source through the authenticated API, redeploys it, and verifies canonical source, managed file, prior persistent-service count, and backend image ID. Once migration starts, recovery stops fail-closed without blindly downgrading the image.
-5. The script waits for all eleven persistent Compose services, verifies the dedicated `documents` queue worker/configuration, creates or migrates the site, applies the idempotent standard AyP configuration and records deployment evidence.
+5. The script requires and backs up the existing official site before mutation, waits for all eleven persistent Compose services, verifies the dedicated `documents` queue worker/configuration, migrates the site, applies the idempotent standard AyP configuration and records deployment evidence. A missing or unverifiable production site fails closed; deployment does not bootstrap a replacement.
 6. EasyPanel Traefik serves the site at `https://hr.aroypedal.com`.
 
 ## One-time host provisioning

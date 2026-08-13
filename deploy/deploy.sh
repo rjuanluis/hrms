@@ -64,17 +64,20 @@ deploy_compose_source() {
   else
     deploy_rc=$?
   fi
-  docker exec "$panel_id" rm -f "$candidate_path" "$helper_path" >/dev/null
   COMPOSE_ROLLBACK_PATH="$(python3 -c 'import json,sys
 for line in sys.stdin:
     try: data=json.loads(line)
     except json.JSONDecodeError: continue
-    if data.get("rollbackPath"): print(data["rollbackPath"])' <<<"$result" | tail -1)"
+    if data.get("rollbackPath"): print(data["rollbackPath"])' <<<"$result" | tail -1 || true)"
   if [[ -z "$COMPOSE_ROLLBACK_PATH" ]]; then
-    discovered_path="$(find /etc/easypanel/hermes-backups -mindepth 1 -maxdepth 1 -type d \
-      -name 'ayp-hrms-compose-pre-*' -newermt "@$started_epoch" -print 2>/dev/null | sort | tail -1)"
+    discovered_path="$(
+      find /etc/easypanel/hermes-backups -mindepth 1 -maxdepth 1 -type d \
+        -name 'ayp-hrms-compose-pre-*' -newermt "@$started_epoch" -print 2>/dev/null \
+        | sort | tail -1 || true
+    )"
     COMPOSE_ROLLBACK_PATH="$discovered_path"
   fi
+  docker exec "$panel_id" rm -f "$candidate_path" "$helper_path" >/dev/null 2>&1 || true
   if (( deploy_rc != 0 )); then
     return "$deploy_rc"
   fi
@@ -212,10 +215,13 @@ PREVIOUS_SERVICE_COUNT="$(docker ps \
   --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" \
   --format '{{.Label "com.docker.compose.service"}}' | sort -u | wc -l | tr -d ' ')"
 (( PREVIOUS_SERVICE_COUNT > 0 )) || { echo "No existing EasyPanel services found" >&2; exit 4; }
-if [[ -n "$backend_id" ]] && docker exec "$backend_id" test -f "sites/$SITE_NAME/site_config.json"; then
-  echo "Creating pre-deploy backup"
-  docker exec "$backend_id" bench --site "$SITE_NAME" backup --with-files
+[[ -n "$backend_id" ]] || { echo "Existing production backend is required" >&2; exit 4; }
+if ! docker exec "$backend_id" test -f "sites/$SITE_NAME/site_config.json"; then
+  echo "Existing production site could not be verified; refusing to mutate EasyPanel" >&2
+  exit 4
 fi
+echo "Creating pre-deploy backup"
+docker exec "$backend_id" bench --site "$SITE_NAME" backup --with-files
 
 echo "Preparing immutable image $IMAGE"
 old_production_id="$(docker image inspect "$PRODUCTION_IMAGE" --format '{{.Id}}' 2>/dev/null || true)"
@@ -241,7 +247,7 @@ deploy_compose_source
 wait_for_compose "$backend_id" "$expect_replacement"
 cmp -s "$ROOT_DIR/deploy/easypanel-compose.yml" "$COMPOSE_FILE" || {
   echo "Managed EasyPanel Compose file does not match canonical repository source" >&2
-  exit 8
+  on_deploy_error 8 "$LINENO"
 }
 
 HOOK_DIR="/opt/ayp-hr/deploy-hooks"
@@ -261,21 +267,36 @@ compose exec -T backend bash -ec '
   bench set-config -g chromium_path /usr/bin/chromium-headless-shell
 '
 
-if compose exec -T backend test -f "sites/$SITE_NAME/site_config.json"; then
-  echo "Migrating existing site"
-  DEPLOY_PHASE="migration_started"
-  ROLLBACK_ARMED=0
-  compose exec -T backend bench --site "$SITE_NAME" migrate
+site_probe=""
+if site_probe="$(compose exec -T backend sh -ec '
+  if test -f "sites/'"$SITE_NAME"'/site_config.json"; then
+    printf PRESENT
+  else
+    printf ABSENT
+  fi
+')"; then
+  :
 else
-  echo "Creating official site $SITE_NAME"
-  DEPLOY_PHASE="migration_started"
-  ROLLBACK_ARMED=0
-  compose run --rm \
-    -e "AYP_SITE_NAME=$SITE_NAME" \
-    -v "$SECRETS_DIR:/run/ayp-secrets:ro" \
-    -v "$HOOK_DIR/bootstrap_site.py:/opt/ayp/bootstrap_site.py:ro" \
-    backend /home/frappe/frappe-bench/env/bin/python /opt/ayp/bootstrap_site.py
+  probe_rc=$?
+  echo "Could not determine whether the production site exists" >&2
+  on_deploy_error "$probe_rc" "$LINENO"
 fi
+case "$site_probe" in
+  PRESENT)
+    echo "Migrating existing site"
+    DEPLOY_PHASE="migration_started"
+    ROLLBACK_ARMED=0
+    compose exec -T backend bench --site "$SITE_NAME" migrate
+    ;;
+  ABSENT)
+    echo "Existing production site disappeared before migration" >&2
+    on_deploy_error 9 "$LINENO"
+    ;;
+  *)
+    echo "Unexpected production site probe result" >&2
+    on_deploy_error 9 "$LINENO"
+    ;;
+esac
 DEPLOY_PHASE="post_migration"
 
 compose exec -T backend bench --site "$SITE_NAME" set-config host_name "https://$SITE_NAME"
