@@ -30,15 +30,37 @@ jobs:
           python -m compileall -q hrms deploy/bootstrap_site.py deploy/configure_standard.py
           python -m json.tool deploy/apps.json >/dev/null
           bash -n deploy/deploy.sh deploy/host-deploy-wrapper.sh deploy/provision-host.sh deploy/backup.sh
+          node --check deploy/easypanel_compose_api.js
           python - <<'PY'
           from pathlib import Path
           text = Path('deploy/easypanel-compose.yml').read_text()
-          required = ['backend:', 'frontend:', 'websocket:', 'queue-short:', 'queue-long:', 'scheduler:', 'db:', 'redis-cache:', 'redis-queue:', 'clamav:']
+          required = ['configure-workers:', 'backend:', 'frontend:', 'websocket:', 'queue-short:', 'queue-long:', 'queue-documents:', 'scheduler:', 'db:', 'redis-cache:', 'redis-queue:', 'clamav:']
           missing = [x for x in required if x not in text]
           if missing:
               raise SystemExit(f'Missing EasyPanel Compose services: {missing}')
           if 'name: easypanel' not in text or 'external: true' not in text:
               raise SystemExit('EasyPanel external network is not configured')
+          deploy = Path('deploy/deploy.sh').read_text()
+          helper = Path('deploy/easypanel_compose_api.js').read_text()
+          required_deploy_contracts = [
+              'deploy_compose_source',
+              'local expected=11',
+              'queue-documents scheduler',
+              'Verifying dedicated candidate-document worker',
+              'compose_rollback',
+          ]
+          missing_deploy_contracts = [x for x in required_deploy_contracts if x not in deploy]
+          if missing_deploy_contracts:
+              raise SystemExit(f'Missing deployment topology contracts: {missing_deploy_contracts}')
+          required_helper_contracts = [
+              '/services/compose/updateSourceInline',
+              '/services/compose/deployService',
+              'canonicalSourceMatch',
+              'preflight_ok',
+          ]
+          missing_helper_contracts = [x for x in required_helper_contracts if x not in helper]
+          if missing_helper_contracts:
+              raise SystemExit(f'Missing EasyPanel API contracts: {missing_helper_contracts}')
           hooks = Path('hrms/hooks.py').read_text()
           required_hooks = [
               'hrms.security.candidate_cv.guard_candidate_cv_upload',

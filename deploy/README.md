@@ -11,7 +11,7 @@ This directory defines the official `hr.aroypedal.com` deployment on the Hosting
 - Runtime: EasyPanel 2.32 Compose Service `web/ayp-hrms` on the existing Hostinger VPS
 - Public route: EasyPanel-managed Traefik domain and Cloudflare DNS
 
-EasyPanel's current license allows three projects and those slots are already used by `n8n`, `web`, and `bikemanager`. AyP HRMS is therefore a native Compose Service inside the existing `web` project; clicking that service exposes its nine internal containers.
+EasyPanel's current license allows three projects and those slots are already used by `n8n`, `web`, and `bikemanager`. AyP HRMS is therefore a native Compose Service inside the existing `web` project; the runtime has eleven persistent services, including the dedicated `queue-documents` worker. `configure-workers` is an additional one-shot Compose service that writes the custom queue configuration before dependent services start.
 
 Server state is mutable, but every infrastructure manifest, bootstrap routine, migration and deployment command must be represented here. Secrets must never be committed.
 
@@ -20,8 +20,8 @@ Server state is mutable, but every infrastructure manifest, bootstrap routine, m
 1. A push to `ayp-production` validates the source and builds an immutable image.
 2. GitHub Actions connects using a restricted deployment key.
 3. `host-deploy-wrapper.sh` permits only an AyP HR image deployment.
-4. `deploy.sh` tags the immutable image locally as `production` and calls the private EasyPanel Compose deployment webhook.
-5. The script waits for all nine Compose containers, creates or migrates the site, applies the idempotent standard AyP configuration and records deployment evidence.
+4. `deploy.sh` tags the immutable image locally as `production`, updates the versioned Compose source through EasyPanel's authenticated API with a service-scoped rollback artifact, and requests deployment through that same control plane.
+5. The script waits for all eleven persistent Compose services, verifies the dedicated `documents` queue worker/configuration, creates or migrates the site, applies the idempotent standard AyP configuration and records deployment evidence.
 6. EasyPanel Traefik serves the site at `https://hr.aroypedal.com`.
 
 ## One-time host provisioning
