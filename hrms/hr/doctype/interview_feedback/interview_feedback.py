@@ -8,6 +8,8 @@ from frappe.model.document import Document
 from frappe.query_builder.functions import Avg
 from frappe.utils import flt, get_link_to_form, getdate
 
+from hrms.recruitment.interview_governance import CONCURRENT_CHANGE_MESSAGE
+
 
 class InterviewFeedback(Document):
 	# begin: auto-generated types
@@ -42,6 +44,19 @@ class InterviewFeedback(Document):
 
 	def on_cancel(self):
 		self.update_interview_average_rating()
+
+	def cancel(self):
+		is_ayp = bool(
+			str(
+				frappe.db.get_value("Interview", self.interview, "custom_ayp_questions_snapshot") or ""
+			).strip()
+		)
+		try:
+			return super().cancel()
+		except frappe.QueryDeadlockError:
+			if is_ayp:
+				raise frappe.ValidationError(CONCURRENT_CHANGE_MESSAGE)
+			raise
 
 	def validate_interviewer(self):
 		applicable_interviewers = get_applicable_interviewers(self.interview)

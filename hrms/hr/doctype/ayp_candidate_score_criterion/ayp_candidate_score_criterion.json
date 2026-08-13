@@ -1,0 +1,29 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "creation": "2026-08-11 20:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 0,
+ "engine": "InnoDB",
+ "field_order": ["criterion_key", "criterion_label", "weight", "rating", "weighted_score", "evidence"],
+ "fields": [
+  {"fieldname": "criterion_key", "fieldtype": "Data", "hidden": 1, "label": "Clave", "read_only": 1, "reqd": 1},
+  {"fieldname": "criterion_label", "fieldtype": "Data", "in_list_view": 1, "label": "Criterio", "read_only": 1, "reqd": 1},
+  {"fieldname": "weight", "fieldtype": "Percent", "in_list_view": 1, "label": "Peso", "read_only": 1, "reqd": 1},
+  {"fieldname": "rating", "fieldtype": "Int", "in_list_view": 1, "label": "Calificación (0-5)", "read_only": 1, "reqd": 1},
+  {"fieldname": "weighted_score", "fieldtype": "Percent", "in_list_view": 1, "label": "Puntos ponderados", "read_only": 1, "reqd": 1},
+  {"fieldname": "evidence", "fieldtype": "Small Text", "in_list_view": 1, "label": "Evidencia", "read_only": 1, "reqd": 1}
+ ],
+ "index_web_pages_for_search": 0,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-08-11 20:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "HR",
+ "name": "AYP Candidate Score Criterion",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "idx",
+ "sort_order": "ASC",
+ "states": []
+}

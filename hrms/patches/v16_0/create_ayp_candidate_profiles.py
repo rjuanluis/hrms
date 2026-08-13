@@ -57,6 +57,15 @@ CANDIDATE_PROFILE_FIELDS = {
 			"hidden": 1,
 			"insert_after": "custom_normalized_phone",
 		},
+		{
+			"fieldname": "custom_ayp_governed",
+			"label": "Gobernado por flujo AyP",
+			"fieldtype": "Check",
+			"default": "0",
+			"read_only": 1,
+			"hidden": 1,
+			"insert_after": "custom_dedupe_status",
+		},
 	],
 }
 

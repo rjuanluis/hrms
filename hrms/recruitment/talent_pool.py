@@ -20,6 +20,7 @@ PROFILE_DOCTYPE = "AYP Candidate Profile"
 STATUS_ACTIVE = "Activo"
 LOCK_TIMEOUT_SECONDS = 10
 GLOBAL_CANDIDATE_LOCK = "ayp-candidate-pool-global"
+MAX_PROFILE_REDIRECTS = 20
 
 
 def _release_candidate_locks(lock_names: tuple[str, ...]) -> None:
@@ -52,6 +53,45 @@ def _acquire_candidate_locks(*, email: str, phone: str, cv_sha256: str) -> None:
 	frappe.db.after_rollback.add(release)
 
 
+def acquire_candidate_identity_lock() -> None:
+	"""Serialize manual identity corrections with automatic intake matching."""
+
+	_acquire_candidate_locks(email="", phone="", cv_sha256="")
+
+
+def resolve_candidate_profile(profile_name: str | None, *, for_update: bool = False):
+	"""Resolve a durable merge redirect and return the live profile row.
+
+	Rows in a redirect chain remain immutable aliases for historical audit and
+	identifier matching. Callers only receive the terminal profile.
+	"""
+
+	current = str(profile_name or "").strip()
+	seen = set()
+	for _redirect_index in range(MAX_PROFILE_REDIRECTS):
+		if not current or current in seen:
+			frappe.throw(_("La cadena de perfiles fusionados no es válida."), frappe.ValidationError)
+		seen.add(current)
+		# `lock_clause` is selected from fixed SQL keywords; the profile name
+		# remains a separately bound parameter.
+		rows = frappe.db.sql(  # nosemgrep
+			"""
+			SELECT name, candidate_name, merged_into, do_not_contact
+			FROM `tabAYP Candidate Profile`
+			WHERE name = %s{lock_clause}
+			""".format(lock_clause=" FOR UPDATE" if for_update else ""),
+			(current,),
+			as_dict=True,
+		)
+		if not rows:
+			return None
+		row = rows[0]
+		if not row.merged_into:
+			return row
+		current = row.merged_into
+	frappe.throw(_("La cadena de perfiles fusionados excede el límite permitido."), frappe.ValidationError)
+
+
 def _profile_matches(fieldname: str, value: str) -> set[str]:
 	if not value:
 		return set()
@@ -71,7 +111,12 @@ def _profile_matches(fieldname: str, value: str) -> set[str]:
 	}
 	if fieldname not in queries:
 		raise ValueError(f"Unsupported candidate profile match field: {fieldname}")
-	return set(frappe.db.sql(queries[fieldname], (value,), pluck=True))
+	matches = set()
+	for profile_name in frappe.db.sql(queries[fieldname], (value,), pluck=True):
+		resolved = resolve_candidate_profile(profile_name, for_update=True)
+		if resolved:
+			matches.add(resolved.name)
+	return matches
 
 
 def _cv_profile_matches(cv_sha256: str) -> set[str]:
@@ -91,7 +136,9 @@ def _cv_profile_matches(cv_sha256: str) -> set[str]:
 		pluck=True,
 	):
 		if profile_name:
-			matches.add(profile_name)
+			resolved = resolve_candidate_profile(profile_name, for_update=True)
+			if resolved:
+				matches.add(resolved.name)
 	return matches
 
 
@@ -111,15 +158,7 @@ def _persisted_applicant_for_update(applicant_name: str):
 def _profile_name_for_update(profile_name: str | None):
 	if not profile_name:
 		return None
-	rows = frappe.db.sql(
-		"""
-		SELECT name, candidate_name FROM `tabAYP Candidate Profile`
-		WHERE name = %s FOR UPDATE
-		""",
-		(profile_name,),
-		as_dict=True,
-	)
-	return rows[0] if rows else None
+	return resolve_candidate_profile(profile_name, for_update=True)
 
 
 def _job_applicant_has_field(doc, fieldname: str) -> bool:
@@ -165,6 +204,12 @@ def link_job_applicant_profile(doc, method=None) -> None:
 	cv_sha256 = (doc.get("custom_cv_sha256") or "").strip().lower()
 	_set_if_supported(doc, "custom_normalized_email", email)
 	_set_if_supported(doc, "custom_normalized_phone", phone)
+	# The installed AyP site governs every real applicant.  Upstream HRMS's
+	# integration suite also creates generic fixtures through these global hooks;
+	# do not silently convert those fixtures into AyP workflow records unless a
+	# test explicitly opts in by setting the field itself.
+	if not frappe.flags.in_test or doc.get("custom_ayp_governed"):
+		_set_if_supported(doc, "custom_ayp_governed", 1)
 	_acquire_candidate_locks(email=email, phone=phone, cv_sha256=cv_sha256)
 
 	persisted = None if doc.is_new() else _persisted_applicant_for_update(doc.name)
@@ -178,6 +223,7 @@ def link_job_applicant_profile(doc, method=None) -> None:
 				(persisted.custom_cv_sha256 or "").strip().lower() != cv_sha256,
 			)
 		)
+		persisted_profile = persisted_profile_row.name
 		doc.set("custom_candidate_profile", persisted_profile)
 		if identity_changed:
 			_set_if_supported(doc, "custom_dedupe_status", DEDUPE_REVIEW)
@@ -258,6 +304,7 @@ def backfill_candidate_profiles() -> int:
 				"custom_normalized_phone": applicant.custom_normalized_phone,
 				"custom_dedupe_status": applicant.custom_dedupe_status or DEDUPE_NEW,
 				"custom_cv_sha256": applicant.custom_cv_sha256 or "",
+				"custom_ayp_governed": 1,
 			},
 			update_modified=False,
 		)
@@ -272,6 +319,15 @@ def sync_candidate_profile(doc, method=None) -> None:
 	profile_name = doc.get("custom_candidate_profile")
 	if not profile_name or not frappe.db.exists(PROFILE_DOCTYPE, profile_name):
 		return
+	resolved = resolve_candidate_profile(profile_name, for_update=True)
+	if not resolved:
+		return
+	profile_name = resolved.name
+	if doc.get("custom_candidate_profile") != profile_name:
+		doc.custom_candidate_profile = profile_name
+		frappe.db.set_value(
+			"Job Applicant", doc.name, "custom_candidate_profile", profile_name, update_modified=False
+		)
 
 	profile = frappe.get_doc(PROFILE_DOCTYPE, profile_name)
 	changed = False

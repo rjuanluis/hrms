@@ -25,6 +25,11 @@
 
 				<!-- Feedback -->
 				<div class="reviewer-feedback col-xs-6">
+					<div class="mb-2">
+						<span class="indicator-pill {{ feedback_history[i].result === 'Cleared' ? 'green' : 'red' }}">
+							{{ feedback_history[i].result }}
+						</span>
+					</div>
 					<div class="rating">
 						{%= frappe.render_template("rating",
 								{number_of_stars: 5, average_rating: feedback_history[i].total_score, for_summary: false}

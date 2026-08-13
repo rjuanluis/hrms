@@ -1,6 +1,8 @@
 import frappe
 from frappe.tests import UnitTestCase
 
+from hrms.recruitment.candidate_profile_governance import candidate_profile_governance_update
+
 
 class TestAYPCandidateProfile(UnitTestCase):
 	def _new_profile(self):
@@ -36,3 +38,33 @@ class TestAYPCandidateProfile(UnitTestCase):
 		profile.disposition_reason = "Solicitud de prueba"
 		with self.assertRaises(frappe.ValidationError):
 			profile.on_trash()
+
+	def test_ordinary_write_cannot_clear_do_not_contact_or_reactivate_profile(self):
+		profile = self._new_profile().insert()
+
+		@candidate_profile_governance_update
+		def opt_out():
+			profile.do_not_contact = 1
+			profile.talent_pool_status = "Sin interés"
+			profile.disposition_reason = "Solicitud verificable de no contacto."
+			profile.save()
+
+		opt_out()
+		profile.do_not_contact = 0
+		profile.talent_pool_status = "Activo"
+		with self.assertRaises(frappe.PermissionError):
+			profile.save()
+
+	def test_audited_governance_context_can_change_privacy_state(self):
+		profile = self._new_profile().insert()
+
+		@candidate_profile_governance_update
+		def dispose():
+			profile.do_not_contact = 1
+			profile.talent_pool_status = "Dispuesto"
+			profile.disposition_reason = "Disposición autorizada y registrada por endpoint."
+			profile.save()
+
+		dispose()
+		self.assertEqual(profile.do_not_contact, 1)
+		self.assertEqual(profile.talent_pool_status, "Dispuesto")

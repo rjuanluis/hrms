@@ -49,3 +49,9 @@ hrms.patches.v16_0.add_default_hr_role_permissions #2026-05-28
 hrms.patches.v16_0.set_reference_fields_in_expense_claim_advance
 hrms.patches.v16_0.update_partially_paid_employee_advance_status
 hrms.patches.v16_0.create_ayp_candidate_profiles #2026-07-17
+hrms.patches.v16_0.add_ayp_candidate_review_fields #2026-08-11
+hrms.patches.v16_0.add_ayp_candidate_document_processing #2026-08-12
+hrms.patches.v16_0.add_ayp_candidate_document_durability #2026-08-12
+hrms.patches.v16_0.repair_unreachable_ayp_candidate_document_states #2026-08-12
+hrms.patches.v16_0.add_ayp_interview_governance #2026-08-11
+hrms.patches.v16_0.create_ayp_interview_kit #2026-08-11

@@ -8,6 +8,8 @@ from frappe.utils import add_years, cint, get_link_to_form, getdate
 
 from erpnext.setup.doctype.employee.employee import Employee
 
+from hrms.recruitment.interview_governance import update_job_applicant_from_downstream
+
 
 class EmployeeMaster(Employee):
 	def autoname(self):
@@ -58,7 +60,7 @@ def update_job_applicant_and_offer(doc, method=None):
 
 	applicant_status_before_change = frappe.db.get_value("Job Applicant", doc.job_applicant, "status")
 	if applicant_status_before_change != "Accepted":
-		frappe.db.set_value("Job Applicant", doc.job_applicant, "status", "Accepted")
+		update_job_applicant_from_downstream(doc.job_applicant, "Accepted", _("Employee"))
 		frappe.msgprint(
 			_("Updated the status of linked Job Applicant {0} to {1}").format(
 				get_link_to_form("Job Applicant", doc.job_applicant), frappe.bold(_("Accepted"))

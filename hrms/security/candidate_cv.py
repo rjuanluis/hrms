@@ -3,8 +3,11 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import re
 import socket
 import struct
+import subprocess
+import sys
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree
@@ -18,18 +21,9 @@ from frappe.utils.file_manager import get_file
 MAX_CV_BYTES = 5 * 1024 * 1024
 MAX_DOCX_UNCOMPRESSED_BYTES = 20 * 1024 * 1024
 MAX_DOCX_ENTRIES = 1000
-ALLOWED_EXTENSIONS = {".pdf", ".docx"}
-PDF_ACTIVE_MARKERS = (
-	b"/javascript",
-	b"/js",
-	b"/launch",
-	b"/embeddedfile",
-	b"/richmedia",
-	b"/xfa",
-	b"/openaction",
-	b"/aa",
-	b"/acroform",
-)
+PDF_VALIDATION_TIMEOUT_SECONDS = 7
+ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx", ".heic", ".heif", ".jpeg", ".jpg", ".png"}
+PDF_NAME_ESCAPE = re.compile(rb"#([0-9a-fA-F]{2})")
 PRIVACY_NOTICE_VERSION = "AYP-RH-2026-07-17-v3"
 
 
@@ -74,13 +68,33 @@ def _is_upload_endpoint() -> bool:
 	)
 
 
+def _decode_pdf_name(raw_name: bytes) -> bytes:
+	if re.search(rb"#(?![0-9a-fA-F]{2})", raw_name):
+		raise CandidateCVSecurityError(_("El PDF contiene un nombre interno inválido."))
+	decoded = PDF_NAME_ESCAPE.sub(lambda match: bytes.fromhex(match.group(1).decode("ascii")), raw_name)
+	return decoded.lower()
+
+
 def _validate_pdf(content: bytes) -> None:
 	if not content.startswith(b"%PDF-"):
 		raise CandidateCVSecurityError(_("El archivo no es un PDF válido."))
-	if any(marker in content.lower() for marker in PDF_ACTIVE_MARKERS):
-		raise CandidateCVSecurityError(
-			_("El PDF contiene contenido activo o archivos incrustados y no puede aceptarse.")
+	try:
+		completed = subprocess.run(
+			[sys.executable, str(Path(__file__).with_name("pdf_cv_validator.py"))],
+			input=content,
+			stdout=subprocess.DEVNULL,
+			stderr=subprocess.DEVNULL,
+			check=False,
+			timeout=PDF_VALIDATION_TIMEOUT_SECONDS,
+			close_fds=True,
+			env={"PATH": os.environ.get("PATH", "")},
 		)
+	except (OSError, subprocess.SubprocessError) as exc:
+		raise CandidateCVSecurityError(
+			_("El PDF está dañado o no supera la validación estructural.")
+		) from exc
+	if completed.returncode != 0:
+		raise CandidateCVSecurityError(_("El PDF está dañado, protegido o contiene contenido activo."))
 
 
 def _validate_docx(content: bytes) -> None:
@@ -121,6 +135,27 @@ def _validate_docx(content: bytes) -> None:
 		raise CandidateCVSecurityError(_("El archivo no es un DOCX válido.")) from exc
 
 
+def _validate_image(extension: str, content: bytes) -> None:
+	valid = {
+		".jpg": content.startswith(b"\xff\xd8\xff"),
+		".jpeg": content.startswith(b"\xff\xd8\xff"),
+		".png": content.startswith(b"\x89PNG\r\n\x1a\n"),
+		".heic": len(content) >= 12
+		and content[4:8] == b"ftyp"
+		and content[8:12] in {b"heic", b"heix", b"hevc", b"hevx", b"mif1"},
+		".heif": len(content) >= 12
+		and content[4:8] == b"ftyp"
+		and content[8:12] in {b"heic", b"heix", b"hevc", b"hevx", b"mif1"},
+	}[extension]
+	if not valid:
+		raise CandidateCVSecurityError(_("La imagen no coincide con el formato declarado."))
+
+
+def _validate_legacy_doc(content: bytes) -> None:
+	if not content.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+		raise CandidateCVSecurityError(_("El archivo no es un documento Word .doc válido."))
+
+
 def validate_cv_file(filename: str, content: bytes) -> None:
 	if not content:
 		raise CandidateCVSecurityError(_("El CV está vacío."))
@@ -129,11 +164,17 @@ def validate_cv_file(filename: str, content: bytes) -> None:
 
 	extension = Path(filename or "").suffix.lower()
 	if extension not in ALLOWED_EXTENSIONS:
-		raise CandidateCVSecurityError(_("Solo se permiten archivos PDF o DOCX."))
+		raise CandidateCVSecurityError(
+			_("Solo se permiten CV en PDF, Word DOC/DOCX o imagen JPG, PNG y HEIC/HEIF.")
+		)
 	if extension == ".pdf":
 		_validate_pdf(content)
-	else:
+	elif extension == ".docx":
 		_validate_docx(content)
+	elif extension == ".doc":
+		_validate_legacy_doc(content)
+	else:
+		_validate_image(extension, content)
 
 
 def scan_bytes_with_clamd(content: bytes, *, host: str, port: int, timeout: float = 20.0) -> str:
