@@ -33,13 +33,10 @@ for volume in "$SITES_VOLUME" "$LOGS_VOLUME" ayp_hr_db_data ayp_hr_redis_queue_d
   docker volume inspect "$volume" >/dev/null 2>&1 || docker volume create "$volume" >/dev/null
 done
 
-EASYPANEL_CONTAINER="$(docker ps --filter name=easypanel. --format '{{.ID}}' | head -1)"
-[[ -n "$EASYPANEL_CONTAINER" ]] || { echo "EasyPanel container is not running" >&2; exit 4; }
-
 compose() {
   local args=(-p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE")
   [[ -s "$COMPOSE_OVERRIDE" ]] && args+=(-f "$COMPOSE_OVERRIDE")
-  docker exec "$EASYPANEL_CONTAINER" docker compose "${args[@]}" "$@"
+  docker compose "${args[@]}" "$@"
 }
 
 container_id() {
