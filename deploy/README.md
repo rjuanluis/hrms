@@ -17,7 +17,7 @@ Server state is mutable, but every infrastructure manifest, bootstrap routine, m
 
 ## Deployment flow
 
-1. A push to `ayp-production` validates the source and builds an immutable image.
+1. A push to `ayp-production` validates the source and builds an immutable image. The workflow pins the exact HRMS, Frappe and ERPNext commits plus the `frappe/build` and `frappe/base` image digests; the built image carries and verifies all three application-source markers.
 2. GitHub Actions connects using a restricted deployment key.
 3. `host-deploy-wrapper.sh` permits only an AyP HR image deployment.
 4. `deploy.sh` accepts only the tested OCI digest (`repo@sha256:…`), renders it into the Compose template, updates that exact immutable source through EasyPanel's authenticated API with a service-scoped rollback artifact, and requests deployment through that same control plane. It verifies every persistent application container plus the one-shot worker configurator against the candidate image ID. A failure before migration restores the prior inline source through the authenticated API, redeploys it, and verifies canonical source, managed file, prior persistent-service count, and backend image ID. Legacy rollback also restores the prior local `production` alias when the saved source still uses it. Once migration starts, automatic image downgrade is disabled and the script stops for manual recovery.

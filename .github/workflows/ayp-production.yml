@@ -22,6 +22,10 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: rjuanluis/ayp-hrms
   RELEASE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  FRAPPE_SHA: 6a329d068416768ec47ccd3326b9cc95a8d7bf99
+  ERPNEXT_SHA: 81a6f97566b83609c3917404a560b673050e907d
+  FRAPPE_BUILD_DIGEST: sha256:2e5af8f2ae6a61dc0ad219d23fb37df89d86a9c9bf4b5ac6d815dd82fabe7f58
+  FRAPPE_BASE_DIGEST: sha256:101676c067d777383e259618cf0df51350a676786c7ced3514f750aebc9668e7
 
 jobs:
   validate:
@@ -102,9 +106,19 @@ jobs:
           workflow = Path('.github/workflows/ayp-production.yml').read_text()
           required_image_contracts = [
               'git archive --format=tar --output=frappe_docker/hrms-source.tar "$RELEASE_SHA"',
+              'git -C frappe_source archive --format=tar',
+              'git -C erpnext_source archive --format=tar',
               'git get-tar-commit-id < frappe_docker/hrms-source.tar',
+              'FRAPPE_SHA: 6a329d068416768ec47ccd3326b9cc95a8d7bf99',
+              'ERPNEXT_SHA: 81a6f97566b83609c3917404a560b673050e907d',
+              'FRAPPE_BUILD_DIGEST: sha256:2e5af8f2ae6a61dc0ad219d23fb37df89d86a9c9bf4b5ac6d815dd82fabe7f58',
+              'FRAPPE_BASE_DIGEST: sha256:101676c067d777383e259618cf0df51350a676786c7ced3514f750aebc9668e7',
+              'file:///home/frappe/frappe-src',
+              'file:///home/frappe/erpnext-src',
               'file:///home/frappe/hrms-src',
               'apps.release.json',
+              '/home/frappe/frappe-bench/apps/frappe/.ayp-frappe-sha',
+              '/home/frappe/frappe-bench/apps/erpnext/.ayp-erpnext-sha',
               '/home/frappe/frappe-bench/apps/hrms/.ayp-release-sha',
               'antiword -h 2>&1 | grep -qi "antiword"',
               'steps.build.outputs.digest',
@@ -141,42 +155,81 @@ jobs:
           ref: v3.2.1
           path: frappe_docker
 
+      - name: Checkout pinned Frappe source
+        uses: actions/checkout@v4
+        with:
+          repository: frappe/frappe
+          ref: ${{ env.FRAPPE_SHA }}
+          path: frappe_source
+
+      - name: Checkout pinned ERPNext source
+        uses: actions/checkout@v4
+        with:
+          repository: frappe/erpnext
+          ref: ${{ env.ERPNEXT_SHA }}
+          path: erpnext_source
+
       - name: Set immutable image reference
         id: image
         run: echo "value=${REGISTRY}/${IMAGE_NAME}:${RELEASE_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Stage exact AyP source and document runtime in production build context
         run: |
+          git -C frappe_source archive --format=tar --output="$GITHUB_WORKSPACE/frappe_docker/frappe-source.tar" "$FRAPPE_SHA"
+          test "$(git get-tar-commit-id < frappe_docker/frappe-source.tar)" = "$FRAPPE_SHA"
+          git -C erpnext_source archive --format=tar --output="$GITHUB_WORKSPACE/frappe_docker/erpnext-source.tar" "$ERPNEXT_SHA"
+          test "$(git get-tar-commit-id < frappe_docker/erpnext-source.tar)" = "$ERPNEXT_SHA"
           git archive --format=tar --output=frappe_docker/hrms-source.tar "$RELEASE_SHA"
           test "$(git get-tar-commit-id < frappe_docker/hrms-source.tar)" = "$RELEASE_SHA"
           python - <<'PY'
           import json
+          import os
           from pathlib import Path
 
           apps = json.loads(Path("deploy/apps.json").read_text())
+          erpnext = [app for app in apps if app["url"].rstrip("/").endswith("/erpnext")]
           hrms = [app for app in apps if app["url"].rstrip("/").endswith("/hrms")]
-          if len(hrms) != 1:
-              raise SystemExit("deploy/apps.json must contain exactly one HRMS source")
+          if len(erpnext) != 1 or len(hrms) != 1:
+              raise SystemExit("deploy/apps.json must contain exactly one ERPNext and HRMS source")
+          erpnext[0].update({"url": "file:///home/frappe/erpnext-src", "branch": "image-release"})
           hrms[0].update({"url": "file:///home/frappe/hrms-src", "branch": "image-release"})
           Path("frappe_docker/apps.release.json").write_text(json.dumps(apps, indent=2) + "\n")
 
           containerfile = Path("frappe_docker/images/layered/Containerfile")
           text = containerfile.read_text()
+          build_from = "FROM ${FRAPPE_IMAGE_PREFIX}/build:${FRAPPE_BRANCH} AS builder"
+          base_from = "FROM ${FRAPPE_IMAGE_PREFIX}/base:${FRAPPE_BRANCH} AS backend"
+          if text.count(build_from) != 1 or text.count(base_from) != 1:
+              raise SystemExit("frappe_docker base image anchors changed")
+          text = text.replace(build_from, f"FROM frappe/build@{os.environ['FRAPPE_BUILD_DIGEST']} AS builder")
+          text = text.replace(base_from, f"FROM frappe/base@{os.environ['FRAPPE_BASE_DIGEST']} AS backend")
           anchor = "USER frappe\n\nRUN --mount=type=secret,id=apps_json"
+          sources = (
+              ("frappe", "frappe-source.tar", ".ayp-frappe-sha", os.environ["FRAPPE_SHA"]),
+              ("erpnext", "erpnext-source.tar", ".ayp-erpnext-sha", os.environ["ERPNEXT_SHA"]),
+              ("hrms", "hrms-source.tar", ".ayp-release-sha", os.environ["RELEASE_SHA"]),
+          )
+          setup = []
+          for app, archive, marker, sha in sources:
+              dest = f"/home/frappe/{app}-src"
+              setup.extend([
+                  f"    && mkdir -p {dest} \\",
+                  f"    && tar -xf /tmp/{archive} -C {dest} \\",
+                  f"    && rm /tmp/{archive} \\",
+                  f"    && cd {dest} \\",
+                  f"    && printf '%s\\n' '{sha}' > {marker} \\",
+                  "    && git init \\",
+                  "    && git config user.name 'AyP Release Builder' \\",
+                  "    && git config user.email 'release-builder@aroypedal.com' \\",
+                  "    && git add . \\",
+                  f"    && git commit -m '{app} {sha}' \\",
+                  "    && git branch -M image-release \\",
+              ])
+          setup[-1] = setup[-1].removesuffix(" \\")
           replacement = (
               "USER frappe\n\n"
-              "COPY --chown=frappe:frappe hrms-source.tar /tmp/hrms-source.tar\n"
-              "RUN mkdir -p /home/frappe/hrms-src \\\n"
-              "    && tar -xf /tmp/hrms-source.tar -C /home/frappe/hrms-src \\\n"
-              "    && rm /tmp/hrms-source.tar \\\n"
-              "    && cd /home/frappe/hrms-src \\\n"
-              "    && printf '%s\\n' \"${CACHE_BUST}\" > .ayp-release-sha \\\n"
-              "    && git init \\\n"
-              "    && git config user.name 'AyP Release Builder' \\\n"
-              "    && git config user.email 'release-builder@aroypedal.com' \\\n"
-              "    && git add . \\\n"
-              "    && git commit -m \"AyP HRMS ${CACHE_BUST}\" \\\n"
-              "    && git branch -M image-release\n\n"
+              "COPY --chown=frappe:frappe frappe-source.tar erpnext-source.tar hrms-source.tar /tmp/\n"
+              "RUN true \\\n" + "\n".join(setup) + "\n\n"
               "RUN --mount=type=secret,id=apps_json"
           )
           if text.count(anchor) != 1:
@@ -220,8 +273,8 @@ jobs:
           push: true
           platforms: linux/amd64
           build-args: |
-            FRAPPE_PATH=https://github.com/frappe/frappe
-            FRAPPE_BRANCH=version-16
+            FRAPPE_PATH=file:///home/frappe/frappe-src
+            FRAPPE_BRANCH=image-release
             CACHE_BUST=${{ env.RELEASE_SHA }}
           secret-files: |
             apps_json=${{ github.workspace }}/frappe_docker/apps.release.json
@@ -242,6 +295,8 @@ jobs:
         run: |
           docker pull "${{ steps.release.outputs.value }}"
           docker run --rm --entrypoint bash "${{ steps.release.outputs.value }}" -ec '
+            test "$(cat /home/frappe/frappe-bench/apps/frappe/.ayp-frappe-sha)" = "${{ env.FRAPPE_SHA }}"
+            test "$(cat /home/frappe/frappe-bench/apps/erpnext/.ayp-erpnext-sha)" = "${{ env.ERPNEXT_SHA }}"
             test "$(cat /home/frappe/frappe-bench/apps/hrms/.ayp-release-sha)" = "${{ env.RELEASE_SHA }}"
             for executable in pdfinfo pdftotext pdftoppm tesseract antiword heif-convert; do
               command -v "$executable" >/dev/null
