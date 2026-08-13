@@ -55,7 +55,10 @@ jobs:
           helper = Path('deploy/easypanel_compose_api.js').read_text()
           required_deploy_contracts = [
               'deploy_compose_source',
-              'local expected=11',
+              'local expected="${3:-11}"',
+              'ROLLBACK_ARMED=1',
+              'DEPLOY_PHASE="pre_migration"',
+              'rollback_pre_migration',
               'queue-documents scheduler',
               'Verifying dedicated candidate-document worker',
               'compose_rollback',
