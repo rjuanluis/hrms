@@ -11,6 +11,10 @@ class FakeValidationError(Exception):
 	pass
 
 
+def _fixed_now_datetime():
+	return "2026-08-11 20:00:00"
+
+
 class FakeFlags(dict):
 	__getattr__ = dict.get
 
@@ -159,7 +163,7 @@ class FakeFrappe(types.ModuleType):
 		self.PermissionError = PermissionError
 		self.session = types.SimpleNamespace(user="reviewer@example.com")
 		self.flags = FakeFlags()
-		self.utils = types.SimpleNamespace(now_datetime=lambda: "2026-08-11 20:00:00")
+		self.utils = types.SimpleNamespace(now_datetime=_fixed_now_datetime)
 		self.db = FakeDB(self)
 		self.docs = {}
 		self.rows = []

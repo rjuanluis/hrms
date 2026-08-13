@@ -236,7 +236,9 @@ def _persist_result(
 		},
 		update_modified=False,
 	)
-	frappe.db.commit()
+	# Persist the terminal CAS result before this background job exits so a
+	# retry cannot observe the prior in-progress claim.
+	frappe.db.commit()  # nosemgrep
 	return True
 
 
@@ -269,14 +271,18 @@ def process_candidate_document(applicant_name: str, expected_sha256: str) -> dic
 		},
 		update_modified=False,
 	)
-	frappe.db.commit()
+	# The durable claim must be visible before expensive extraction begins;
+	# otherwise a retry could run the same document concurrently.
+	frappe.db.commit()  # nosemgrep
 
 	try:
 		applicant = frappe.get_doc("Job Applicant", applicant_name)
 		if (applicant.custom_cv_sha256 or "") != expected_sha256:
 			return {"status": "stale"}
 		filename, content = _load_exact_cv(applicant)
-		frappe.db.commit()
+		# Release the attachment read transaction before invoking the bounded
+		# parser while retaining the already-persisted exact claim.
+		frappe.db.commit()  # nosemgrep
 		result = extract_candidate_document(filename, content)
 		status = processing_status_for_method(result.method)
 		persisted = _persist_result(

@@ -98,7 +98,9 @@ def _interview_queue_applicants(queue: str) -> list[str]:
 		"overdue": "i.name IS NOT NULL AND i.scheduled_on < CURDATE() AND i.docstatus = 0 AND i.status NOT IN ('Cleared', 'Rejected', 'Cancelled')",
 		"ready_final_decision": "i.name IS NOT NULL AND i.docstatus = 1 AND i.status IN ('Cleared', 'Rejected') AND ja.status NOT IN ('Accepted', 'Rejected')",
 	}
-	return frappe.db.sql(
+	# The predicate comes exclusively from the fixed allowlist above; all data
+	# values remain bound parameters.
+	return frappe.db.sql(  # nosemgrep
 		f"""
 		SELECT ja.name
 		FROM `tabJob Applicant` ja
@@ -201,7 +203,11 @@ def _profile_state_by_name(profile_names: list[str]) -> dict:
 
 
 @frappe.whitelist()
-def get_candidates(filters=None, start=0, page_length=50):
+def get_candidates(
+	filters: str | dict | None = None,
+	start: int | str = 0,
+	page_length: int | str = 50,
+):
 	frappe.only_for(PAGE_ROLES)
 	frappe.has_permission("Job Applicant", "read", throw=True)
 	try:
@@ -282,7 +288,9 @@ def get_candidates(filters=None, start=0, page_length=50):
 
 def _load_and_validate_documents(request: BatchReviewRequest) -> list:
 	placeholders = ", ".join(["%s"] * len(request.applicant_names))
-	frappe.db.sql(
+	# Only the number of trusted `%s` placeholders is generated; applicant
+	# values remain separately bound.
+	frappe.db.sql(  # nosemgrep
 		f"SELECT name FROM `tabJob Applicant` WHERE name IN ({placeholders}) ORDER BY name FOR UPDATE",
 		tuple(sorted(request.applicant_names)),
 	)
@@ -331,7 +339,12 @@ def _insert_review_event(doc, *, previous_status: str, request: BatchReviewReque
 
 
 @frappe.whitelist(methods=["POST"])
-def apply_batch_action(applicant_names, target_status, reason, job_title):
+def apply_batch_action(
+	applicant_names: list[str] | str,
+	target_status: str,
+	reason: str,
+	job_title: str,
+):
 	frappe.only_for(PAGE_ROLES)
 	frappe.has_permission("Job Applicant", "write", throw=True)
 	try:
@@ -437,7 +450,7 @@ def _run_payload(run_name: str) -> dict:
 
 
 @frappe.whitelist(methods=["POST"])
-def freeze_filtered_run(filters, target_status, reason):
+def freeze_filtered_run(filters: str | dict, target_status: str, reason: str):
 	"""Freeze the complete matching cohort before an operator confirms it."""
 
 	frappe.only_for(PAGE_ROLES)
@@ -683,7 +696,9 @@ def process_filtered_run_chunk(run: str):
 		members = _pending_run_members_for_update(run)
 		if members:
 			placeholders = ", ".join(["%s"] * len(members))
-			frappe.db.sql(
+			# Only the number of trusted `%s` placeholders is generated; member
+			# values remain separately bound.
+			frappe.db.sql(  # nosemgrep
 				f"SELECT name FROM `tabJob Applicant` WHERE name IN ({placeholders}) ORDER BY name FOR UPDATE",
 				tuple(sorted(member["applicant"] for member in members)),
 			)
@@ -828,7 +843,7 @@ def _scorecard_criteria_payload() -> list:
 
 
 @frappe.whitelist()
-def get_scorecard(applicant):
+def get_scorecard(applicant: str):
 	frappe.only_for(PAGE_ROLES)
 	frappe.has_permission("Job Applicant", "read", applicant, throw=True)
 	frappe.get_doc("Job Applicant", applicant)
@@ -862,7 +877,7 @@ def get_scorecard(applicant):
 
 
 @frappe.whitelist(methods=["POST"])
-def save_scorecard(applicant, criteria):
+def save_scorecard(applicant: str, criteria: list[dict] | str):
 	frappe.only_for(PAGE_ROLES)
 	frappe.has_permission("Job Applicant", "write", applicant, throw=True)
 	doc = frappe.get_doc("Job Applicant", applicant)
@@ -1082,7 +1097,9 @@ def _lock_profiles(profile_names: list[str]) -> None:
 	if not profile_names:
 		return
 	placeholders = ", ".join(["%s"] * len(profile_names))
-	frappe.db.sql(
+	# Only the number of trusted `%s` placeholders is generated; profile names
+	# remain separately bound.
+	frappe.db.sql(  # nosemgrep
 		f"SELECT name FROM `tabAYP Candidate Profile` WHERE name IN ({placeholders}) ORDER BY name FOR UPDATE",
 		tuple(profile_names),
 	)

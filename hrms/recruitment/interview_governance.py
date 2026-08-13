@@ -10,7 +10,7 @@ from hrms.recruitment.interview_decision_domain import (
 )
 
 FINAL_APPLICATION_STATUSES = frozenset({"Accepted"})
-CONCURRENT_CHANGE_MESSAGE = _(
+CONCURRENT_CHANGE_MESSAGE = (
 	"El expediente cambió mientras se procesaba la acción. Recargue la entrevista y vuelva a intentarlo."
 )
 

@@ -131,7 +131,7 @@ def main() -> None:
 	args = parser.parse_args()
 	added = patch_schema(args.schema)
 	print(f"frappe_bootstrap_tables_patched={len(added)}")
-	print(f"frappe_bootstrap_columns_added={sum(map(len, added.values()))}")
+	print(f"frappe_bootstrap_columns_added={sum(len(columns) for columns in added.values())}")
 
 
 if __name__ == "__main__":

@@ -72,7 +72,9 @@ def resolve_candidate_profile(profile_name: str | None, *, for_update: bool = Fa
 		if not current or current in seen:
 			frappe.throw(_("La cadena de perfiles fusionados no es válida."), frappe.ValidationError)
 		seen.add(current)
-		rows = frappe.db.sql(
+		# `lock_clause` is selected from fixed SQL keywords; the profile name
+		# remains a separately bound parameter.
+		rows = frappe.db.sql(  # nosemgrep
 			"""
 			SELECT name, candidate_name, merged_into, do_not_contact
 			FROM `tabAYP Candidate Profile`
