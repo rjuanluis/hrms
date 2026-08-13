@@ -208,7 +208,7 @@ def link_job_applicant_profile(doc, method=None) -> None:
 	# integration suite also creates generic fixtures through these global hooks;
 	# do not silently convert those fixtures into AyP workflow records unless a
 	# test explicitly opts in by setting the field itself.
-	if not frappe.in_test or doc.get("custom_ayp_governed"):
+	if not frappe.flags.in_test or doc.get("custom_ayp_governed"):
 		_set_if_supported(doc, "custom_ayp_governed", 1)
 	_acquire_candidate_locks(email=email, phone=phone, cv_sha256=cv_sha256)
 
