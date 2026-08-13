@@ -15,20 +15,33 @@ LOGS_VOLUME="ayp_hr_logs"
 SECRETS_DIR="/opt/ayp-hr/secrets"
 DEPLOY_URL_FILE="${SECRETS_DIR}/easypanel_deploy_url"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-IMAGE="${1:-}"
+IMAGE_TAG="${1:-}"
+IMAGE="${2:-}"
+if [[ -z "$IMAGE" ]]; then
+  IFS= read -r IMAGE || true
+fi
+RELEASE_SHA="${IMAGE_TAG##*:}"
 COMPOSE_ROLLBACK_PATH=""
 CANDIDATE_COMPOSE_PATH=""
 ROLLBACK_ARMED=0
 DEPLOY_PHASE="preflight"
 PREVIOUS_SERVICE_COUNT=0
+declare -A PREVIOUS_APP_IMAGE_IDS=()
+declare -A PREVIOUS_APP_PRESENT=()
+APP_SERVICES=(backend frontend websocket queue-short queue-long queue-documents scheduler)
 
 cleanup_candidate_compose() {
   [[ -z "$CANDIDATE_COMPOSE_PATH" ]] || rm -f "$CANDIDATE_COMPOSE_PATH"
 }
 trap cleanup_candidate_compose EXIT
 
-if [[ ! "$IMAGE" =~ ^ghcr\.io/rjuanluis/ayp-hrms@sha256:[0-9a-f]{64}$ ]]; then
+if [[ ! "$IMAGE_TAG" =~ ^ghcr\.io/rjuanluis/ayp-hrms:[0-9a-f]{40}$ ]] \
+  || [[ ! "$IMAGE" =~ ^ghcr\.io/rjuanluis/ayp-hrms@sha256:[0-9a-f]{64}$ ]]; then
   echo "Invalid immutable AyP HR image reference" >&2
+  exit 2
+fi
+if [[ "$(git -C "$ROOT_DIR" rev-parse HEAD)" != "$RELEASE_SHA" ]]; then
+  echo "Deployment source does not match the image release SHA" >&2
   exit 2
 fi
 
@@ -39,6 +52,24 @@ for path in \
   "$ROOT_DIR/deploy/easypanel_compose_api.js"; do
   [[ -s "$path" ]] || { echo "Missing required file: $path" >&2; exit 3; }
 done
+
+for ref in "$IMAGE_TAG" "$IMAGE"; do
+  if ! docker image inspect "$ref" >/dev/null 2>&1; then
+    docker pull "$ref" >/dev/null
+  fi
+done
+tag_image_id="$(docker image inspect "$IMAGE_TAG" --format '{{.Id}}')"
+new_image_id="$(docker image inspect "$IMAGE" --format '{{.Id}}')"
+[[ -n "$tag_image_id" && "$tag_image_id" == "$new_image_id" ]] || {
+  echo "Release tag and registry digest do not identify the same image" >&2
+  exit 2
+}
+installed_release_sha="$(docker run --rm --entrypoint cat "$IMAGE" \
+  /home/frappe/frappe-bench/apps/hrms/.ayp-release-sha 2>/dev/null || true)"
+[[ "$installed_release_sha" == "$RELEASE_SHA" ]] || {
+  echo "Image HRMS marker does not match the deployment release SHA" >&2
+  exit 2
+}
 
 for volume in "$SITES_VOLUME" "$LOGS_VOLUME" ayp_hr_db_data ayp_hr_redis_queue_data ayp_hr_clamav_data; do
   docker volume inspect "$volume" >/dev/null 2>&1 || docker volume create "$volume" >/dev/null
@@ -172,8 +203,7 @@ wait_for_compose() {
 
 verify_candidate_image_ids() {
   local service id actual status found
-  local app_services=(backend frontend websocket queue-short queue-long queue-documents scheduler)
-  for service in "${app_services[@]}"; do
+  for service in "${APP_SERVICES[@]}"; do
     id="$(container_id "$service")"
     [[ -n "$id" ]] || { echo "Missing application container: $service" >&2; return 1; }
     actual="$(docker inspect "$id" --format '{{.Image}}')"
@@ -200,11 +230,43 @@ verify_candidate_image_ids() {
   }
 }
 
+capture_previous_app_image_ids() {
+  local service id
+  for service in "${APP_SERVICES[@]}"; do
+    id="$(container_id "$service")"
+    if [[ -n "$id" ]]; then
+      PREVIOUS_APP_PRESENT["$service"]=1
+      PREVIOUS_APP_IMAGE_IDS["$service"]="$(docker inspect "$id" --format '{{.Image}}')"
+    else
+      PREVIOUS_APP_PRESENT["$service"]=0
+      PREVIOUS_APP_IMAGE_IDS["$service"]=""
+    fi
+  done
+}
+
+verify_previous_app_image_ids() {
+  local service id actual
+  for service in "${APP_SERVICES[@]}"; do
+    id="$(container_id "$service")"
+    if [[ "${PREVIOUS_APP_PRESENT[$service]}" == 1 ]]; then
+      [[ -n "$id" ]] || { echo "Rollback application service is missing: $service" >&2; return 1; }
+      actual="$(docker inspect "$id" --format '{{.Image}}')"
+      [[ "$actual" == "${PREVIOUS_APP_IMAGE_IDS[$service]}" ]] || {
+        echo "Rollback application service has the wrong image ID: $service" >&2
+        return 1
+      }
+    elif [[ -n "$id" ]]; then
+      echo "Rollback left an application service that was absent before deploy: $service" >&2
+      return 1
+    fi
+  done
+}
+
 rollback_pre_migration() {
   local reason="${1:-pre-migration deployment failure}"
   local source="$COMPOSE_ROLLBACK_PATH/source-before.yml"
   local helper="$ROOT_DIR/deploy/easypanel_compose_api.js"
-  local panel_id helper_path result rollback_rc current_backend current_image
+  local panel_id helper_path result rollback_rc
   ROLLBACK_ARMED=0
   set +e
   echo "Restoring pre-migration EasyPanel state after: $reason" >&2
@@ -240,14 +302,10 @@ rollback_pre_migration() {
     set -e
     return 1
   }
-  if [[ -n "$old_production_id" ]]; then
-    current_backend="$(container_id backend)"
-    current_image="$(docker inspect "$current_backend" --format '{{.Image}}' 2>/dev/null || true)"
-    if [[ "$current_image" != "$old_production_id" ]]; then
-      echo "Rollback backend image does not match the previous image ID" >&2
-      set -e
-      return 1
-    fi
+  if ! verify_previous_app_image_ids; then
+    echo "Rollback application services do not match their previous image IDs" >&2
+    set -e
+    return 1
   fi
   echo "Pre-migration rollback verified at canonical, managed-file, and runtime layers" >&2
   set -e
@@ -276,6 +334,7 @@ if ! docker exec "$backend_id" test -f "sites/$SITE_NAME/site_config.json"; then
   echo "Existing production site could not be verified; refusing to mutate EasyPanel" >&2
   exit 4
 fi
+capture_previous_app_image_ids
 echo "Creating pre-deploy backup"
 docker exec "$backend_id" bench --site "$SITE_NAME" backup --with-files
 
@@ -286,10 +345,6 @@ old_production_tags="$(docker image inspect "$old_production_id" --format '{{jso
   echo "Previous production image ID is required for pre-migration rollback" >&2
   exit 5
 }
-if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
-  docker pull "$IMAGE" >/dev/null
-fi
-new_image_id="$(docker image inspect "$IMAGE" --format '{{.Id}}')"
 expect_replacement=0
 if [[ -z "$old_production_id" || "$old_production_id" != "$new_image_id" ]]; then
   expect_replacement=1
@@ -412,7 +467,7 @@ case "$legacy_status" in
     ;;
 esac
 
-python3 - "$IMAGE" "$old_production_id" "$old_production_tags" "$COMPOSE_ROLLBACK_PATH" <<'PY'
+python3 - "$IMAGE" "$RELEASE_SHA" "$old_production_id" "$old_production_tags" "$COMPOSE_ROLLBACK_PATH" <<'PY'
 import json, sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -422,9 +477,10 @@ receipt = {
     "project": "web",
     "service": "ayp-hrms",
     "image": sys.argv[1],
-    "previous_image_id": sys.argv[2] or None,
-    "previous_image_tags": json.loads(sys.argv[3]) if sys.argv[3] else [],
-    "compose_rollback": sys.argv[4] or None,
+    "release_sha": sys.argv[2],
+    "previous_image_id": sys.argv[3] or None,
+    "previous_image_tags": json.loads(sys.argv[4]) if sys.argv[4] else [],
+    "compose_rollback": sys.argv[5] or None,
     "site": "hr.aroypedal.com",
     "deployed_at": datetime.now(timezone.utc).isoformat(),
 }
