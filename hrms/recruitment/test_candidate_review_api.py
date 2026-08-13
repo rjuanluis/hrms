@@ -249,12 +249,15 @@ MODULE_PATH = ROOT / "hrms" / "hr" / "page" / "ayp_candidate_review" / "ayp_cand
 
 
 def load_api(fake_frappe):
+	original_module_names = set(sys.modules)
 	module_names = (
 		"frappe",
 		"frappe.utils",
 		"hrms.recruitment.candidate_document_service",
 	)
 	original_modules = {name: sys.modules.get(name) for name in module_names}
+	recruitment_package = sys.modules.get("hrms.recruitment")
+	recruitment_package_state = dict(vars(recruitment_package)) if recruitment_package else None
 	candidate_document_service = types.ModuleType("hrms.recruitment.candidate_document_service")
 	candidate_document_service.MANUAL_REVIEWABLE = frozenset({"Revisión manual", "Ilegible"})
 	candidate_document_service.revalidate_candidate_document = lambda doc: None
@@ -275,6 +278,15 @@ def load_api(fake_frappe):
 				sys.modules.pop(name, None)
 			else:
 				sys.modules[name] = original
+		for name in tuple(sys.modules):
+			if name.startswith("hrms.recruitment.") and name not in original_module_names:
+				sys.modules.pop(name, None)
+		if recruitment_package_state is not None:
+			for name in tuple(vars(recruitment_package)):
+				if name not in recruitment_package_state:
+					delattr(recruitment_package, name)
+			for name, value in recruitment_package_state.items():
+				setattr(recruitment_package, name, value)
 
 
 class TestCandidateReviewAPI(unittest.TestCase):
@@ -301,6 +313,11 @@ class TestCandidateReviewAPI(unittest.TestCase):
 		self.api.resolve_candidate_profile = lambda name, for_update=False: types.SimpleNamespace(name=name)
 		self.api.revalidate_candidate_document = lambda doc: None
 		self.api.validate_candidate_ready_for_scoring = lambda doc: None
+
+	def test_loader_does_not_cache_recruitment_modules_with_fake_frappe(self):
+		for name, module in sys.modules.items():
+			if name.startswith("hrms.recruitment."):
+				self.assertIsNot(getattr(module, "frappe", None), self.frappe, name)
 
 	def test_get_candidates_returns_bounded_page_and_has_more(self):
 		self.frappe.rows = [
