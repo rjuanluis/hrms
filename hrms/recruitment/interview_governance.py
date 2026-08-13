@@ -242,13 +242,13 @@ def validate_job_applicant_final_transition(doc, method=None):
 	before = doc.get_doc_before_save()
 	previous_status = before.status if before else None
 	previous_final_interview = before.get("custom_ayp_final_interview") if before else None
-	if doc.status in {"Shortlisted", "Accepted", "Rejected"}:
-		# This global save gate intentionally runs before governance/origin flags
-		# so direct form/API, legacy rows, Candidate Review, and Interview
-		# decisions all require the exact current secure CV.
-		revalidate_candidate_document(doc)
 	if not doc.get("custom_ayp_governed"):
 		return
+	if doc.status in {"Shortlisted", "Accepted", "Rejected"}:
+		# This save gate runs before origin flags so direct form/API, legacy AyP
+		# rows, Candidate Review, and Interview decisions all require the exact
+		# current secure CV.
+		revalidate_candidate_document(doc)
 	if (
 		(previous_status in FINAL_APPLICATION_STATUSES or previous_final_interview)
 		and doc.status != previous_status

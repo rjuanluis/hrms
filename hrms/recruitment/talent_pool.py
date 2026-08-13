@@ -204,7 +204,12 @@ def link_job_applicant_profile(doc, method=None) -> None:
 	cv_sha256 = (doc.get("custom_cv_sha256") or "").strip().lower()
 	_set_if_supported(doc, "custom_normalized_email", email)
 	_set_if_supported(doc, "custom_normalized_phone", phone)
-	_set_if_supported(doc, "custom_ayp_governed", 1)
+	# The installed AyP site governs every real applicant.  Upstream HRMS's
+	# integration suite also creates generic fixtures through these global hooks;
+	# do not silently convert those fixtures into AyP workflow records unless a
+	# test explicitly opts in by setting the field itself.
+	if not frappe.in_test or doc.get("custom_ayp_governed"):
+		_set_if_supported(doc, "custom_ayp_governed", 1)
 	_acquire_candidate_locks(email=email, phone=phone, cv_sha256=cv_sha256)
 
 	persisted = None if doc.is_new() else _persisted_applicant_for_update(doc.name)

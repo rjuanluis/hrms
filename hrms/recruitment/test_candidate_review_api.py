@@ -249,17 +249,32 @@ MODULE_PATH = ROOT / "hrms" / "hr" / "page" / "ayp_candidate_review" / "ayp_cand
 
 
 def load_api(fake_frappe):
-	sys.modules["frappe"] = fake_frappe
-	sys.modules["frappe.utils"] = fake_frappe.utils
+	module_names = (
+		"frappe",
+		"frappe.utils",
+		"hrms.recruitment.candidate_document_service",
+	)
+	original_modules = {name: sys.modules.get(name) for name in module_names}
 	candidate_document_service = types.ModuleType("hrms.recruitment.candidate_document_service")
 	candidate_document_service.MANUAL_REVIEWABLE = frozenset({"Revisión manual", "Ilegible"})
 	candidate_document_service.revalidate_candidate_document = lambda doc: None
 	candidate_document_service.validate_candidate_ready_for_scoring = lambda doc: None
-	sys.modules["hrms.recruitment.candidate_document_service"] = candidate_document_service
-	spec = importlib.util.spec_from_file_location("candidate_review_api_under_test", MODULE_PATH)
-	module = importlib.util.module_from_spec(spec)
-	spec.loader.exec_module(module)
-	return module
+	try:
+		sys.modules["frappe"] = fake_frappe
+		sys.modules["frappe.utils"] = fake_frappe.utils
+		sys.modules["hrms.recruitment.candidate_document_service"] = candidate_document_service
+		spec = importlib.util.spec_from_file_location("candidate_review_api_under_test", MODULE_PATH)
+		if spec is None or spec.loader is None:
+			raise ImportError(f"No se pudo cargar el módulo de revisión desde {MODULE_PATH}")
+		module = importlib.util.module_from_spec(spec)
+		spec.loader.exec_module(module)
+		return module
+	finally:
+		for name, original in original_modules.items():
+			if original is None:
+				sys.modules.pop(name, None)
+			else:
+				sys.modules[name] = original
 
 
 class TestCandidateReviewAPI(unittest.TestCase):
@@ -425,7 +440,7 @@ class TestCandidateReviewAPI(unittest.TestCase):
 		self.assertTrue(all(event[0]["batch_id"] == "batch123456" for event in self.frappe.events))
 		self.assertTrue(all(event[1] for event in self.frappe.events))
 		self.assertTrue(all(self.frappe.docs[name].comments for name in ("A", "B")))
-		lock_query, lock_values = next(
+		_lock_query, lock_values = next(
 			(query, values)
 			for query, values in self.frappe.db.sql_calls
 			if "tabJob Applicant" in query and "FOR UPDATE" in query

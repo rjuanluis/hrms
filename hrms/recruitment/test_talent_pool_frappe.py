@@ -23,6 +23,7 @@ class TestTalentPoolLifecycle(UnitTestCase):
 				"applicant_name": "Candidata Integración",
 				"email_id": f"candidate-{token}@example.com",
 				"status": "Open",
+				"custom_ayp_governed": 1,
 			}
 		).insert(ignore_permissions=True)
 

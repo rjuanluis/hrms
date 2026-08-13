@@ -36,6 +36,10 @@ class TestInterviewGovernanceContract(unittest.TestCase):
 		self.assertIn('{"Shortlisted", "Accepted", "Rejected"}', block)
 		self.assertIn("revalidate_candidate_document(doc)", block)
 		self.assertLess(
+			block.index('if not doc.get("custom_ayp_governed")'),
+			block.index("revalidate_candidate_document(doc)"),
+		)
+		self.assertLess(
 			block.index("revalidate_candidate_document(doc)"),
 			block.index('frappe.flags.get("ayp_candidate_review_batch")'),
 		)
