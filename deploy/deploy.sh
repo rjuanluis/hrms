@@ -159,13 +159,23 @@ compose restart backend frontend websocket queue-short queue-long scheduler >/de
 wait_for_compose
 
 echo "Verifying public recruitment routes"
-canonical_form="$(curl -fsSL --max-time 30 "https://$SITE_NAME/empleos/solicitud/new")"
+frontend_id="$(container_id frontend)"
+[[ -n "$frontend_id" ]] || { echo "Frontend container is not running" >&2; exit 6; }
+canonical_form="$(
+  docker exec "$frontend_id" curl -fsS --max-time 30 \
+    -H "Host: $SITE_NAME" \
+    "http://127.0.0.1:8080/empleos/solicitud/new"
+)"
 if [[ "$canonical_form" != *"Solicitud de empleo — Aro y Pedal"* ]] \
   || [[ "$canonical_form" != *"futuras oportunidades de Aro y Pedal"* ]]; then
   echo "Canonical recruitment form is missing the expected title or privacy consent" >&2
   exit 6
 fi
-legacy_status="$(curl -sS -L -o /dev/null -w '%{http_code}' --max-time 30 "https://$SITE_NAME/job_application/new")"
+legacy_status="$(
+  docker exec "$frontend_id" curl -sS -o /dev/null -w '%{http_code}' --max-time 30 \
+    -H "Host: $SITE_NAME" \
+    "http://127.0.0.1:8080/job_application/new"
+)"
 case "$legacy_status" in
   403|404|410) ;;
   *)
