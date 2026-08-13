@@ -884,6 +884,10 @@ class TestPayrollEntry(HRMSTestSuite):
 
 		frappe.db.delete("Loan")
 		applicant, branch, currency, payroll_payable_account = setup_lending()
+		disbursement_date = getdate()
+		payroll_start = (disbursement_date + relativedelta(months=1)).replace(day=1)
+		payroll_end = payroll_start + relativedelta(months=1, days=-1)
+		repayment_start = payroll_start + relativedelta(days=4)
 
 		loan = create_loan(
 			applicant,
@@ -892,8 +896,8 @@ class TestPayrollEntry(HRMSTestSuite):
 			"Repay Over Number of Periods",
 			20,
 			applicant_type="Employee",
-			posting_date="2026-06-02",
-			repayment_start_date="2026-07-05",
+			posting_date=disbursement_date,
+			repayment_start_date=repayment_start,
 		)
 		loan.repay_from_salary = 1
 		loan.submit()
@@ -901,15 +905,16 @@ class TestPayrollEntry(HRMSTestSuite):
 		make_loan_disbursement_entry(
 			loan.name,
 			loan.loan_amount,
-			disbursement_date="2026-06-02",
-			repayment_start_date="2026-07-05",
+			disbursement_date=disbursement_date,
+			repayment_start_date=repayment_start,
 		)
 
-		# July 2026 payroll — end_date 2026-07-31 covers the 2026-07-05 demand
+		# The next complete payroll month covers the scheduled demand without
+		# depending on the wall-clock month in which the suite runs.
 		payroll_entry = make_payroll_entry(
 			company="_Test Company",
-			start_date="2026-07-01",
-			end_date="2026-07-31",
+			start_date=payroll_start,
+			end_date=payroll_end,
 			payable_account=payroll_payable_account,
 			currency=currency,
 			branch=branch,
@@ -928,7 +933,7 @@ class TestPayrollEntry(HRMSTestSuite):
 			"Loan Repayment", loan_repayment_name, ["value_date", "interest_payable"]
 		)
 
-		self.assertEqual(getdate(lr_value_date), getdate("2026-07-31"))
+		self.assertEqual(getdate(lr_value_date), payroll_end)
 		self.assertGreater(flt(lr_interest_payable), 0)
 
 	@HRMSTestSuite.change_settings(
