@@ -17,11 +17,17 @@ DEPLOY_URL_FILE="${SECRETS_DIR}/easypanel_deploy_url"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="${1:-}"
 COMPOSE_ROLLBACK_PATH=""
+CANDIDATE_COMPOSE_PATH=""
 ROLLBACK_ARMED=0
 DEPLOY_PHASE="preflight"
 PREVIOUS_SERVICE_COUNT=0
 
-if [[ ! "$IMAGE" =~ ^ghcr\.io/rjuanluis/ayp-hrms:[0-9a-f]{40}$ ]]; then
+cleanup_candidate_compose() {
+  [[ -z "$CANDIDATE_COMPOSE_PATH" ]] || rm -f "$CANDIDATE_COMPOSE_PATH"
+}
+trap cleanup_candidate_compose EXIT
+
+if [[ ! "$IMAGE" =~ ^ghcr\.io/rjuanluis/ayp-hrms@sha256:[0-9a-f]{64}$ ]]; then
   echo "Invalid immutable AyP HR image reference" >&2
   exit 2
 fi
@@ -45,7 +51,7 @@ compose() {
 }
 
 deploy_compose_source() {
-  local source="$ROOT_DIR/deploy/easypanel-compose.yml"
+  local source="${1:?rendered Compose source is required}"
   local helper="$ROOT_DIR/deploy/easypanel_compose_api.js"
   local panel_id candidate_path helper_path result deploy_rc started_epoch discovered_path
   panel_id="$(docker ps -q --filter "ancestor=$EASYPANEL_IMAGE" | head -1)"
@@ -86,6 +92,26 @@ for line in sys.stdin:
     return 1
   }
   echo "EasyPanel canonical Compose updated; rollback artifact: $COMPOSE_ROLLBACK_PATH"
+}
+
+render_candidate_compose() {
+  local template="$ROOT_DIR/deploy/easypanel-compose.yml"
+  CANDIDATE_COMPOSE_PATH="$(mktemp /tmp/ayp-hrms-compose-rendered.XXXXXX.yml)"
+  python3 - "$template" "$CANDIDATE_COMPOSE_PATH" "$IMAGE" <<'PY'
+import sys
+from pathlib import Path
+
+template, output, image = sys.argv[1:]
+source = Path(template).read_text(encoding="utf-8")
+placeholder = "ghcr.io/rjuanluis/ayp-hrms:AYP_RELEASE_SHA"
+if source.count(placeholder) != 2:
+    raise SystemExit("canonical Compose template must contain exactly two immutable app-image placeholders")
+rendered = source.replace(placeholder, image)
+if placeholder in rendered or rendered.count(image) != 2:
+    raise SystemExit("failed to render exact immutable app image into canonical Compose")
+Path(output).write_text(rendered, encoding="utf-8")
+PY
+  chmod 0600 "$CANDIDATE_COMPOSE_PATH"
 }
 
 container_id() {
@@ -142,6 +168,36 @@ wait_for_compose() {
   docker ps -a --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" \
     --format '{{.Names}}|{{.Status}}|{{.Image}}' >&2 || true
   return 1
+}
+
+verify_candidate_image_ids() {
+  local service id actual status found
+  local app_services=(backend frontend websocket queue-short queue-long queue-documents scheduler)
+  for service in "${app_services[@]}"; do
+    id="$(container_id "$service")"
+    [[ -n "$id" ]] || { echo "Missing application container: $service" >&2; return 1; }
+    actual="$(docker inspect "$id" --format '{{.Image}}')"
+    [[ "$actual" == "$new_image_id" ]] || {
+      echo "Application container $service is not using the candidate image ID" >&2
+      return 1
+    }
+  done
+  found=0
+  while IFS= read -r id; do
+    [[ -n "$id" ]] || continue
+    actual="$(docker inspect "$id" --format '{{.Image}}')"
+    status="$(docker inspect "$id" --format '{{.State.Status}}:{{.State.ExitCode}}')"
+    if [[ "$actual" == "$new_image_id" && "$status" == "exited:0" ]]; then
+      found=1
+      break
+    fi
+  done < <(docker ps -aq \
+    --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" \
+    --filter "label=com.docker.compose.service=configure-workers")
+  [[ "$found" == 1 ]] || {
+    echo "No successful configure-workers execution used the candidate image ID" >&2
+    return 1
+  }
 }
 
 rollback_pre_migration() {
@@ -224,8 +280,8 @@ echo "Creating pre-deploy backup"
 docker exec "$backend_id" bench --site "$SITE_NAME" backup --with-files
 
 echo "Preparing immutable image $IMAGE"
-old_production_id="$(docker image inspect "$PRODUCTION_IMAGE" --format '{{.Id}}' 2>/dev/null || true)"
-old_production_tags="$(docker image inspect "$PRODUCTION_IMAGE" --format '{{json .RepoTags}}' 2>/dev/null || true)"
+old_production_id="$(docker inspect "$backend_id" --format '{{.Image}}')"
+old_production_tags="$(docker image inspect "$old_production_id" --format '{{json .RepoTags}}' 2>/dev/null || true)"
 [[ -n "$old_production_id" ]] || {
   echo "Previous production image ID is required for pre-migration rollback" >&2
   exit 5
@@ -238,14 +294,15 @@ expect_replacement=0
 if [[ -z "$old_production_id" || "$old_production_id" != "$new_image_id" ]]; then
   expect_replacement=1
 fi
-docker tag "$IMAGE" "$PRODUCTION_IMAGE"
+render_candidate_compose
 
 echo "Synchronizing canonical EasyPanel Compose source"
 DEPLOY_PHASE="pre_migration"
 ROLLBACK_ARMED=1
-deploy_compose_source
+deploy_compose_source "$CANDIDATE_COMPOSE_PATH"
 wait_for_compose "$backend_id" "$expect_replacement"
-cmp -s "$ROOT_DIR/deploy/easypanel-compose.yml" "$COMPOSE_FILE" || {
+verify_candidate_image_ids
+cmp -s "$CANDIDATE_COMPOSE_PATH" "$COMPOSE_FILE" || {
   echo "Managed EasyPanel Compose file does not match canonical repository source" >&2
   on_deploy_error 8 "$LINENO"
 }

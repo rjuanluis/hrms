@@ -63,7 +63,19 @@ jobs:
               'queue-documents scheduler',
               'Verifying dedicated candidate-document worker',
               'compose_rollback',
+              'render_candidate_compose',
+              'source.replace(placeholder, image)',
+              'deploy_compose_source "$CANDIDATE_COMPOSE_PATH"',
+              'cmp -s "$CANDIDATE_COMPOSE_PATH" "$COMPOSE_FILE"',
+              'verify_candidate_image_ids',
+              'local app_services=(backend frontend websocket queue-short queue-long queue-documents scheduler)',
+              "'{{.State.Status}}:{{.State.ExitCode}}'",
+              "docker inspect \"$backend_id\" --format '{{.Image}}'",
           ]
+          forbidden_deploy_contracts = ['docker tag "$IMAGE" "$PRODUCTION_IMAGE"']
+          present_forbidden_contracts = [x for x in forbidden_deploy_contracts if x in deploy]
+          if present_forbidden_contracts:
+              raise SystemExit(f'Unsafe mutable deployment contracts: {present_forbidden_contracts}')
           missing_deploy_contracts = [x for x in required_deploy_contracts if x not in deploy]
           if missing_deploy_contracts:
               raise SystemExit(f'Missing deployment topology contracts: {missing_deploy_contracts}')
@@ -91,10 +103,13 @@ jobs:
           required_image_contracts = [
               'git archive --format=tar --output=frappe_docker/hrms-source.tar "$RELEASE_SHA"',
               'git get-tar-commit-id < frappe_docker/hrms-source.tar',
-              'file:///opt/frappe/hrms-src',
+              'file:///home/frappe/hrms-src',
               'apps.release.json',
               '/home/frappe/frappe-bench/apps/hrms/.ayp-release-sha',
               'antiword -h 2>&1 | grep -qi "antiword"',
+              'steps.build.outputs.digest',
+              'steps.release.outputs.value',
+              'sha256:[0-9a-f]{64}',
               "github.event_name == 'push' && github.ref == 'refs/heads/ayp-production'",
           ]
           missing_image_contracts = [x for x in required_image_contracts if x not in workflow]
@@ -111,7 +126,7 @@ jobs:
       contents: read
       packages: write
     outputs:
-      image: ${{ steps.image.outputs.value }}
+      image: ${{ steps.release.outputs.value }}
     steps:
       - name: Checkout AyP HRMS source
         uses: actions/checkout@v4
@@ -142,7 +157,7 @@ jobs:
           hrms = [app for app in apps if app["url"].rstrip("/").endswith("/hrms")]
           if len(hrms) != 1:
               raise SystemExit("deploy/apps.json must contain exactly one HRMS source")
-          hrms[0].update({"url": "file:///opt/frappe/hrms-src", "branch": "image-release"})
+          hrms[0].update({"url": "file:///home/frappe/hrms-src", "branch": "image-release"})
           Path("frappe_docker/apps.release.json").write_text(json.dumps(apps, indent=2) + "\n")
 
           containerfile = Path("frappe_docker/images/layered/Containerfile")
@@ -151,10 +166,10 @@ jobs:
           replacement = (
               "USER frappe\n\n"
               "COPY --chown=frappe:frappe hrms-source.tar /tmp/hrms-source.tar\n"
-              "RUN mkdir -p /opt/frappe/hrms-src \\\n"
-              "    && tar -xf /tmp/hrms-source.tar -C /opt/frappe/hrms-src \\\n"
+              "RUN mkdir -p /home/frappe/hrms-src \\\n"
+              "    && tar -xf /tmp/hrms-source.tar -C /home/frappe/hrms-src \\\n"
               "    && rm /tmp/hrms-source.tar \\\n"
-              "    && cd /opt/frappe/hrms-src \\\n"
+              "    && cd /home/frappe/hrms-src \\\n"
               "    && printf '%s\\n' \"${CACHE_BUST}\" > .ayp-release-sha \\\n"
               "    && git init \\\n"
               "    && git config user.name 'AyP Release Builder' \\\n"
@@ -197,6 +212,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push production image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: frappe_docker
@@ -214,10 +230,18 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Bind release to immutable registry digest
+        id: release
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "value=${REGISTRY}/${IMAGE_NAME}@${DIGEST}" >> "$GITHUB_OUTPUT"
+
       - name: Test candidate CV security in production image
         run: |
-          docker pull "${{ steps.image.outputs.value }}"
-          docker run --rm --entrypoint bash "${{ steps.image.outputs.value }}" -ec '
+          docker pull "${{ steps.release.outputs.value }}"
+          docker run --rm --entrypoint bash "${{ steps.release.outputs.value }}" -ec '
             test "$(cat /home/frappe/frappe-bench/apps/hrms/.ayp-release-sha)" = "${{ env.RELEASE_SHA }}"
             for executable in pdfinfo pdftotext pdftoppm tesseract antiword heif-convert; do
               command -v "$executable" >/dev/null
@@ -231,9 +255,9 @@ jobs:
             heif-convert --help 2>&1 | grep -q "heif-convert"
           '
           docker run --rm --entrypoint /usr/local/bin/configure-ayp-document-queue \
-            "${{ steps.image.outputs.value }}" /tmp/common_site_config.json | \
+            "${{ steps.release.outputs.value }}" /tmp/common_site_config.json | \
             python -c 'import json,sys; result=json.load(sys.stdin); assert result == {"background_workers": 1, "queue": "documents", "timeout": 600}'
-          docker run --rm --entrypoint bash "${{ steps.image.outputs.value }}" -lc '
+          docker run --rm --entrypoint bash "${{ steps.release.outputs.value }}" -lc '
             mkdir -p /tmp/frappe-test-sites/test /home/frappe/logs /home/frappe/frappe-bench/test/logs
             printf "{}\n" > /tmp/frappe-test-sites/test/site_config.json
             printf "frappe\nerpnext\nhrms\n" > /tmp/frappe-test-sites/apps.txt
@@ -268,7 +292,7 @@ jobs:
         run: |
           docker buildx imagetools create \
             --tag "${REGISTRY}/${IMAGE_NAME}:production" \
-            "${{ steps.image.outputs.value }}"
+            "${{ steps.release.outputs.value }}"
 
   deploy:
     name: Deploy official hr.aroypedal.com

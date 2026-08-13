@@ -4,9 +4,9 @@ set -Eeuo pipefail
 ROOT_DIR="/opt/ayp-hr/source"
 ORIGINAL="${SSH_ORIGINAL_COMMAND:-}"
 
-if [[ "$ORIGINAL" =~ ^deploy[[:space:]]+(ghcr\.io/rjuanluis/ayp-hrms:([0-9a-f]{40}|production))[[:space:]]+([A-Za-z0-9-]+)$ ]]; then
+if [[ "$ORIGINAL" =~ ^deploy[[:space:]]+(ghcr\.io/rjuanluis/ayp-hrms@sha256:[0-9a-f]{64})[[:space:]]+([A-Za-z0-9-]+)$ ]]; then
   IMAGE="${BASH_REMATCH[1]}"
-  REGISTRY_USER="${BASH_REMATCH[3]}"
+  REGISTRY_USER="${BASH_REMATCH[2]}"
 else
   echo "Only an immutable AyP HR deploy command is allowed" >&2
   exit 64

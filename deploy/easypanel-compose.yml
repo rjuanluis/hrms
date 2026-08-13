@@ -1,7 +1,7 @@
 name: ayp-hrms
 
 x-app-base: &app-base
-  image: ghcr.io/rjuanluis/ayp-hrms:production
+  image: ghcr.io/rjuanluis/ayp-hrms:AYP_RELEASE_SHA
   init: true
   restart: unless-stopped
   networks:
@@ -153,7 +153,7 @@ services:
           memory: 1536M
 
   frontend:
-    image: ghcr.io/rjuanluis/ayp-hrms:production
+    image: ghcr.io/rjuanluis/ayp-hrms:AYP_RELEASE_SHA
     init: true
     restart: unless-stopped
     command: ["nginx-entrypoint.sh"]
