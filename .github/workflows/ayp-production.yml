@@ -4,6 +4,14 @@ name: AyP HR Production
   push:
     branches:
       - ayp-production
+  pull_request:
+    branches:
+      - ayp-production
+    paths:
+      - .github/workflows/ayp-production.yml
+      - deploy/**
+      - docker/**
+      - hrms/**
   workflow_dispatch:
 
 concurrency:
@@ -13,6 +21,7 @@ concurrency:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: rjuanluis/ayp-hrms
+  RELEASE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 
 jobs:
   validate:
@@ -22,6 +31,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_SHA }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
@@ -77,6 +88,7 @@ jobs:
   build:
     name: Build and publish Frappe v16 + ERPNext + HRMS
     needs: validate
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -86,6 +98,8 @@ jobs:
     steps:
       - name: Checkout AyP HRMS source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_SHA }}
 
       - name: Checkout official frappe_docker release
         uses: actions/checkout@v4
@@ -96,7 +110,7 @@ jobs:
 
       - name: Set immutable image reference
         id: image
-        run: echo "value=${REGISTRY}/${IMAGE_NAME}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+        run: echo "value=${REGISTRY}/${IMAGE_NAME}:${RELEASE_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Stage AyP document processing runtime in production build context
         run: |
@@ -138,12 +152,11 @@ jobs:
           build-args: |
             FRAPPE_PATH=https://github.com/frappe/frappe
             FRAPPE_BRANCH=version-16
-            CACHE_BUST=${{ github.sha }}
+            CACHE_BUST=${{ env.RELEASE_SHA }}
           secret-files: |
             apps_json=${{ github.workspace }}/deploy/apps.json
           tags: |
             ${{ steps.image.outputs.value }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:production
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -195,10 +208,17 @@ jobs:
           PY
           '
 
+      - name: Promote tested image to production alias
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/ayp-production' }}
+        run: |
+          docker buildx imagetools create \
+            --tag "${REGISTRY}/${IMAGE_NAME}:production" \
+            "${{ steps.image.outputs.value }}"
+
   deploy:
     name: Deploy official hr.aroypedal.com
     needs: build
-    if: ${{ vars.AYP_AUTO_DEPLOY == 'true' }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/ayp-production' && vars.AYP_AUTO_DEPLOY == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
