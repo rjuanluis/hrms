@@ -17,6 +17,9 @@ DEPLOY_URL_FILE="${SECRETS_DIR}/easypanel_deploy_url"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="${1:-}"
 COMPOSE_ROLLBACK_PATH=""
+ROLLBACK_ARMED=0
+DEPLOY_PHASE="preflight"
+PREVIOUS_SERVICE_COUNT=0
 
 if [[ ! "$IMAGE" =~ ^ghcr\.io/rjuanluis/ayp-hrms:[0-9a-f]{40}$ ]]; then
   echo "Invalid immutable AyP HR image reference" >&2
@@ -44,7 +47,7 @@ compose() {
 deploy_compose_source() {
   local source="$ROOT_DIR/deploy/easypanel-compose.yml"
   local helper="$ROOT_DIR/deploy/easypanel_compose_api.js"
-  local panel_id candidate_path helper_path result
+  local panel_id candidate_path helper_path result deploy_rc started_epoch discovered_path
   panel_id="$(docker ps -q --filter "ancestor=$EASYPANEL_IMAGE" | head -1)"
   [[ -n "$panel_id" ]] || { echo "EasyPanel control-plane container not found" >&2; return 1; }
   docker inspect "$panel_id" --format '{{.Config.Image}}' | grep -q '^easypanel/easypanel:' || {
@@ -55,12 +58,26 @@ deploy_compose_source() {
   helper_path="/tmp/ayp-hrms-compose-api-$$.js"
   docker cp "$source" "$panel_id:$candidate_path"
   docker cp "$helper" "$panel_id:$helper_path"
-  if ! result="$(docker exec "$panel_id" node "$helper_path" "$candidate_path")"; then
-    docker exec "$panel_id" rm -f "$candidate_path" "$helper_path" >/dev/null 2>&1 || true
-    return 1
+  started_epoch="$(date +%s)"
+  if result="$(docker exec "$panel_id" node "$helper_path" "$candidate_path")"; then
+    deploy_rc=0
+  else
+    deploy_rc=$?
   fi
   docker exec "$panel_id" rm -f "$candidate_path" "$helper_path" >/dev/null
-  COMPOSE_ROLLBACK_PATH="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["rollbackPath"])' <<<"$result")"
+  COMPOSE_ROLLBACK_PATH="$(python3 -c 'import json,sys
+for line in sys.stdin:
+    try: data=json.loads(line)
+    except json.JSONDecodeError: continue
+    if data.get("rollbackPath"): print(data["rollbackPath"])' <<<"$result" | tail -1)"
+  if [[ -z "$COMPOSE_ROLLBACK_PATH" ]]; then
+    discovered_path="$(find /etc/easypanel/hermes-backups -mindepth 1 -maxdepth 1 -type d \
+      -name 'ayp-hrms-compose-pre-*' -newermt "@$started_epoch" -print 2>/dev/null | sort | tail -1)"
+    COMPOSE_ROLLBACK_PATH="$discovered_path"
+  fi
+  if (( deploy_rc != 0 )); then
+    return "$deploy_rc"
+  fi
   [[ "$result" == *'"canonicalSourceMatch":true'* ]] || {
     echo "EasyPanel canonical source verification failed" >&2
     return 1
@@ -77,7 +94,7 @@ container_id() {
 wait_for_compose() {
   local previous_backend_id="${1:-}"
   local expect_replacement="${2:-0}"
-  local expected=11
+  local expected="${3:-11}"
   local stable_seconds=0
   local last_backend_id=""
   for _ in {1..120}; do
@@ -124,7 +141,77 @@ wait_for_compose() {
   return 1
 }
 
+rollback_pre_migration() {
+  local reason="${1:-pre-migration deployment failure}"
+  local source="$COMPOSE_ROLLBACK_PATH/source-before.yml"
+  local helper="$ROOT_DIR/deploy/easypanel_compose_api.js"
+  local panel_id helper_path result rollback_rc current_backend current_image
+  ROLLBACK_ARMED=0
+  set +e
+  echo "Restoring pre-migration EasyPanel state after: $reason" >&2
+  if [[ -n "$old_production_id" ]]; then
+    docker tag "$old_production_id" "$PRODUCTION_IMAGE"
+  fi
+  panel_id="$(docker ps -q --filter "ancestor=$EASYPANEL_IMAGE" | head -1)"
+  helper_path="/tmp/ayp-hrms-compose-api-rollback-$$.js"
+  if [[ -z "$panel_id" || ! -s "$source" ]]; then
+    echo "Rollback prerequisites are missing; manual recovery required" >&2
+    set -e
+    return 1
+  fi
+  docker cp "$helper" "$panel_id:$helper_path"
+  if result="$(docker exec "$panel_id" node "$helper_path" "$source" --rollback)"; then
+    rollback_rc=0
+  else
+    rollback_rc=$?
+  fi
+  docker exec "$panel_id" rm -f "$helper_path" >/dev/null 2>&1 || true
+  if (( rollback_rc != 0 )) || [[ "$result" != *'"canonicalSourceMatch":true'* ]] || [[ "$result" != *'"managedSourceMatch":true'* ]]; then
+    echo "Canonical EasyPanel rollback failed; manual recovery required" >&2
+    set -e
+    return 1
+  fi
+  if ! wait_for_compose "" 0 "$PREVIOUS_SERVICE_COUNT"; then
+    echo "Rollback runtime did not recover all prior persistent services" >&2
+    set -e
+    return 1
+  fi
+  cmp -s "$source" "$COMPOSE_FILE" || {
+    echo "Rollback managed Compose does not match prior canonical source" >&2
+    set -e
+    return 1
+  }
+  if [[ -n "$old_production_id" ]]; then
+    current_backend="$(container_id backend)"
+    current_image="$(docker inspect "$current_backend" --format '{{.Image}}' 2>/dev/null || true)"
+    if [[ "$current_image" != "$old_production_id" ]]; then
+      echo "Rollback backend image does not match the previous image ID" >&2
+      set -e
+      return 1
+    fi
+  fi
+  echo "Pre-migration rollback verified at canonical, managed-file, and runtime layers" >&2
+  set -e
+}
+
+on_deploy_error() {
+  local rc="$1" line="$2"
+  trap - ERR
+  if [[ "$ROLLBACK_ARMED" == 1 && "$DEPLOY_PHASE" == "pre_migration" ]]; then
+    rollback_pre_migration "exit $rc at line $line" || true
+  else
+    echo "Deployment stopped in phase $DEPLOY_PHASE at line $line; automatic image downgrade is disabled" >&2
+  fi
+  exit "$rc"
+}
+
+trap 'on_deploy_error $? $LINENO' ERR
+
 backend_id="$(container_id backend)"
+PREVIOUS_SERVICE_COUNT="$(docker ps \
+  --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" \
+  --format '{{.Label "com.docker.compose.service"}}' | sort -u | wc -l | tr -d ' ')"
+(( PREVIOUS_SERVICE_COUNT > 0 )) || { echo "No existing EasyPanel services found" >&2; exit 4; }
 if [[ -n "$backend_id" ]] && docker exec "$backend_id" test -f "sites/$SITE_NAME/site_config.json"; then
   echo "Creating pre-deploy backup"
   docker exec "$backend_id" bench --site "$SITE_NAME" backup --with-files
@@ -133,6 +220,10 @@ fi
 echo "Preparing immutable image $IMAGE"
 old_production_id="$(docker image inspect "$PRODUCTION_IMAGE" --format '{{.Id}}' 2>/dev/null || true)"
 old_production_tags="$(docker image inspect "$PRODUCTION_IMAGE" --format '{{json .RepoTags}}' 2>/dev/null || true)"
+[[ -n "$old_production_id" ]] || {
+  echo "Previous production image ID is required for pre-migration rollback" >&2
+  exit 5
+}
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   docker pull "$IMAGE" >/dev/null
 fi
@@ -144,6 +235,8 @@ fi
 docker tag "$IMAGE" "$PRODUCTION_IMAGE"
 
 echo "Synchronizing canonical EasyPanel Compose source"
+DEPLOY_PHASE="pre_migration"
+ROLLBACK_ARMED=1
 deploy_compose_source
 wait_for_compose "$backend_id" "$expect_replacement"
 cmp -s "$ROOT_DIR/deploy/easypanel-compose.yml" "$COMPOSE_FILE" || {
@@ -170,15 +263,20 @@ compose exec -T backend bash -ec '
 
 if compose exec -T backend test -f "sites/$SITE_NAME/site_config.json"; then
   echo "Migrating existing site"
+  DEPLOY_PHASE="migration_started"
+  ROLLBACK_ARMED=0
   compose exec -T backend bench --site "$SITE_NAME" migrate
 else
   echo "Creating official site $SITE_NAME"
+  DEPLOY_PHASE="migration_started"
+  ROLLBACK_ARMED=0
   compose run --rm \
     -e "AYP_SITE_NAME=$SITE_NAME" \
     -v "$SECRETS_DIR:/run/ayp-secrets:ro" \
     -v "$HOOK_DIR/bootstrap_site.py:/opt/ayp/bootstrap_site.py:ro" \
     backend /home/frappe/frappe-bench/env/bin/python /opt/ayp/bootstrap_site.py
 fi
+DEPLOY_PHASE="post_migration"
 
 compose exec -T backend bench --site "$SITE_NAME" set-config host_name "https://$SITE_NAME"
 
@@ -260,4 +358,5 @@ tmp.replace(path)
 PY
 
 rm -rf "$HOOK_DIR"
+DEPLOY_PHASE="completed"
 echo "EasyPanel deployment completed for $IMAGE"

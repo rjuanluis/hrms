@@ -9,13 +9,22 @@ const { open } = appRequire("lmdb");
 const baseUrl = "http://127.0.0.1:3000/api/rpc";
 const projectName = "web";
 const serviceName = "ayp-hrms";
-const candidatePath = process.argv[2];
-const preflightOnly = process.argv[3] === "--preflight";
+const sourcePath = process.argv[2];
+const mode = process.argv[3] || "--deploy";
+const preflightOnly = mode === "--preflight";
+const rollbackOnly = mode === "--rollback";
 const managedPath = "/etc/easypanel/projects/web/ayp-hrms/code/docker-compose.yml";
 const backupRoot = "/etc/easypanel/hermes-backups";
+const deployPathPattern = /^\/tmp\/ayp-hrms-compose-[0-9]+\.yml$/;
+const rollbackPathPattern =
+	/^\/etc\/easypanel\/hermes-backups\/ayp-hrms-compose-pre-[0-9TZ]+\/source-before\.yml$/;
 
-if (!candidatePath || !candidatePath.startsWith("/tmp/ayp-hrms-compose-")) {
-	throw new Error("candidate path must be a deployment-scoped /tmp file");
+if (
+	!sourcePath ||
+	(!rollbackOnly && !deployPathPattern.test(sourcePath)) ||
+	(rollbackOnly && !rollbackPathPattern.test(sourcePath))
+) {
+	throw new Error("source path is outside the approved deployment or rollback scope");
 }
 
 function decodeRecord(raw) {
@@ -34,6 +43,33 @@ function containsExactString(value, target) {
 		return Object.values(value).some((item) => containsExactString(item, target));
 	}
 	return false;
+}
+
+function findInlineSource(value) {
+	const matches = new Set();
+	function walk(node) {
+		if (!node || typeof node !== "object") return;
+		if (
+			node.source &&
+			typeof node.source === "object" &&
+			node.source.type === "inline" &&
+			typeof node.source.content === "string"
+		) {
+			matches.add(node.source.content);
+		}
+		if (node.type === "inline" && typeof node.content === "string") {
+			matches.add(node.content);
+		}
+		for (const child of Object.values(node)) walk(child);
+	}
+	walk(value);
+	const composeSources = [...matches].filter(
+		(source) => source.includes("services:") && source.includes("ghcr.io/rjuanluis/ayp-hrms"),
+	);
+	if (composeSources.length !== 1) {
+		throw new Error(`expected one inline Compose source, found ${composeSources.length}`);
+	}
+	return composeSources[0];
 }
 
 async function request(session, endpoint, json) {
@@ -76,17 +112,77 @@ async function findSession() {
 	return null;
 }
 
+async function waitForManagedSource(expected, timeoutMs = 120000) {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (fs.existsSync(managedPath) && fs.readFileSync(managedPath, "utf8") === expected)
+			return;
+		await new Promise((resolve) => setTimeout(resolve, 2000));
+	}
+	throw new Error("managed EasyPanel Compose file did not converge to requested source");
+}
+
+async function applySource(session, source) {
+	await request(session, "/services/compose/updateSourceInline", {
+		projectName,
+		serviceName,
+		content: source,
+	});
+	const updated = await request(session, "/services/compose/inspectService", {
+		projectName,
+		serviceName,
+	});
+	if (!containsExactString(updated, source)) {
+		throw new Error("EasyPanel canonical source readback does not match requested Compose");
+	}
+	await request(session, "/services/compose/deployService", {
+		projectName,
+		serviceName,
+		forceRebuild: false,
+	});
+	await waitForManagedSource(source);
+	const deployed = await request(session, "/services/compose/inspectService", {
+		projectName,
+		serviceName,
+	});
+	if (!containsExactString(deployed, source)) {
+		throw new Error("EasyPanel canonical source changed during deployment");
+	}
+	return deployed;
+}
+
+let backupDir = null;
+let mutationMayHaveOccurred = false;
+
 (async () => {
-	const candidate = fs.readFileSync(candidatePath, "utf8");
-	for (const required of ["configure-workers:", "queue-documents:", "bench", "documents"]) {
-		if (!candidate.includes(required))
-			throw new Error(`candidate Compose is missing ${required}`);
+	const source = fs.readFileSync(sourcePath, "utf8");
+	if (!rollbackOnly) {
+		for (const required of ["configure-workers:", "queue-documents:", "bench", "documents"]) {
+			if (!source.includes(required))
+				throw new Error(`candidate Compose is missing ${required}`);
+		}
 	}
 
 	const session = await findSession();
 	if (!session) {
 		console.error("LOGIN_REQUIRED: no valid EasyPanel admin session");
 		process.exit(44);
+	}
+
+	if (rollbackOnly) {
+		await applySource(session, source);
+		console.log(
+			JSON.stringify({
+				status: "rollback_requested",
+				projectName,
+				serviceName,
+				restoredSha256: sha256(source),
+				canonicalSourceMatch: true,
+				managedSourceMatch: true,
+				externalWrite: true,
+			}),
+		);
+		return;
 	}
 
 	const before = await request(session, "/services/compose/inspectService", {
@@ -99,48 +195,32 @@ async function findSession() {
 				status: "preflight_ok",
 				projectName,
 				serviceName,
-				candidateSha256: sha256(candidate),
+				candidateSha256: sha256(source),
 				authenticated: true,
 				externalWrite: false,
 			}),
 		);
 		return;
 	}
+
+	const previousSource = findInlineSource(before);
 	const timestamp = new Date().toISOString().replace(/[-:.]/g, "").replace("Z", "Z");
-	const backupDir = path.join(backupRoot, `ayp-hrms-compose-pre-${timestamp}`);
+	backupDir = path.join(backupRoot, `ayp-hrms-compose-pre-${timestamp}`);
 	fs.mkdirSync(backupDir, { recursive: true, mode: 0o700 });
 	fs.writeFileSync(
 		path.join(backupDir, "inspect-service.json"),
 		`${JSON.stringify(before, null, 2)}\n`,
 		{ mode: 0o600 },
 	);
+	fs.writeFileSync(path.join(backupDir, "source-before.yml"), previousSource, { mode: 0o600 });
 	if (fs.existsSync(managedPath)) {
 		fs.copyFileSync(managedPath, path.join(backupDir, "docker-compose.yml"));
 		fs.chmodSync(path.join(backupDir, "docker-compose.yml"), 0o600);
 	}
 
-	await request(session, "/services/compose/updateSourceInline", {
-		projectName,
-		serviceName,
-		content: candidate,
-	});
-	const updated = await request(session, "/services/compose/inspectService", {
-		projectName,
-		serviceName,
-	});
-	if (!containsExactString(updated, candidate)) {
-		throw new Error("EasyPanel canonical source readback does not match candidate Compose");
-	}
-	await request(session, "/services/compose/deployService", {
-		projectName,
-		serviceName,
-		forceRebuild: false,
-	});
-
-	const after = await request(session, "/services/compose/inspectService", {
-		projectName,
-		serviceName,
-	});
+	// The update request may commit even if the response is lost, so arm rollback first.
+	mutationMayHaveOccurred = true;
+	const after = await applySource(session, source);
 	fs.writeFileSync(
 		path.join(backupDir, "inspect-service-after.json"),
 		`${JSON.stringify(after, null, 2)}\n`,
@@ -152,13 +232,22 @@ async function findSession() {
 			status: "deploy_requested",
 			projectName,
 			serviceName,
-			candidateSha256: sha256(candidate),
+			candidateSha256: sha256(source),
 			canonicalSourceMatch: true,
+			managedSourceMatch: true,
 			externalWrite: true,
 			rollbackPath: backupDir,
 		}),
 	);
 })().catch((error) => {
 	console.error(error.message);
+	console.log(
+		JSON.stringify({
+			status: "failed",
+			rollbackRequired: mutationMayHaveOccurred,
+			rollbackPath: backupDir,
+			externalWrite: mutationMayHaveOccurred,
+		}),
+	);
 	process.exit(1);
 });
