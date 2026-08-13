@@ -45,8 +45,8 @@ def _persist_file_cv_sha256(file_name: str, sha256: str) -> None:
 	)
 
 
-def _read_file_bytes(file_doc) -> bytes:
-	"""Read the exact stored bytes without File.get_content() text coercion."""
+def read_stored_candidate_cv_bytes(file_doc) -> bytes:
+	"""Read exact stored candidate-CV bytes without File.get_content() text coercion."""
 	_, content = get_file(file_doc.file_url)
 	if not isinstance(content, bytes):
 		raise CandidateCVSecurityError(_("No se pudo leer el CV como contenido binario seguro."))
@@ -269,7 +269,7 @@ def mark_scanned_candidate_cv_file(file_doc, method=None) -> None:
 		raise CandidateCVSecurityError(
 			_("El control antivirus todavía no está disponible. Intenta nuevamente en unos minutos.")
 		)
-	content = _read_file_bytes(file_doc)
+	content = read_stored_candidate_cv_bytes(file_doc)
 	if (
 		not file_doc.is_private
 		or file_doc.file_size != preflight["size"]
@@ -283,7 +283,7 @@ def mark_scanned_candidate_cv_file(file_doc, method=None) -> None:
 
 def _verified_candidate_cv_sha256(file_record) -> str:
 	file_doc = frappe.get_doc("File", file_record.name)
-	content = _read_file_bytes(file_doc)
+	content = read_stored_candidate_cv_bytes(file_doc)
 	validate_cv_file(file_record.file_name, content)
 	actual_sha256 = hashlib.sha256(content).hexdigest()
 	if len(content) != file_record.file_size or (

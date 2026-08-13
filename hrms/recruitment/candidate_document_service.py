@@ -7,7 +7,11 @@ from frappe import _
 from frappe.utils import now_datetime
 
 from hrms.recruitment.candidate_document_processing import DocumentProcessingError, extract_candidate_document
-from hrms.security.candidate_cv import CandidateCVSecurityError, validate_cv_file
+from hrms.security.candidate_cv import (
+	CandidateCVSecurityError,
+	read_stored_candidate_cv_bytes,
+	validate_cv_file,
+)
 
 PROCESSOR_VERSION = "ayp-cv-extractor-v1"
 QUEUE_NAME = "documents"
@@ -172,9 +176,7 @@ def _load_exact_cv(applicant) -> tuple[str, bytes]:
 		or file_record.custom_cv_sha256 != applicant.custom_cv_sha256
 	):
 		raise CandidateCVSecurityError("El CV ya no coincide con el archivo privado escaneado.")
-	content = file_record.get_content()
-	if isinstance(content, str):
-		content = content.encode()
+	content = read_stored_candidate_cv_bytes(file_record)
 	validate_cv_file(file_record.file_name, content)
 	if hashlib.sha256(content).hexdigest() != applicant.custom_cv_sha256:
 		raise CandidateCVSecurityError("La huella del CV cambió después del escaneo.")

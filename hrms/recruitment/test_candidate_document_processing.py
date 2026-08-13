@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
 import io
 import subprocess
@@ -88,6 +89,37 @@ def make_docx(document_text: str = "", media: dict[str, bytes] | None = None) ->
 
 
 class TestCandidateDocumentProcessing(unittest.TestCase):
+	def test_exact_cv_lookup_reads_binary_bytes_from_file_manager(self):
+		raw = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\nsynthetic candidate cv\n%%EOF\n"
+		digest = hashlib.sha256(raw).hexdigest()
+		applicant = SimpleNamespace(
+			name="HR-APP-SYNTHETIC",
+			resume_attachment="/private/files/cv.pdf",
+			custom_cv_sha256=digest,
+		)
+		file_record = SimpleNamespace(
+			name="FILE-SYNTHETIC",
+			file_url=applicant.resume_attachment,
+			file_name="cv.pdf",
+			is_private=1,
+			custom_av_scan_status="Clean",
+			custom_cv_sha256=digest,
+			get_content=lambda: raw.decode("latin-1"),
+		)
+		fake_db = SimpleNamespace(sql=lambda *args, **kwargs: [file_record.name])
+		with (
+			patch.object(candidate_document_service.frappe, "db", fake_db),
+			patch.object(candidate_document_service.frappe, "get_doc", return_value=file_record),
+			patch.object(
+				candidate_document_service, "read_stored_candidate_cv_bytes", return_value=raw
+			) as read_file_bytes,
+			patch.object(candidate_document_service, "validate_cv_file") as validate,
+		):
+			filename, content = candidate_document_service._load_exact_cv(applicant)
+		self.assertEqual((filename, content), ("cv.pdf", raw))
+		read_file_bytes.assert_called_once_with(file_record)
+		validate.assert_called_once_with("cv.pdf", raw)
+
 	def test_exact_cv_lookup_is_bound_to_the_same_applicant(self):
 		source = inspect.getsource(candidate_document_service._load_exact_cv)
 		self.assertIn("attached_to_doctype = 'Job Applicant'", source)
