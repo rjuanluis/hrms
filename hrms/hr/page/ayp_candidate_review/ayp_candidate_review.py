@@ -1,11 +1,17 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 
 import frappe
 from frappe import _
 
+from hrms.recruitment.candidate_document_service import MANUAL_REVIEWABLE as CV_MANUAL_REVIEWABLE
+from hrms.recruitment.candidate_document_service import (
+	revalidate_candidate_document,
+	validate_candidate_ready_for_scoring,
+)
+from hrms.recruitment.candidate_profile_governance import candidate_profile_governance_update
 from hrms.recruitment.candidate_review_domain import (
 	BatchReviewRequest,
 	CandidateReviewValidationError,
@@ -17,12 +23,6 @@ from hrms.recruitment.candidate_scoring_domain import (
 	DEFAULT_CRITERIA,
 	CandidateScoringValidationError,
 	Scorecard,
-)
-from hrms.recruitment.candidate_profile_governance import candidate_profile_governance_update
-from hrms.recruitment.candidate_document_service import MANUAL_REVIEWABLE as CV_MANUAL_REVIEWABLE
-from hrms.recruitment.candidate_document_service import (
-	revalidate_candidate_document,
-	validate_candidate_ready_for_scoring,
 )
 from hrms.recruitment.matching import normalize_email, normalize_phone
 from hrms.recruitment.talent_pool import acquire_candidate_identity_lock, resolve_candidate_profile
@@ -68,7 +68,7 @@ def _query_filters(review_filters: ReviewFilters) -> dict:
 def _query_or_filters(review_filters: ReviewFilters) -> list:
 	if not review_filters.search:
 		return []
-	pattern = "%{0}%".format(review_filters.search)
+	pattern = f"%{review_filters.search}%"
 	return [
 		["Job Applicant", "applicant_name", "like", pattern],
 		["Job Applicant", "email_id", "like", pattern],
@@ -99,7 +99,7 @@ def _interview_queue_applicants(queue: str) -> list[str]:
 		"ready_final_decision": "i.name IS NOT NULL AND i.docstatus = 1 AND i.status IN ('Cleared', 'Rejected') AND ja.status NOT IN ('Accepted', 'Rejected')",
 	}
 	return frappe.db.sql(
-		"""
+		f"""
 		SELECT ja.name
 		FROM `tabJob Applicant` ja
 		LEFT JOIN `tabInterview` i ON i.name = (
@@ -107,8 +107,8 @@ def _interview_queue_applicants(queue: str) -> list[str]:
 			WHERE i2.job_applicant = ja.name AND i2.interview_type = %s AND i2.docstatus != 2
 			ORDER BY i2.modified DESC, i2.name DESC LIMIT 1
 		)
-		WHERE {condition}
-		""".format(condition=conditions[queue]),
+		WHERE {conditions[queue]}
+		""",
 		(AYP_INTERVIEW_TYPE,),
 		pluck=True,
 	)
@@ -283,9 +283,7 @@ def get_candidates(filters=None, start=0, page_length=50):
 def _load_and_validate_documents(request: BatchReviewRequest) -> list:
 	placeholders = ", ".join(["%s"] * len(request.applicant_names))
 	frappe.db.sql(
-		"SELECT name FROM `tabJob Applicant` WHERE name IN ({0}) ORDER BY name FOR UPDATE".format(
-			placeholders
-		),
+		f"SELECT name FROM `tabJob Applicant` WHERE name IN ({placeholders}) ORDER BY name FOR UPDATE",
 		tuple(sorted(request.applicant_names)),
 	)
 	documents = []
@@ -300,7 +298,9 @@ def _load_and_validate_documents(request: BatchReviewRequest) -> list:
 		if request.target_status in CV_DECISIVE_TARGETS:
 			if doc.get("custom_cv_processing_status") not in CV_SCORE_READY:
 				frappe.throw(
-					_("La aplicación {0} no tiene un CV procesado o verificado manualmente.").format(applicant_name),
+					_("La aplicación {0} no tiene un CV procesado o verificado manualmente.").format(
+						applicant_name
+					),
 					frappe.ValidationError,
 				)
 			revalidate_candidate_document(doc)
@@ -345,7 +345,7 @@ def apply_batch_action(applicant_names, target_status, reason, job_title):
 		return _validation_error(exc)
 
 	batch_id = frappe.generate_hash(length=12)
-	savepoint = "ayp_candidate_review_{0}".format(batch_id)
+	savepoint = f"ayp_candidate_review_{batch_id}"
 	frappe.db.savepoint(savepoint)
 	try:
 		# Lock first, then load and validate fresh state. Concurrent batches over
@@ -454,7 +454,9 @@ def freeze_filtered_run(filters, target_status, reason):
 	)
 	if active:
 		frappe.throw(
-			_("Ya existe una cohorte activa ({0}). Reanúdala antes de congelar otra.").format(active[0]["name"]),
+			_("Ya existe una cohorte activa ({0}). Reanúdala antes de congelar otra.").format(
+				active[0]["name"]
+			),
 			frappe.ValidationError,
 		)
 	try:
@@ -487,7 +489,10 @@ def freeze_filtered_run(filters, target_status, reason):
 			"target_status": request.target_status,
 			"reason": request.reason,
 			"filters_json": json.dumps(
-				_frozen_filters_payload(request.filters), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+				_frozen_filters_payload(request.filters),
+				ensure_ascii=False,
+				sort_keys=True,
+				separators=(",", ":"),
 			),
 			"frozen_by": frappe.session.user,
 			"frozen_on": now,
@@ -552,7 +557,9 @@ def cancel_filtered_run(run: str, reason: str):
 	frappe.has_permission(RUN_DOCTYPE, "read", run, throw=True)
 	reason = str(reason or "").strip()
 	if len(reason) < 20 or len(reason) > 500:
-		frappe.throw(_("El motivo de cancelación debe tener entre 20 y 500 caracteres."), frappe.ValidationError)
+		frappe.throw(
+			_("El motivo de cancelación debe tener entre 20 y 500 caracteres."), frappe.ValidationError
+		)
 	frappe.db.sql("SELECT name FROM `tabAYP Candidate Review Run` WHERE name = %s FOR UPDATE", (run,))
 	run_doc = frappe.get_doc(RUN_DOCTYPE, run, for_update=True)
 	if run_doc.frozen_by != frappe.session.user:
@@ -664,7 +671,7 @@ def process_filtered_run_chunk(run: str):
 	frappe.only_for(PAGE_ROLES)
 	frappe.has_permission("Job Applicant", "write", throw=True)
 	frappe.has_permission(RUN_DOCTYPE, "read", run, throw=True)
-	savepoint = "ayp_filtered_run_{0}".format(frappe.generate_hash(length=12))
+	savepoint = f"ayp_filtered_run_{frappe.generate_hash(length=12)}"
 	frappe.db.savepoint(savepoint)
 	try:
 		frappe.db.sql("SELECT name FROM `tabAYP Candidate Review Run` WHERE name = %s FOR UPDATE", (run,))
@@ -677,13 +684,11 @@ def process_filtered_run_chunk(run: str):
 		if members:
 			placeholders = ", ".join(["%s"] * len(members))
 			frappe.db.sql(
-				"SELECT name FROM `tabJob Applicant` WHERE name IN ({0}) ORDER BY name FOR UPDATE".format(
-					placeholders
-				),
+				f"SELECT name FROM `tabJob Applicant` WHERE name IN ({placeholders}) ORDER BY name FOR UPDATE",
 				tuple(sorted(member["applicant"] for member in members)),
 			)
 		now = frappe.utils.now_datetime()
-		batch_id = "{0}:{1}".format(run, frappe.generate_hash(length=12))
+		batch_id = f"{run}:{frappe.generate_hash(length=12)}"
 		for member in members:
 			applicant_name = member["applicant"]
 			frappe.has_permission("Job Applicant", "write", applicant_name, throw=True)
@@ -862,7 +867,9 @@ def save_scorecard(applicant, criteria):
 	frappe.has_permission("Job Applicant", "write", applicant, throw=True)
 	doc = frappe.get_doc("Job Applicant", applicant)
 	if not (doc.job_title or ""):
-		frappe.throw(_("La aplicación debe pertenecer a una vacante antes de evaluarla."), frappe.ValidationError)
+		frappe.throw(
+			_("La aplicación debe pertenecer a una vacante antes de evaluarla."), frappe.ValidationError
+		)
 	if doc.get("custom_cv_processing_status") not in CV_SCORE_READY:
 		frappe.throw(
 			_("El CV debe estar Procesado o Verificado manualmente antes de crear un scorecard."),
@@ -874,7 +881,7 @@ def save_scorecard(applicant, criteria):
 		frappe.throw(_(str(exc)), frappe.ValidationError)
 
 	now = frappe.utils.now_datetime()
-	savepoint = "ayp_candidate_scorecard_{0}".format(frappe.generate_hash(length=12))
+	savepoint = f"ayp_candidate_scorecard_{frappe.generate_hash(length=12)}"
 	frappe.db.savepoint(savepoint)
 	try:
 		# Serialize evaluations for one applicant so two reviewers cannot assign
@@ -885,7 +892,9 @@ def save_scorecard(applicant, criteria):
 		)
 		doc = frappe.get_doc("Job Applicant", applicant, for_update=True)
 		if not (doc.job_title or ""):
-			frappe.throw(_("La aplicación debe pertenecer a una vacante antes de evaluarla."), frappe.ValidationError)
+			frappe.throw(
+				_("La aplicación debe pertenecer a una vacante antes de evaluarla."), frappe.ValidationError
+			)
 		# The status is only a cached projection. Revalidate the locked applicant's
 		# exact current private/Clean attachment and SHA binding before persisting
 		# any score or latest-score projection.
@@ -976,7 +985,7 @@ def verify_candidate_document_manually(applicant: str, reason: str):
 	frappe.get_doc(
 		{
 			"doctype": EVENT_DOCTYPE,
-			"batch_id": "cv-manual:{0}".format(frappe.generate_hash(length=12)),
+			"batch_id": f"cv-manual:{frappe.generate_hash(length=12)}",
 			"applicant": doc.name,
 			"candidate_profile": doc.custom_candidate_profile or "",
 			"job_opening": doc.job_title or "",
@@ -1008,7 +1017,7 @@ def update_candidate_profile(applicant: str, action: str, reason: str):
 	if len(reason) < 20 or len(reason) > 500:
 		frappe.throw(_("El motivo debe tener entre 20 y 500 caracteres."), frappe.ValidationError)
 
-	savepoint = "ayp_profile_{0}".format(frappe.generate_hash(length=12))
+	savepoint = f"ayp_profile_{frappe.generate_hash(length=12)}"
 	frappe.db.savepoint(savepoint)
 	try:
 		# Serialize with intake and manual identity corrections, then reload the
@@ -1017,7 +1026,9 @@ def update_candidate_profile(applicant: str, action: str, reason: str):
 		frappe.db.sql("SELECT name FROM `tabJob Applicant` WHERE name = %s FOR UPDATE", (applicant,))
 		applicant_doc = frappe.get_doc("Job Applicant", applicant, for_update=True)
 		if applicant_doc.custom_candidate_profile != profile_name:
-			frappe.throw(_("La aplicación cambió de perfil; recarga antes de continuar."), frappe.ValidationError)
+			frappe.throw(
+				_("La aplicación cambió de perfil; recarga antes de continuar."), frappe.ValidationError
+			)
 		resolved_profile = resolve_candidate_profile(profile_name, for_update=True)
 		if not resolved_profile:
 			frappe.throw(_("El perfil canónico ya no existe."), frappe.ValidationError)
@@ -1028,10 +1039,12 @@ def update_candidate_profile(applicant: str, action: str, reason: str):
 			(profile_name,),
 		)
 		profile = frappe.get_doc("AYP Candidate Profile", profile_name, for_update=True)
-		previous_state = "{0} / {1}".format(profile.talent_pool_status, profile.dedupe_status)
+		previous_state = f"{profile.talent_pool_status} / {profile.dedupe_status}"
 		if action in {"retain", "priority"} and profile.do_not_contact:
 			frappe.throw(
-				_("El perfil está marcado como No contactar. Usa el flujo aprobado de privacidad para levantar ese bloqueo."),
+				_(
+					"El perfil está marcado como No contactar. Usa el flujo aprobado de privacidad para levantar ese bloqueo."
+				),
 				frappe.ValidationError,
 			)
 		profile.talent_pool_status = PROFILE_ACTIONS[action]
@@ -1042,13 +1055,13 @@ def update_candidate_profile(applicant: str, action: str, reason: str):
 		frappe.get_doc(
 			{
 				"doctype": EVENT_DOCTYPE,
-				"batch_id": "profile:{0}".format(frappe.generate_hash(length=12)),
+				"batch_id": f"profile:{frappe.generate_hash(length=12)}",
 				"applicant": applicant_doc.name,
 				"candidate_profile": profile.name,
 				"job_opening": applicant_doc.job_title or "",
 				"action": "Decisión Talent Pool",
 				"previous_status": previous_state,
-				"new_status": "{0} / {1}".format(profile.talent_pool_status, profile.dedupe_status),
+				"new_status": f"{profile.talent_pool_status} / {profile.dedupe_status}",
 				"reason": reason,
 				"actor": frappe.session.user,
 				"occurred_on": frappe.utils.now_datetime(),
@@ -1070,9 +1083,7 @@ def _lock_profiles(profile_names: list[str]) -> None:
 		return
 	placeholders = ", ".join(["%s"] * len(profile_names))
 	frappe.db.sql(
-		"SELECT name FROM `tabAYP Candidate Profile` WHERE name IN ({0}) ORDER BY name FOR UPDATE".format(
-			placeholders
-		),
+		f"SELECT name FROM `tabAYP Candidate Profile` WHERE name IN ({placeholders}) ORDER BY name FOR UPDATE",
 		tuple(profile_names),
 	)
 
@@ -1100,10 +1111,14 @@ def _candidate_profile_projection(profile_name: str) -> tuple[int, str]:
 		(profile_name,),
 		pluck=True,
 	)
-	return frappe.db.count("Job Applicant", {"custom_candidate_profile": profile_name}), (rows[0] if rows else "")
+	return frappe.db.count("Job Applicant", {"custom_candidate_profile": profile_name}), (
+		rows[0] if rows else ""
+	)
 
 
-def _identity_preview_payload(applicant_doc, source_profile, target_profile, operation: str, source_applications: list[str]):
+def _identity_preview_payload(
+	applicant_doc, source_profile, target_profile, operation: str, source_applications: list[str]
+):
 	moved_applications = source_applications if operation == "merge" else [applicant_doc.name]
 	result_do_not_contact = bool(source_profile.do_not_contact) or bool(
 		target_profile and target_profile.do_not_contact
@@ -1147,7 +1162,9 @@ def preview_candidate_identity(applicant: str, operation: str, target_profile: s
 		frappe.throw(_("La operación de identidad no es válida."), frappe.ValidationError)
 	source = resolve_candidate_profile(source_name)
 	if not source or source.name != source_name:
-		frappe.throw(_("El perfil origen ya fue fusionado; recarga antes de continuar."), frappe.ValidationError)
+		frappe.throw(
+			_("El perfil origen ya fue fusionado; recarga antes de continuar."), frappe.ValidationError
+		)
 	frappe.has_permission("AYP Candidate Profile", "read", source.name, throw=True)
 	source = frappe.get_doc("AYP Candidate Profile", source.name)
 	target = None
@@ -1201,9 +1218,11 @@ def resolve_candidate_identity(
 		frappe.has_permission("AYP Candidate Profile", "write", target_profile, throw=True)
 	frappe.has_permission("AYP Candidate Profile", "write", source_profile_name, throw=True)
 	if operation == "merge" and not str(preview_binding or "").strip():
-		frappe.throw(_("Revisa el impacto autoritativo antes de fusionar identidades."), frappe.ValidationError)
+		frappe.throw(
+			_("Revisa el impacto autoritativo antes de fusionar identidades."), frappe.ValidationError
+		)
 
-	savepoint = "ayp_identity_{0}".format(frappe.generate_hash(length=12))
+	savepoint = f"ayp_identity_{frappe.generate_hash(length=12)}"
 	frappe.db.savepoint(savepoint)
 	try:
 		# The same advisory lock guards automatic intake matching, so a new
@@ -1213,10 +1232,14 @@ def resolve_candidate_identity(
 		frappe.db.sql("SELECT name FROM `tabJob Applicant` WHERE name = %s FOR UPDATE", (applicant,))
 		applicant_doc = frappe.get_doc("Job Applicant", applicant, for_update=True)
 		if applicant_doc.custom_candidate_profile != source_profile_name:
-			frappe.throw(_("La aplicación cambió de perfil; recarga antes de continuar."), frappe.ValidationError)
+			frappe.throw(
+				_("La aplicación cambió de perfil; recarga antes de continuar."), frappe.ValidationError
+			)
 		resolved_source = resolve_candidate_profile(source_profile_name, for_update=True)
 		if not resolved_source or resolved_source.name != source_profile_name:
-			frappe.throw(_("El perfil origen ya fue fusionado; recarga antes de continuar."), frappe.ValidationError)
+			frappe.throw(
+				_("El perfil origen ya fue fusionado; recarga antes de continuar."), frappe.ValidationError
+			)
 		if target_profile:
 			resolved_target = resolve_candidate_profile(target_profile, for_update=True)
 			if not resolved_target:
@@ -1228,7 +1251,9 @@ def resolve_candidate_identity(
 		source_profile = frappe.get_doc("AYP Candidate Profile", source_profile_name, for_update=True)
 		source_applications = _linked_applications_for_update(source_profile_name)
 		if applicant not in source_applications:
-			frappe.throw(_("La aplicación cambió de perfil; recarga antes de continuar."), frappe.ValidationError)
+			frappe.throw(
+				_("La aplicación cambió de perfil; recarga antes de continuar."), frappe.ValidationError
+			)
 		if operation == "merge":
 			target_for_preview = frappe.get_doc("AYP Candidate Profile", target_profile, for_update=True)
 			locked_preview = _identity_preview_payload(
@@ -1239,7 +1264,9 @@ def resolve_candidate_identity(
 				source_applications,
 			)
 			if locked_preview["binding"] != str(preview_binding or ""):
-				frappe.throw(_("El impacto de la fusión cambió; revisa el preview nuevamente."), frappe.ValidationError)
+				frappe.throw(
+					_("El impacto de la fusión cambió; revisa el preview nuevamente."), frappe.ValidationError
+				)
 
 		if operation == "split":
 			new_profile = frappe.get_doc(
@@ -1302,7 +1329,9 @@ def resolve_candidate_identity(
 					"talent_pool_status": "Fusionado",
 				}
 			)
-		frappe.db.set_value("AYP Candidate Profile", source_profile_name, source_values, update_modified=False)
+		frappe.db.set_value(
+			"AYP Candidate Profile", source_profile_name, source_values, update_modified=False
+		)
 		target_count, target_latest = _candidate_profile_projection(target_profile)
 		target.dedupe_status = "Manual"
 		target.application_count = target_count
@@ -1323,7 +1352,7 @@ def resolve_candidate_identity(
 		frappe.get_doc(
 			{
 				"doctype": EVENT_DOCTYPE,
-				"batch_id": "identity:{0}".format(frappe.generate_hash(length=12)),
+				"batch_id": f"identity:{frappe.generate_hash(length=12)}",
 				"applicant": applicant,
 				"candidate_profile": target_profile,
 				"job_opening": applicant_doc.job_title or "",

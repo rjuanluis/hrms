@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 APPLICANT_STATUSES = frozenset({"Open", "Replied", "Shortlisted", "Rejected", "Hold", "Accepted"})
 BATCH_TARGET_STATUSES = frozenset({"Open", "Replied", "Shortlisted", "Rejected", "Hold"})
@@ -61,9 +62,9 @@ def _mapping(value: Any) -> Mapping[str, Any]:
 def _bounded_text(value: Any, *, label: str, maximum: int, required: bool = False) -> str:
 	text = str(value or "").strip()
 	if required and not text:
-		raise CandidateReviewValidationError("Debes indicar {0}.".format(label))
+		raise CandidateReviewValidationError(f"Debes indicar {label}.")
 	if len(text) > maximum:
-		raise CandidateReviewValidationError("{0} no puede exceder {1} caracteres.".format(label.capitalize(), maximum))
+		raise CandidateReviewValidationError(f"{label.capitalize()} no puede exceder {maximum} caracteres.")
 	return text
 
 
@@ -73,7 +74,7 @@ def _integer(value: Any, *, label: str, default: int, minimum: int, maximum: int
 	try:
 		number = int(value)
 	except (TypeError, ValueError) as exc:
-		raise CandidateReviewValidationError("{0} debe ser un número entero.".format(label.capitalize())) from exc
+		raise CandidateReviewValidationError(f"{label.capitalize()} debe ser un número entero.") from exc
 	return max(minimum, min(maximum, number))
 
 
@@ -93,7 +94,7 @@ class ReviewFilters:
 	page_length: int = 50
 
 	@classmethod
-	def from_input(cls, value: Any = None, *, start: Any = 0, page_length: Any = 50) -> "ReviewFilters":
+	def from_input(cls, value: Any = None, *, start: Any = 0, page_length: Any = 50) -> ReviewFilters:
 		filters = _mapping(value)
 		status = _bounded_text(filters.get("status"), label="el estado", maximum=40)
 		if status and status not in APPLICANT_STATUSES:
@@ -178,19 +179,21 @@ class BatchReviewRequest:
 		target_status: Any,
 		reason: Any,
 		job_title: Any,
-	) -> "BatchReviewRequest":
+	) -> BatchReviewRequest:
 		if isinstance(applicant_names, str):
 			try:
 				applicant_names = json.loads(applicant_names)
 			except json.JSONDecodeError as exc:
 				raise CandidateReviewValidationError("La selección de candidatos no es JSON válido.") from exc
-		if not isinstance(applicant_names, Sequence) or isinstance(applicant_names, (str, bytes)):
+		if not isinstance(applicant_names, Sequence) or isinstance(applicant_names, str | bytes):
 			raise CandidateReviewValidationError("La selección de candidatos no es válida.")
 
 		unique_names = []
 		seen = set()
 		for raw_name in applicant_names:
-			name = _bounded_text(raw_name, label="el identificador del candidato", maximum=MAX_LINK_LENGTH, required=True)
+			name = _bounded_text(
+				raw_name, label="el identificador del candidato", maximum=MAX_LINK_LENGTH, required=True
+			)
 			if name not in seen:
 				seen.add(name)
 				unique_names.append(name)
@@ -202,7 +205,7 @@ class BatchReviewRequest:
 		target = _bounded_text(target_status, label="el estado destino", maximum=40, required=True)
 		if target not in BATCH_TARGET_STATUSES:
 			raise CandidateReviewValidationError(
-				"El estado {0} no está permitido en acciones masivas; Accepted requiere decisión individual.".format(target)
+				f"El estado {target} no está permitido en acciones masivas; Accepted requiere decisión individual."
 			)
 
 		return cls(
@@ -220,7 +223,7 @@ class FilteredReviewRunRequest:
 	reason: str
 
 	@classmethod
-	def from_input(cls, filters: Any, *, target_status: Any, reason: Any) -> "FilteredReviewRunRequest":
+	def from_input(cls, filters: Any, *, target_status: Any, reason: Any) -> FilteredReviewRunRequest:
 		review_filters = ReviewFilters.from_input(filters, start=0, page_length=MAX_PAGE_LENGTH)
 		if not review_filters.job_title or not review_filters.status:
 			raise CandidateReviewValidationError(
@@ -229,9 +232,7 @@ class FilteredReviewRunRequest:
 		target = _bounded_text(target_status, label="el estado destino", maximum=40, required=True)
 		if target not in BATCH_TARGET_STATUSES:
 			raise CandidateReviewValidationError(
-				"El estado {0} no está permitido en acciones masivas; Accepted requiere decisión individual.".format(
-					target
-				)
+				f"El estado {target} no está permitido en acciones masivas; Accepted requiere decisión individual."
 			)
 		if review_filters.status == target:
 			raise CandidateReviewValidationError("El estado destino debe ser distinto del filtro de origen.")
@@ -255,6 +256,4 @@ def validate_transition(current_status: Any, target_status: Any) -> None:
 	if current == "Accepted":
 		raise CandidateReviewValidationError("Accepted es terminal y no puede cambiarse por lote.")
 	if target not in ALLOWED_TRANSITIONS[current]:
-		raise CandidateReviewValidationError(
-			"La transición de {0} a {1} no está permitida.".format(current, target)
-		)
+		raise CandidateReviewValidationError(f"La transición de {current} a {target} no está permitida.")

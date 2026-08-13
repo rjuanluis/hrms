@@ -6,9 +6,9 @@ from frappe import _
 from frappe.model.naming import set_name_by_naming_series
 from frappe.utils import add_years, cint, get_link_to_form, getdate
 
-from hrms.recruitment.interview_governance import update_job_applicant_from_downstream
-
 from erpnext.setup.doctype.employee.employee import Employee
+
+from hrms.recruitment.interview_governance import update_job_applicant_from_downstream
 
 
 class EmployeeMaster(Employee):

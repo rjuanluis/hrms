@@ -65,11 +65,19 @@ class TestCandidateScoring(unittest.TestCase):
 	def test_recommendation_thresholds_do_not_make_final_decisions(self):
 		self.assertEqual(Scorecard.from_input(complete_rows(3)).recommendation, "Revisión comparativa")
 		self.assertEqual(Scorecard.from_input(complete_rows(2)).recommendation, "No priorizar")
-		self.assertTrue(all("Accepted" not in value for value in (row.recommendation for row in [
-			Scorecard.from_input(complete_rows(5)),
-			Scorecard.from_input(complete_rows(3)),
-			Scorecard.from_input(complete_rows(1)),
-		])))
+		self.assertTrue(
+			all(
+				"Accepted" not in value
+				for value in (
+					row.recommendation
+					for row in [
+						Scorecard.from_input(complete_rows(5)),
+						Scorecard.from_input(complete_rows(3)),
+						Scorecard.from_input(complete_rows(1)),
+					]
+				)
+			)
+		)
 
 
 if __name__ == "__main__":

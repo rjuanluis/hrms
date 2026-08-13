@@ -173,7 +173,7 @@ frappe.ui.form.on("Interview", {
 								label: __("Evidencia estructurada AyP"),
 							},
 							...evidence_fields,
-						]
+					  ]
 					: []),
 			],
 			size: "large",
@@ -184,14 +184,14 @@ frappe.ui.form.on("Interview", {
 					.map((_field, index) => values[`ayp_evidence_${index + 1}`])
 					.join("\n");
 				await frappe.call({
-						method: "hrms.hr.doctype.interview.interview.create_interview_feedback",
-						args: {
-							data: values,
-							interview_name: frm.doc.name,
-							interviewer: frappe.session.user,
-							job_applicant: frm.doc.job_applicant,
-						},
-					});
+					method: "hrms.hr.doctype.interview.interview.create_interview_feedback",
+					args: {
+						data: values,
+						interview_name: frm.doc.name,
+						interviewer: frappe.session.user,
+						job_applicant: frm.doc.job_applicant,
+					},
+				});
 				d.hide();
 				await frm.refresh();
 			},

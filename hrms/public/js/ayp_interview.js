@@ -28,8 +28,16 @@ frappe.ui.form.on("Interview", {
 			? `<ol class="ayp-interview-questions">${lines
 					.filter((line) => /^\d+\./.test(line))
 					.map((line) => `<li>${escape(line.replace(/^\d+\.\s*/, ""))}</li>`)
-					.join("")}</ol><p class="text-muted">${escape(lines.find((line) => line.startsWith("Regla de evidencia:")) || "")}</p>`
-			: `<p class="text-muted">${__("Este tipo de entrevista no tiene preguntas estructuradas configuradas.")}</p>`;
-		$(wrapper).html(`<div class="ayp-interview-kit"><p><strong>${__("Usa las mismas preguntas y registra evidencia observable para cada persona.")}</strong></p>${body}</div>`);
+					.join("")}</ol><p class="text-muted">${escape(
+					lines.find((line) => line.startsWith("Regla de evidencia:")) || "",
+			  )}</p>`
+			: `<p class="text-muted">${__(
+					"Este tipo de entrevista no tiene preguntas estructuradas configuradas.",
+			  )}</p>`;
+		$(wrapper).html(
+			`<div class="ayp-interview-kit"><p><strong>${__(
+				"Usa las mismas preguntas y registra evidencia observable para cada persona.",
+			)}</strong></p>${body}</div>`,
+		);
 	},
 });

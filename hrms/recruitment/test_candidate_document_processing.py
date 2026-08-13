@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import io
 import inspect
+import io
 import subprocess
 import tempfile
 import unittest
@@ -17,8 +17,10 @@ from hrms.recruitment.candidate_document_processing import (
 	extract_candidate_document,
 	normalize_extracted_text,
 )
-from hrms.recruitment.candidate_document_service import prepare_candidate_document_state
-from hrms.recruitment.candidate_document_service import processing_status_for_method
+from hrms.recruitment.candidate_document_service import (
+	prepare_candidate_document_state,
+	processing_status_for_method,
+)
 from hrms.security.candidate_cv import CandidateCVSecurityError
 
 
@@ -64,7 +66,9 @@ class FakeApplicant:
 
 
 def previous_document(attachment="", sha256=""):
-	return SimpleNamespace(get=lambda key: {"resume_attachment": attachment, "custom_cv_sha256": sha256}.get(key))
+	return SimpleNamespace(
+		get=lambda key: {"resume_attachment": attachment, "custom_cv_sha256": sha256}.get(key)
+	)
 
 
 def make_docx(document_text: str = "", media: dict[str, bytes] | None = None) -> bytes:
@@ -73,8 +77,10 @@ def make_docx(document_text: str = "", media: dict[str, bytes] | None = None) ->
 		archive.writestr("[Content_Types].xml", "<Types />")
 		archive.writestr(
 			"word/document.xml",
-			("<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'>"
-			 f"<w:body><w:p><w:r><w:t>{document_text}</w:t></w:r></w:p></w:body></w:document>"),
+			(
+				"<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'>"
+				f"<w:body><w:p><w:r><w:t>{document_text}</w:t></w:r></w:p></w:body></w:document>"
+			),
 		)
 		for name, content in (media or {}).items():
 			archive.writestr(f"word/media/{name}", content)
@@ -103,7 +109,9 @@ class TestCandidateDocumentProcessing(unittest.TestCase):
 	def test_manual_or_scoring_revalidation_rechecks_private_clean_file(self):
 		doc = FakeApplicant(attachment="/private/files/cv.pdf", sha256="current", status="Revisión manual")
 		doc.custom_cv_processed_sha256 = "current"
-		with patch.object(candidate_document_service, "_load_exact_cv", return_value=("cv.pdf", b"safe")) as load:
+		with patch.object(
+			candidate_document_service, "_load_exact_cv", return_value=("cv.pdf", b"safe")
+		) as load:
 			candidate_document_service.revalidate_candidate_document(doc)
 		load.assert_called_once_with(doc)
 		with (
@@ -205,8 +213,12 @@ class TestCandidateDocumentProcessing(unittest.TestCase):
 
 	def test_image_runs_spanish_and_english_ocr(self):
 		png = b"\x89PNG\r\n\x1a\n" + b"synthetic"
-		completed = subprocess.CompletedProcess([], 0, stdout="Experiencia profesional en ventas y servicio al cliente.", stderr="")
-		with patch("hrms.recruitment.candidate_document_processing.subprocess.run", return_value=completed) as run:
+		completed = subprocess.CompletedProcess(
+			[], 0, stdout="Experiencia profesional en ventas y servicio al cliente.", stderr=""
+		)
+		with patch(
+			"hrms.recruitment.candidate_document_processing.subprocess.run", return_value=completed
+		) as run:
 			result = extract_candidate_document("cv.png", png)
 		self.assertEqual(result.method, "Image OCR")
 		self.assertIn("Experiencia profesional", result.text)
@@ -217,9 +229,14 @@ class TestCandidateDocumentProcessing(unittest.TestCase):
 			subprocess.CompletedProcess([], 0, stdout="Pages: 2\nEncrypted: no\n", stderr=""),
 			subprocess.CompletedProcess([], 0, stdout="", stderr=""),
 			subprocess.CompletedProcess([], 0, stdout="", stderr=""),
-			subprocess.CompletedProcess([], 0, stdout="Primera página con experiencia laboral suficiente.", stderr=""),
-			subprocess.CompletedProcess([], 0, stdout="Segunda página con estudios y referencias comprobables.", stderr=""),
+			subprocess.CompletedProcess(
+				[], 0, stdout="Primera página con experiencia laboral suficiente.", stderr=""
+			),
+			subprocess.CompletedProcess(
+				[], 0, stdout="Segunda página con estudios y referencias comprobables.", stderr=""
+			),
 		]
+
 		def fake_run(args, **kwargs):
 			response = responses.pop(0)
 			if "pdftoppm" in args[0]:
@@ -227,6 +244,7 @@ class TestCandidateDocumentProcessing(unittest.TestCase):
 				prefix.with_name(prefix.name + "-1.png").write_bytes(b"png1")
 				prefix.with_name(prefix.name + "-2.png").write_bytes(b"png2")
 			return response
+
 		with patch("hrms.recruitment.candidate_document_processing.subprocess.run", side_effect=fake_run):
 			result = extract_candidate_document("scan.pdf", b"%PDF-1.7\n%%EOF")
 		self.assertEqual(result.method, "PDF OCR")
@@ -234,7 +252,9 @@ class TestCandidateDocumentProcessing(unittest.TestCase):
 		self.assertIn("Segunda página", result.text)
 
 	def test_pdf_page_limit_fails_to_manual_review(self):
-		info = subprocess.CompletedProcess([], 0, stdout=f"Pages: {MAX_DOCUMENT_PAGES + 1}\nEncrypted: no\n", stderr="")
+		info = subprocess.CompletedProcess(
+			[], 0, stdout=f"Pages: {MAX_DOCUMENT_PAGES + 1}\nEncrypted: no\n", stderr=""
+		)
 		with patch("hrms.recruitment.candidate_document_processing.subprocess.run", return_value=info):
 			with self.assertRaises(DocumentProcessingError) as raised:
 				extract_candidate_document("long.pdf", b"%PDF-1.7\n%%EOF")

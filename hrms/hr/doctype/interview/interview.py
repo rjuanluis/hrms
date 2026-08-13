@@ -305,10 +305,14 @@ def update_job_applicant_status(status: str, job_applicant: str, interview: str 
 		locked_feedback_names = {row.name for row in feedback_rows if row.docstatus == 1}
 		locked_feedback_interviewers = {row.interviewer for row in feedback_rows if row.docstatus == 1}
 		if applicant_doc.get("custom_ayp_governed"):
-			assigned_interviewers = {row.interviewer for row in interview_doc.interview_details if row.interviewer}
+			assigned_interviewers = {
+				row.interviewer for row in interview_doc.interview_details if row.interviewer
+			}
 			if not locked_feedback_names or not assigned_interviewers.issubset(locked_feedback_interviewers):
 				frappe.throw(
-					_("La decisión final exige feedback enviado y vigente de todas las personas entrevistadoras."),
+					_(
+						"La decisión final exige feedback enviado y vigente de todas las personas entrevistadoras."
+					),
 					frappe.ValidationError,
 				)
 		try:
@@ -336,7 +340,7 @@ def update_job_applicant_status(status: str, job_applicant: str, interview: str 
 		frappe.get_doc(
 			{
 				"doctype": "AYP Candidate Review Event",
-				"batch_id": "interview:{0}".format(interview_doc.name),
+				"batch_id": f"interview:{interview_doc.name}",
 				"applicant": applicant_doc.name,
 				"candidate_profile": applicant_doc.custom_candidate_profile or "",
 				"job_opening": applicant_doc.job_title or "",

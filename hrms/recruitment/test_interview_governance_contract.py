@@ -11,10 +11,18 @@ class TestInterviewGovernanceContract(unittest.TestCase):
 		hooks = (ROOT / "hrms" / "hooks.py").read_text(encoding="utf-8")
 		self.assertIn('"Interview": "public/js/ayp_interview.js"', hooks)
 		self.assertIn('"validate": "hrms.recruitment.interview_governance.validate_interview"', hooks)
-		self.assertIn('"before_submit": "hrms.recruitment.interview_governance.validate_ayp_interview_submission"', hooks)
+		self.assertIn(
+			'"before_submit": "hrms.recruitment.interview_governance.validate_ayp_interview_submission"',
+			hooks,
+		)
 		self.assertIn("validate_job_applicant_final_transition", hooks)
-		self.assertIn('"before_submit": "hrms.recruitment.interview_governance.validate_ayp_interview_feedback"', hooks)
-		self.assertIn('"before_cancel": "hrms.recruitment.interview_governance.validate_ayp_interview_cancellation"', hooks)
+		self.assertIn(
+			'"before_submit": "hrms.recruitment.interview_governance.validate_ayp_interview_feedback"', hooks
+		)
+		self.assertIn(
+			'"before_cancel": "hrms.recruitment.interview_governance.validate_ayp_interview_cancellation"',
+			hooks,
+		)
 		self.assertIn(
 			'"before_cancel": "hrms.recruitment.interview_governance.validate_ayp_feedback_cancellation"',
 			hooks,
@@ -40,12 +48,16 @@ class TestInterviewGovernanceContract(unittest.TestCase):
 		script = (ROOT / "hrms" / "public" / "js" / "ayp_interview.js").read_text(encoding="utf-8")
 		self.assertIn("frappe.utils.escape_html", script)
 		self.assertIn("custom_ayp_questions_snapshot", script)
-		patch = (ROOT / "hrms" / "patches" / "v16_0" / "create_ayp_interview_kit.py").read_text(encoding="utf-8")
+		patch = (ROOT / "hrms" / "patches" / "v16_0" / "create_ayp_interview_kit.py").read_text(
+			encoding="utf-8"
+		)
 		self.assertIn("Regla de evidencia", patch)
 		self.assertNotIn("edad", patch.lower().replace("no inferir edad", ""))
 
 	def test_acceptance_endpoint_requires_submitted_matching_interview_and_audits(self):
-		controller = (ROOT / "hrms" / "hr" / "doctype" / "interview" / "interview.py").read_text(encoding="utf-8")
+		controller = (ROOT / "hrms" / "hr" / "doctype" / "interview" / "interview.py").read_text(
+			encoding="utf-8"
+		)
 		for required in (
 			'@frappe.whitelist(methods=["POST"])\ndef update_job_applicant_status',
 			'"interview": self.name',
@@ -66,9 +78,7 @@ class TestInterviewGovernanceContract(unittest.TestCase):
 		self.assertIn("CONCURRENT_CHANGE_MESSAGE", decision_block)
 
 	def test_decision_and_cancellation_follow_native_compatible_lock_orders(self):
-		governance = (ROOT / "hrms" / "recruitment" / "interview_governance.py").read_text(
-			encoding="utf-8"
-		)
+		governance = (ROOT / "hrms" / "recruitment" / "interview_governance.py").read_text(encoding="utf-8")
 		controller = (ROOT / "hrms" / "hr" / "doctype" / "interview" / "interview.py").read_text(
 			encoding="utf-8"
 		)
@@ -87,10 +97,15 @@ class TestInterviewGovernanceContract(unittest.TestCase):
 		self.assertIn('frappe.get_doc("Interview", interview_name, for_update=True)', decision)
 		self.assertIn('frappe.get_doc("Job Applicant", applicant_name, for_update=True)', decision)
 		feedback_cancel_start = governance.index("def lock_ayp_feedback_cancellation_dependencies")
-		feedback_cancel_end = governance.index("\ndef lock_ayp_interview_cancellation_dependencies", feedback_cancel_start)
+		feedback_cancel_end = governance.index(
+			"\ndef lock_ayp_interview_cancellation_dependencies", feedback_cancel_start
+		)
 		feedback_cancel = governance[feedback_cancel_start:feedback_cancel_end]
 		self.assertNotIn("Interview Feedback", feedback_cancel)
-		self.assertLess(feedback_cancel.index('frappe.get_doc("Interview"'), feedback_cancel.index('frappe.get_doc("Job Applicant"'))
+		self.assertLess(
+			feedback_cancel.index('frappe.get_doc("Interview"'),
+			feedback_cancel.index('frappe.get_doc("Job Applicant"'),
+		)
 		interview_cancel_start = governance.index("def lock_ayp_interview_cancellation_dependencies")
 		interview_cancel_end = governance.index("\ndef _is_ayp_interview", interview_cancel_start)
 		interview_cancel = governance[interview_cancel_start:interview_cancel_end]
@@ -109,20 +124,20 @@ class TestInterviewGovernanceContract(unittest.TestCase):
 		self.assertIn("if is_ayp:", feedback_controller)
 
 	def test_feedback_cancel_scope_is_checked_from_authoritative_locked_interview(self):
-		governance = (ROOT / "hrms" / "recruitment" / "interview_governance.py").read_text(
-			encoding="utf-8"
-		)
+		governance = (ROOT / "hrms" / "recruitment" / "interview_governance.py").read_text(encoding="utf-8")
 		start = governance.index("def validate_ayp_feedback_cancellation")
 		end = governance.index("\ndef validate_job_applicant_final_transition", start)
 		block = governance[start:end]
 		self.assertNotIn('frappe.get_doc("Interview", doc.interview)', block)
 		self.assertIn("lock_ayp_feedback_cancellation_dependencies(doc.interview)", block)
-		self.assertLess(block.index("lock_ayp_feedback_cancellation_dependencies"), block.index("_is_ayp_interview"))
+		self.assertLess(
+			block.index("lock_ayp_feedback_cancellation_dependencies"), block.index("_is_ayp_interview")
+		)
 
 	def test_candidate_review_uses_server_interview_builder_and_refreshes_queue(self):
-		script = (ROOT / "hrms" / "hr" / "page" / "ayp_candidate_review" / "ayp_candidate_review.js").read_text(
-			encoding="utf-8"
-		)
+		script = (
+			ROOT / "hrms" / "hr" / "page" / "ayp_candidate_review" / "ayp_candidate_review.js"
+		).read_text(encoding="utf-8")
 		self.assertIn("job_applicant.create_interview", script)
 		self.assertNotIn('frappe.new_doc("Interview"', script)
 		self.assertIn("existing_interview", script)
@@ -131,20 +146,26 @@ class TestInterviewGovernanceContract(unittest.TestCase):
 		builder = (ROOT / "hrms" / "hr" / "doctype" / "job_applicant" / "job_applicant.py").read_text(
 			encoding="utf-8"
 		)
-		self.assertIn('"docstatus": ["!=", 2] if interview_type == "AyP - Entrevista estructurada" else 1', builder)
+		self.assertIn(
+			'"docstatus": ["!=", 2] if interview_type == "AyP - Entrevista estructurada" else 1', builder
+		)
 		self.assertIn('@frappe.whitelist(methods=["POST"])', builder)
 		self.assertIn('frappe.has_permission("Interview", "create", throw=True)', builder)
 		interview_controller = (ROOT / "hrms" / "hr" / "doctype" / "interview" / "interview.py").read_text(
 			encoding="utf-8"
 		)
 		self.assertIn("GET_LOCK", interview_controller)
-		self.assertIn('"docstatus": ["!=", 2] if self.interview_type == AYP_INTERVIEW_TYPE else 1', interview_controller)
+		self.assertIn(
+			'"docstatus": ["!=", 2] if self.interview_type == AYP_INTERVIEW_TYPE else 1', interview_controller
+		)
 
 	def test_feedback_result_is_visible_and_ayp_evidence_is_required(self):
 		form_script = (ROOT / "hrms" / "hr" / "doctype" / "interview" / "interview.js").read_text(
 			encoding="utf-8"
 		)
-		controller = (ROOT / "hrms" / "hr" / "doctype" / "interview" / "interview.py").read_text(encoding="utf-8")
+		controller = (ROOT / "hrms" / "hr" / "doctype" / "interview" / "interview.py").read_text(
+			encoding="utf-8"
+		)
 		template = (ROOT / "hrms" / "public" / "js" / "templates" / "feedback_history.html").read_text(
 			encoding="utf-8"
 		)
@@ -163,11 +184,15 @@ class TestInterviewGovernanceContract(unittest.TestCase):
 
 	def test_snapshot_is_restored_from_server_sources_not_client_payload(self):
 		governance = (ROOT / "hrms" / "recruitment" / "interview_governance.py").read_text(encoding="utf-8")
-		self.assertIn('frappe.db.get_value("Interview", doc.name, "custom_ayp_questions_snapshot")', governance)
+		self.assertIn(
+			'frappe.db.get_value("Interview", doc.name, "custom_ayp_questions_snapshot")', governance
+		)
 		self.assertIn('frappe.db.get_value("Interview Type", doc.interview_type', governance)
 		self.assertNotIn("structured_questions = doc.custom_ayp_questions_snapshot or", governance)
 		self.assertIn("submitted_feedback = frappe.db.exists(", governance)
-		self.assertIn("El kit y el snapshot de una entrevista con feedback enviado son inmutables", governance)
+		self.assertIn(
+			"El kit y el snapshot de una entrevista con feedback enviado son inmutables", governance
+		)
 
 	def test_mutating_candidate_review_endpoints_are_post_only(self):
 		api = (ROOT / "hrms" / "hr" / "page" / "ayp_candidate_review" / "ayp_candidate_review.py").read_text(
@@ -180,7 +205,7 @@ class TestInterviewGovernanceContract(unittest.TestCase):
 			"save_scorecard",
 		):
 			with self.subTest(endpoint=endpoint):
-				self.assertIn('@frappe.whitelist(methods=["POST"])\ndef {0}'.format(endpoint), api)
+				self.assertIn(f'@frappe.whitelist(methods=["POST"])\ndef {endpoint}', api)
 
 	def test_fresh_site_creates_governance_field_before_profile_backfill(self):
 		patches = (ROOT / "hrms" / "patches.txt").read_text(encoding="utf-8")
@@ -207,23 +232,36 @@ class TestInterviewGovernanceContract(unittest.TestCase):
 		)
 		self.assertIn("PRIVACY_GOVERNANCE_FIELDS", profile_controller)
 		self.assertIn("_validate_contact_monotonic", profile_controller)
-		self.assertIn('@frappe.whitelist(methods=["POST"])\n@candidate_profile_governance_update\ndef update_candidate_profile', api)
-		self.assertIn('@frappe.whitelist(methods=["POST"])\n@candidate_profile_governance_update\ndef resolve_candidate_identity', api)
+		self.assertIn(
+			'@frappe.whitelist(methods=["POST"])\n@candidate_profile_governance_update\ndef update_candidate_profile',
+			api,
+		)
+		self.assertIn(
+			'@frappe.whitelist(methods=["POST"])\n@candidate_profile_governance_update\ndef resolve_candidate_identity',
+			api,
+		)
 		for fieldname in ("talent_pool_status", "do_not_contact", "disposition_reason"):
-			field_block = profile_meta.split('"fieldname": "{0}"'.format(fieldname), 1)[1].split("}", 1)[0]
+			field_block = profile_meta.split(f'"fieldname": "{fieldname}"', 1)[1].split("}", 1)[0]
 			self.assertIn('"read_only": 1', field_block)
 
 	def test_review_event_allows_legacy_applicant_without_job_opening(self):
-		event = (ROOT / "hrms" / "hr" / "doctype" / "ayp_candidate_review_event" / "ayp_candidate_review_event.json").read_text(
-			encoding="utf-8"
-		)
+		event = (
+			ROOT
+			/ "hrms"
+			/ "hr"
+			/ "doctype"
+			/ "ayp_candidate_review_event"
+			/ "ayp_candidate_review_event.json"
+		).read_text(encoding="utf-8")
 		job_opening_block = event.split('"fieldname": "job_opening"', 1)[1].split("}", 1)[0]
 		self.assertNotIn('"reqd": 1', job_opening_block)
 
 	def test_downstream_documents_cannot_bypass_ayp_final_decision(self):
 		guard_name = "update_job_applicant_from_downstream"
 		governance = (ROOT / "hrms" / "recruitment" / "interview_governance.py").read_text(encoding="utf-8")
-		job_offer = (ROOT / "hrms" / "hr" / "doctype" / "job_offer" / "job_offer.py").read_text(encoding="utf-8")
+		job_offer = (ROOT / "hrms" / "hr" / "doctype" / "job_offer" / "job_offer.py").read_text(
+			encoding="utf-8"
+		)
 		employee = (ROOT / "hrms" / "overrides" / "employee_master.py").read_text(encoding="utf-8")
 		self.assertIn("custom_ayp_governed", governance)
 		self.assertIn(guard_name, job_offer)

@@ -34,7 +34,9 @@ class ExtractionResult:
 def normalize_extracted_text(value: str) -> str:
 	text = unicodedata.normalize("NFKC", value or "")
 	text = text.replace("\r\n", "\n").replace("\r", "\n")
-	text = "".join(character for character in text if character in "\n\t" or unicodedata.category(character) != "Cc")
+	text = "".join(
+		character for character in text if character in "\n\t" or unicodedata.category(character) != "Cc"
+	)
 	lines = [" ".join(line.split()) for line in text.split("\n")]
 	text = "\n".join(lines)
 	text = re.sub(r"\n{3,}", "\n\n", text).strip()
@@ -62,7 +64,9 @@ def _run(args: list[str], *, timeout: int = COMMAND_TIMEOUT_SECONDS) -> subproce
 			env=env,
 		)
 	except (subprocess.TimeoutExpired, OSError) as exc:
-		raise DocumentProcessingError("Revisión manual", "El extractor no respondió de forma segura.") from exc
+		raise DocumentProcessingError(
+			"Revisión manual", "El extractor no respondió de forma segura."
+		) from exc
 
 
 def _pdf_info(path: Path) -> tuple[int, bool]:
@@ -112,7 +116,9 @@ def _extract_pdf(content: bytes, directory: Path) -> ExtractionResult:
 		timeout=max(COMMAND_TIMEOUT_SECONDS, pages * 10),
 	)
 	if render.returncode != 0:
-		raise DocumentProcessingError("Ilegible", "El PDF no tiene texto utilizable y no pudo renderizarse para OCR.")
+		raise DocumentProcessingError(
+			"Ilegible", "El PDF no tiene texto utilizable y no pudo renderizarse para OCR."
+		)
 	parts = []
 	for image_path in sorted(directory.glob("page-*.png")):
 		part = _ocr_image(image_path)
@@ -130,11 +136,15 @@ def _extract_docx(content: bytes, directory: Path) -> ExtractionResult:
 	try:
 		with zipfile.ZipFile(BytesIO(content)) as archive:
 			root = ElementTree.fromstring(archive.read("word/document.xml"))
-			text = normalize_extracted_text(" ".join(node.text or "" for node in root.iter() if node.tag.endswith("}t")))
+			text = normalize_extracted_text(
+				" ".join(node.text or "" for node in root.iter() if node.tag.endswith("}t"))
+			)
 			if _useful(text):
 				return ExtractionResult(text=text, method="DOCX text", page_count=0)
 			parts = []
-			for index, name in enumerate(sorted(n for n in archive.namelist() if n.lower().startswith("word/media/"))):
+			for index, name in enumerate(
+				sorted(n for n in archive.namelist() if n.lower().startswith("word/media/"))
+			):
 				if index >= MAX_DOCUMENT_PAGES:
 					break
 				media_path = directory / f"docx-media-{index}{Path(name).suffix.lower()}"
@@ -159,7 +169,9 @@ def _extract_doc(content: bytes, directory: Path) -> ExtractionResult:
 	result = _run(["antiword", str(path)])
 	combined = f"{result.stdout}\n{result.stderr}"
 	if result.returncode != 0:
-		status = "Protegido" if re.search(r"encrypt|password|protect", combined, re.IGNORECASE) else "Ilegible"
+		status = (
+			"Protegido" if re.search(r"encrypt|password|protect", combined, re.IGNORECASE) else "Ilegible"
+		)
 		raise DocumentProcessingError(status, "No se pudo interpretar el documento Word antiguo.")
 	text = normalize_extracted_text(result.stdout)
 	if not _useful(text):

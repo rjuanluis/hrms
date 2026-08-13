@@ -44,7 +44,9 @@ class AYPCandidateProfile(Document):
 		changed = sorted(field for field in PRIVACY_GOVERNANCE_FIELDS if self.has_value_changed(field))
 		if changed:
 			frappe.throw(
-				_("El estado de privacidad y Talent Pool solo puede cambiar mediante una operación auditada."),
+				_(
+					"El estado de privacidad y Talent Pool solo puede cambiar mediante una operación auditada."
+				),
 				frappe.PermissionError,
 			)
 
@@ -56,9 +58,13 @@ class AYPCandidateProfile(Document):
 		if self.merged_into == self.name:
 			frappe.throw(_("Un perfil no puede redirigirse a sí mismo."))
 		if not self.is_new() and self.has_value_changed("merged_into"):
-			frappe.throw(_("La redirección de identidad solo puede establecerse mediante el flujo de fusión."))
+			frappe.throw(
+				_("La redirección de identidad solo puede establecerse mediante el flujo de fusión.")
+			)
 		if self.talent_pool_status != "Fusionado" or self.dedupe_status != "Manual":
-			frappe.throw(_("Un perfil fusionado debe permanecer neutralizado y marcado para auditoría manual."))
+			frappe.throw(
+				_("Un perfil fusionado debe permanecer neutralizado y marcado para auditoría manual.")
+			)
 
 	def _validate_contact_monotonic(self) -> None:
 		if not self.is_new() and self.has_value_changed("do_not_contact") and not self.do_not_contact:

@@ -40,17 +40,27 @@ class AYPCandidateReview {
 				<div class="review-intro">
 					<div>
 						<h2 id="candidate-review-heading">${__("Revisión de candidatos")}</h2>
-						<p>${__("Filtra, compara y clasifica aplicaciones por vacante. Las acciones masivas quedan auditadas.")}</p>
+						<p>${__(
+							"Filtra, compara y clasifica aplicaciones por vacante. Las acciones masivas quedan auditadas.",
+						)}</p>
 					</div>
-					<div class="review-selection" aria-live="polite"><strong data-selected-count>0</strong> ${__("seleccionados")} · ${__("máximo 100 por lote")}</div>
+					<div class="review-selection" aria-live="polite"><strong data-selected-count>0</strong> ${__(
+						"seleccionados",
+					)} · ${__("máximo 100 por lote")}</div>
 				</div>
 				<div class="review-status" data-review-status aria-live="polite"></div>
 				<div class="alert alert-info hidden review-run-status" data-filtered-run-status aria-live="polite">
 					<span data-filtered-run-summary></span>
 					<div class="review-run-actions">
-						<button class="btn btn-primary btn-sm" type="button" data-resume-filtered-run>${__("Reanudar cohorte")}</button>
-						<button class="btn btn-default btn-sm hidden" type="button" data-review-skipped>${__("Revisar omitidos")}</button>
-						<button class="btn btn-default btn-sm" type="button" data-cancel-filtered-run>${__("Cancelar cohorte")}</button>
+						<button class="btn btn-primary btn-sm" type="button" data-resume-filtered-run>${__(
+							"Reanudar cohorte",
+						)}</button>
+						<button class="btn btn-default btn-sm hidden" type="button" data-review-skipped>${__(
+							"Revisar omitidos",
+						)}</button>
+						<button class="btn btn-default btn-sm" type="button" data-cancel-filtered-run>${__(
+							"Cancelar cohorte",
+						)}</button>
 					</div>
 				</div>
 				<div class="review-table-wrap" data-review-table-wrap aria-busy="false">
@@ -71,10 +81,14 @@ class AYPCandidateReview {
 						</thead>
 						<tbody data-review-rows></tbody>
 					</table>
-					<div class="review-empty hidden" data-review-empty>${__("No encontramos candidatos para estos filtros.")}</div>
+					<div class="review-empty hidden" data-review-empty>${__(
+						"No encontramos candidatos para estos filtros.",
+					)}</div>
 				</div>
 				<div class="review-footer">
-					<button class="btn btn-default btn-sm hidden" type="button" data-load-more>${__("Cargar 50 más")}</button>
+					<button class="btn btn-default btn-sm hidden" type="button" data-load-more>${__(
+						"Cargar 50 más",
+					)}</button>
 				</div>
 			</section>`,
 		).appendTo(this.page.main);
@@ -182,7 +196,11 @@ class AYPCandidateReview {
 	}
 
 	make_actions() {
-		this.page.set_primary_action(__("Clasificar seleccionados"), () => this.show_batch_dialog(), "check");
+		this.page.set_primary_action(
+			__("Clasificar seleccionados"),
+			() => this.show_batch_dialog(),
+			"check",
+		);
 		this.page.add_inner_button(__("Procesar todos los resultados filtrados"), () =>
 			this.show_filtered_batch_dialog(),
 		);
@@ -198,7 +216,8 @@ class AYPCandidateReview {
 		this.$root.on("change", "[data-select-all]", (event) => {
 			const checked = event.currentTarget.checked;
 			this.rows.forEach((row) => {
-				if (checked && this.selected.size < this.max_batch_size) this.selected.add(row.name);
+				if (checked && this.selected.size < this.max_batch_size)
+					this.selected.add(row.name);
 				else if (!checked) this.selected.delete(row.name);
 			});
 			if (checked && this.rows.length > this.max_batch_size) {
@@ -224,7 +243,11 @@ class AYPCandidateReview {
 			frappe.set_route("Form", "Job Applicant", event.currentTarget.dataset.openApplicant);
 		});
 		this.$root.on("click", "[data-open-profile]", (event) => {
-			frappe.set_route("Form", "AYP Candidate Profile", event.currentTarget.dataset.openProfile);
+			frappe.set_route(
+				"Form",
+				"AYP Candidate Profile",
+				event.currentTarget.dataset.openProfile,
+			);
 		});
 		this.$root.on("click", "[data-manage-profile]", (event) => {
 			this.show_profile_dialog(event.currentTarget.dataset.manageProfile, false);
@@ -255,7 +278,9 @@ class AYPCandidateReview {
 		this.$root.on("click", "[data-resume-filtered-run]", () => {
 			if (this.active_filtered_run) this.confirm_frozen_run(this.active_filtered_run);
 		});
-		this.$root.on("click", "[data-cancel-filtered-run]", () => this.show_cancel_filtered_run_dialog());
+		this.$root.on("click", "[data-cancel-filtered-run]", () =>
+			this.show_cancel_filtered_run_dialog(),
+		);
 		this.$root.on("click", "[data-review-skipped]", () => this.show_skipped_members_dialog());
 		this.$root.on("click", "[data-retry-list]", () => this.load_candidates({ reset: true }));
 		this.$load_more.on("click", () => this.load_candidates({ reset: false }));
@@ -263,7 +288,10 @@ class AYPCandidateReview {
 
 	async confirm_final_decision(applicant, interview, target_status) {
 		frappe.confirm(
-			__("¿Registrar la decisión final {0} desde la entrevista enviada {1}?", [target_status, interview]),
+			__("¿Registrar la decisión final {0} desde la entrevista enviada {1}?", [
+				target_status,
+				interview,
+			]),
 			async () => {
 				await frappe.call({
 					method: "hrms.hr.doctype.interview.interview.update_job_applicant_status",
@@ -301,9 +329,18 @@ class AYPCandidateReview {
 								fieldtype: "Select",
 								label: __("Corrección de identidad"),
 								options: [
-									{ label: __("Separar esta solicitud en un perfil nuevo"), value: "split" },
-									{ label: __("Revincular esta solicitud a otro perfil"), value: "relink" },
-									{ label: __("Fusionar todo el perfil en otro perfil"), value: "merge" },
+									{
+										label: __("Separar esta solicitud en un perfil nuevo"),
+										value: "split",
+									},
+									{
+										label: __("Revincular esta solicitud a otro perfil"),
+										value: "relink",
+									},
+									{
+										label: __("Fusionar todo el perfil en otro perfil"),
+										value: "merge",
+									},
 								],
 								reqd: 1,
 							},
@@ -312,10 +349,12 @@ class AYPCandidateReview {
 								fieldtype: "Link",
 								options: "AYP Candidate Profile",
 								label: __("Perfil objetivo"),
-								depends_on: "eval:doc.identity_operation=='relink' || doc.identity_operation=='merge'",
-								mandatory_depends_on: "eval:doc.identity_operation=='relink' || doc.identity_operation=='merge'",
+								depends_on:
+									"eval:doc.identity_operation=='relink' || doc.identity_operation=='merge'",
+								mandatory_depends_on:
+									"eval:doc.identity_operation=='relink' || doc.identity_operation=='merge'",
 							},
-						]
+					  ]
 					: [
 							{
 								fieldname: "action",
@@ -324,19 +363,26 @@ class AYPCandidateReview {
 								options: [
 									{ label: __("Conservar activo"), value: "retain" },
 									{ label: __("Marcar prioritario"), value: "priority" },
-									{ label: __("Sin interés / no contactar"), value: "no_interest" },
+									{
+										label: __("Sin interés / no contactar"),
+										value: "no_interest",
+									},
 									{ label: __("Disponer / no contactar"), value: "disposed" },
 								],
 								reqd: 1,
 							},
-						]),
+					  ]),
 				{
 					fieldname: "reason",
 					fieldtype: "Small Text",
 					label: __("Motivo humano documentado"),
 					description: resolveDedupe
-						? __("Mínimo 20 caracteres. La fusión mueve todas las solicitudes y conserva ambos perfiles para auditoría.")
-						: __("Mínimo 20 caracteres. La solicitud de eliminación usa el flujo de privacidad, no esta acción."),
+						? __(
+								"Mínimo 20 caracteres. La fusión mueve todas las solicitudes y conserva ambos perfiles para auditoría.",
+						  )
+						: __(
+								"Mínimo 20 caracteres. La solicitud de eliminación usa el flujo de privacidad, no esta acción.",
+						  ),
 					reqd: 1,
 				},
 			],
@@ -354,7 +400,7 @@ class AYPCandidateReview {
 									target_profile: values.target_profile,
 									reason: values.reason,
 									preview_binding,
-								}
+							  }
 							: { applicant, action: values.action, reason: values.reason },
 						freeze: true,
 						freeze_message: __("Guardando decisión de perfil…"),
@@ -375,12 +421,20 @@ class AYPCandidateReview {
 					});
 					const preview = previewResponse.message || {};
 					const escape = frappe.utils.escape_html;
-					const affected = (preview.moved_applications || []).map((name) => escape(name)).join(", ");
+					const affected = (preview.moved_applications || [])
+						.map((name) => escape(name))
+						.join(", ");
 					frappe.confirm(
 						`<strong>${__("Preview autoritativo de fusión")}</strong><br>
-						${__("Origen")}: ${escape(preview.source_name || preview.source_profile || "")} (${escape(preview.source_profile || "")})<br>
-						${__("Objetivo")}: ${escape(preview.target_name || preview.target_profile || "")} (${escape(preview.target_profile || "")})<br>
-						${__("Solicitudes que se moverán")}: ${Number((preview.moved_applications || []).length)} · ${affected}<br>
+						${__("Origen")}: ${escape(preview.source_name || preview.source_profile || "")} (${escape(
+							preview.source_profile || "",
+						)})<br>
+						${__("Objetivo")}: ${escape(preview.target_name || preview.target_profile || "")} (${escape(
+							preview.target_profile || "",
+						)})<br>
+						${__("Solicitudes que se moverán")}: ${Number(
+							(preview.moved_applications || []).length,
+						)} · ${affected}<br>
 						${__("Estado Talent Pool resultante")}: ${escape(preview.result_talent_pool_status || "")}<br>
 						${__("No contactar resultante")}: ${preview.result_do_not_contact ? __("Sí") : __("No")}<br>
 						${__("El perfil origen quedará como alias histórico no operativo.")}`,
@@ -442,7 +496,11 @@ class AYPCandidateReview {
 		} catch (error) {
 			if (generation !== this.load_generation) return;
 			this.$status.html(
-				`${__("No se pudieron cargar los candidatos.")} <button class="btn btn-link btn-xs" type="button" data-retry-list>${__("Reintentar")}</button>`,
+				`${__(
+					"No se pudieron cargar los candidatos.",
+				)} <button class="btn btn-link btn-xs" type="button" data-retry-list>${__(
+					"Reintentar",
+				)}</button>`,
 			);
 			frappe.msgprint({
 				title: __("Candidate Review"),
@@ -470,7 +528,9 @@ class AYPCandidateReview {
 			const dedupe = escape(row.custom_dedupe_status || __("Sin clasificar"));
 			const rating = Number(row.rating_out_of_five || 0).toFixed(1);
 			const score = row.custom_candidate_score;
-			const recommendation = escape(row.custom_candidate_recommendation || __("Sin evaluar"));
+			const recommendation = escape(
+				row.custom_candidate_recommendation || __("Sin evaluar"),
+			);
 			const document_status = escape(row.custom_cv_processing_status || __("Sin estado"));
 			const document_method = escape(row.custom_cv_processing_method || "");
 			const document_detail = escape(row.custom_cv_processing_detail || "");
@@ -481,46 +541,109 @@ class AYPCandidateReview {
 				row.custom_cv_processing_status,
 			);
 			const document_button = manual_reviewable
-				? `<button class="btn btn-link btn-xs" type="button" data-verify-document="${name}">${__("Verificar CV manualmente")}</button>`
+				? `<button class="btn btn-link btn-xs" type="button" data-verify-document="${name}">${__(
+						"Verificar CV manualmente",
+				  )}</button>`
 				: "";
 			const score_button = document_ready
-				? `<button class="btn btn-link btn-xs" type="button" data-score-applicant="${name}">${__("Evaluar")}</button>`
-				: `<button class="btn btn-link btn-xs" type="button" disabled title="${__("El CV debe estar procesado o verificado manualmente")}">${__("Evaluar")}</button>`;
-			const score_label = score === null || score === undefined || score === "" ? "—" : `${Number(score).toFixed(1)}/100`;
+				? `<button class="btn btn-link btn-xs" type="button" data-score-applicant="${name}">${__(
+						"Evaluar",
+				  )}</button>`
+				: `<button class="btn btn-link btn-xs" type="button" disabled title="${__(
+						"El CV debe estar procesado o verificado manualmente",
+				  )}">${__("Evaluar")}</button>`;
+			const score_label =
+				score === null || score === undefined || score === ""
+					? "—"
+					: `${Number(score).toFixed(1)}/100`;
 			const created = row.creation ? frappe.datetime.str_to_user(row.creation) : "—";
 			const profile = row.custom_candidate_profile || "";
 			const pool_status = escape(row.talent_pool_status || __("Sin decisión"));
-			const contact_status = row.talent_pool_do_not_contact ? ` · ${__("No contactar")}` : "";
+			const contact_status = row.talent_pool_do_not_contact
+				? ` · ${__("No contactar")}`
+				: "";
 			const checked = this.selected.has(row.name) ? "checked" : "";
 			const profile_button = profile
-				? `<button class="btn btn-link btn-xs" type="button" data-open-profile="${escape(profile)}">${__("Perfil")}</button><button class="btn btn-link btn-xs" type="button" data-manage-profile="${name}">${__("Talent Pool")}</button><small>${pool_status}${contact_status}</small>${row.custom_dedupe_status === "Revisión requerida" || row.custom_dedupe_status === "Coincidencia" ? `<button class="btn btn-link btn-xs" type="button" data-resolve-dedupe="${name}">${__("Resolver dedupe")}</button>` : ""}`
+				? `<button class="btn btn-link btn-xs" type="button" data-open-profile="${escape(
+						profile,
+				  )}">${__(
+						"Perfil",
+				  )}</button><button class="btn btn-link btn-xs" type="button" data-manage-profile="${name}">${__(
+						"Talent Pool",
+				  )}</button><small>${pool_status}${contact_status}</small>${
+						row.custom_dedupe_status === "Revisión requerida" ||
+						row.custom_dedupe_status === "Coincidencia"
+							? `<button class="btn btn-link btn-xs" type="button" data-resolve-dedupe="${name}">${__(
+									"Resolver dedupe",
+							  )}</button>`
+							: ""
+				  }`
 				: "";
 			const interview_button = row.existing_interview
-				? `<button class="btn btn-link btn-xs" type="button" data-open-interview="${escape(row.existing_interview)}">${__("Abrir entrevista")}</button><small>${escape(row.interview_status || __("Borrador"))} · ${row.interview_scheduled_on ? escape(frappe.datetime.str_to_user(row.interview_scheduled_on)) : __("sin fecha")} · ${row.assigned_interviewers || 0} ${__("asignados")} · ${row.missing_feedback || 0} ${__("feedback pendientes")}${row.feedback_disagreement ? ` · ${__("hay desacuerdo")}` : ""}</small>`
+				? `<button class="btn btn-link btn-xs" type="button" data-open-interview="${escape(
+						row.existing_interview,
+				  )}">${__("Abrir entrevista")}</button><small>${escape(
+						row.interview_status || __("Borrador"),
+				  )} · ${
+						row.interview_scheduled_on
+							? escape(frappe.datetime.str_to_user(row.interview_scheduled_on))
+							: __("sin fecha")
+				  } · ${row.assigned_interviewers || 0} ${__("asignados")} · ${
+						row.missing_feedback || 0
+				  } ${__("feedback pendientes")}${
+						row.feedback_disagreement ? ` · ${__("hay desacuerdo")}` : ""
+				  }</small>`
 				: row.status === "Shortlisted"
-					? `<button class="btn btn-link btn-xs" type="button" data-schedule-interview="${name}">${__("Programar entrevista")}</button>`
-					: "";
+				  ? `<button class="btn btn-link btn-xs" type="button" data-schedule-interview="${name}">${__(
+							"Programar entrevista",
+				    )}</button>`
+				  : "";
 			const final_target =
-				row.interview_status === "Cleared" ? "Accepted" : row.interview_status === "Rejected" ? "Rejected" : "";
+				row.interview_status === "Cleared"
+					? "Accepted"
+					: row.interview_status === "Rejected"
+					  ? "Rejected"
+					  : "";
 			const final_decision_button =
 				row.existing_interview &&
 				Number(row.interview_docstatus) === 1 &&
 				final_target &&
 				!["Accepted", "Rejected"].includes(row.status)
-					? `<button class="btn btn-primary btn-xs" type="button" data-final-decision="${name}" data-interview="${escape(row.existing_interview)}" data-target-status="${escape(final_target)}">${__("Decisión final")}</button>`
+					? `<button class="btn btn-primary btn-xs" type="button" data-final-decision="${name}" data-interview="${escape(
+							row.existing_interview,
+					  )}" data-target-status="${escape(final_target)}">${__(
+							"Decisión final",
+					  )}</button>`
 					: "";
 			this.$rows.append(
 				`<tr>
-					<td class="review-check" data-label="${__("Seleccionar")}"><input type="checkbox" data-select-applicant="${name}" aria-label="${__("Seleccionar a {0}", [candidate])}" ${checked}></td>
-					<td data-label="${__("Candidato")}"><button class="btn btn-link review-name" type="button" data-open-applicant="${name}">${candidate}</button><small>${email}</small></td>
+					<td class="review-check" data-label="${__(
+						"Seleccionar",
+					)}"><input type="checkbox" data-select-applicant="${name}" aria-label="${__(
+						"Seleccionar a {0}",
+						[candidate],
+					)}" ${checked}></td>
+					<td data-label="${__(
+						"Candidato",
+					)}"><button class="btn btn-link review-name" type="button" data-open-applicant="${name}">${candidate}</button><small>${email}</small></td>
 					<td data-label="${__("Vacante")}">${vacancy}</td>
 					<td data-label="${__("Estado")}"><span class="indicator-pill gray">${status}</span></td>
 					<td data-label="${__("Rating")}"><strong>${rating}</strong>/5</td>
-					<td data-label="${__("Score AyP")}"><strong>${escape(score_label)}</strong><small>${recommendation}</small></td>
-					<td data-label="${__("Documento CV")}"><span class="indicator-pill ${document_ready ? "green" : "orange"}">${document_status}</span><small>${document_method}${document_method && document_detail ? " · " : ""}${document_detail}</small>${document_button}</td>
+					<td data-label="${__("Score AyP")}"><strong>${escape(
+						score_label,
+					)}</strong><small>${recommendation}</small></td>
+					<td data-label="${__("Documento CV")}"><span class="indicator-pill ${
+						document_ready ? "green" : "orange"
+					}">${document_status}</span><small>${document_method}${
+						document_method && document_detail ? " · " : ""
+					}${document_detail}</small>${document_button}</td>
 					<td data-label="${__("Dedupe")}">${dedupe}</td>
 					<td data-label="${__("Recibido")}">${escape(created)}</td>
-					<td class="review-mobile-actions" data-label="${__("Acciones")}">${final_decision_button}<button class="btn btn-link btn-xs" type="button" data-open-applicant="${name}">${__("Revisar")}</button>${score_button}${interview_button}${profile_button}</td>
+					<td class="review-mobile-actions" data-label="${__(
+						"Acciones",
+					)}">${final_decision_button}<button class="btn btn-link btn-xs" type="button" data-open-applicant="${name}">${__(
+						"Revisar",
+					)}</button>${score_button}${interview_button}${profile_button}</td>
 				</tr>`,
 			);
 		});
@@ -599,7 +722,10 @@ class AYPCandidateReview {
 		});
 		const result = response.message || {};
 		frappe.show_alert({
-			message: __("{0} candidatos actualizados · lote {1}", [result.updated || 0, result.batch_id || "—"]),
+			message: __("{0} candidatos actualizados · lote {1}", [
+				result.updated || 0,
+				result.batch_id || "—",
+			]),
 			indicator: "green",
 		});
 		this.selected.clear();
@@ -609,7 +735,11 @@ class AYPCandidateReview {
 	show_filtered_batch_dialog() {
 		const filters = this.get_filter_values();
 		if (!filters.job_title || !filters.status) {
-			frappe.msgprint(__("Fija una vacante y un estado de origen antes de procesar todos los resultados."));
+			frappe.msgprint(
+				__(
+					"Fija una vacante y un estado de origen antes de procesar todos los resultados.",
+				),
+			);
 			return;
 		}
 		const dialog = new frappe.ui.Dialog({
@@ -653,27 +783,37 @@ class AYPCandidateReview {
 
 	confirm_frozen_run(run) {
 		frappe.confirm(
-			__("La cohorte {0} contiene exactamente {1} candidatos. Vacante: {2}. Estado origen: {3}. Estado destino: {4}. Motivo: {5}. ¿Procesarla en lotes auditados de máximo 100?", [
-				run.run,
-				run.total,
-				run.job_title,
-				run.source_status,
-				run.target_status,
-				run.reason,
-			]),
+			__(
+				"La cohorte {0} contiene exactamente {1} candidatos. Vacante: {2}. Estado origen: {3}. Estado destino: {4}. Motivo: {5}. ¿Procesarla en lotes auditados de máximo 100?",
+				[
+					run.run,
+					run.total,
+					run.job_title,
+					run.source_status,
+					run.target_status,
+					run.reason,
+				],
+			),
 			() => this.process_filtered_run(run.run),
 		);
 	}
 
 	async process_filtered_run(run_name) {
-		let state = this.active_filtered_run || { run: run_name, processed: 0, skipped: 0, remaining: 0 };
+		let state = this.active_filtered_run || {
+			run: run_name,
+			processed: 0,
+			skipped: 0,
+			remaining: 0,
+		};
 		try {
 			do {
 				const response = await frappe.call({
 					method: "hrms.hr.page.ayp_candidate_review.ayp_candidate_review.process_filtered_run_chunk",
 					args: { run: run_name },
 					freeze: true,
-					freeze_message: __("Procesando cohorte · {0} completados…", [state.processed || 0]),
+					freeze_message: __("Procesando cohorte · {0} completados…", [
+						state.processed || 0,
+					]),
 				});
 				state = response.message || state;
 				this.active_filtered_run = state;
@@ -682,15 +822,17 @@ class AYPCandidateReview {
 			if (Number(state.skipped || 0) > 0) {
 				frappe.msgprint({
 					title: __("Cohorte terminada con omitidos por revisar"),
-					message: __("{0} procesados y {1} omitidos. Revisa cada omitido antes de cerrar la cohorte.", [
-					state.processed || 0,
-					state.skipped || 0,
-					]),
+					message: __(
+						"{0} procesados y {1} omitidos. Revisa cada omitido antes de cerrar la cohorte.",
+						[state.processed || 0, state.skipped || 0],
+					),
 					indicator: "orange",
 				});
 			} else {
 				frappe.show_alert({
-					message: __("Cohorte completada: {0} procesados, sin omitidos.", [state.processed || 0]),
+					message: __("Cohorte completada: {0} procesados, sin omitidos.", [
+						state.processed || 0,
+					]),
 					indicator: "green",
 				});
 				this.active_filtered_run = null;
@@ -698,11 +840,10 @@ class AYPCandidateReview {
 			this.render_filtered_run(this.active_filtered_run);
 		} catch (error) {
 			frappe.msgprint(
-				__("Cohorte pausada: {0} procesados, {1} omitidos y {2} pendientes. Usa Reanudar cohorte.", [
-					state.processed || 0,
-					state.skipped || 0,
-					state.remaining || 0,
-				]),
+				__(
+					"Cohorte pausada: {0} procesados, {1} omitidos y {2} pendientes. Usa Reanudar cohorte.",
+					[state.processed || 0, state.skipped || 0, state.remaining || 0],
+				),
 			);
 			throw error;
 		} finally {
@@ -725,19 +866,24 @@ class AYPCandidateReview {
 			return;
 		}
 		this.$run_summary.text(
-			__("Cohorte {0} · Vacante: {1} · Estado origen: {2} → Estado destino: {3} · Motivo: {4} · {5} procesados · {6} omitidos · {7} pendientes.", [
-				run.run,
-				run.job_title || "—",
-				run.source_status || "—",
-				run.target_status || "—",
-				run.reason || "—",
-				run.processed || 0,
-				run.skipped || 0,
-				run.remaining || 0,
-			]),
+			__(
+				"Cohorte {0} · Vacante: {1} · Estado origen: {2} → Estado destino: {3} · Motivo: {4} · {5} procesados · {6} omitidos · {7} pendientes.",
+				[
+					run.run,
+					run.job_title || "—",
+					run.source_status || "—",
+					run.target_status || "—",
+					run.reason || "—",
+					run.processed || 0,
+					run.skipped || 0,
+					run.remaining || 0,
+				],
+			),
 		);
 		const completedWithSkips = run.run_status === "Completed" && Number(run.skipped || 0) > 0;
-		this.$run_status.find("[data-resume-filtered-run]").toggleClass("hidden", run.run_status === "Completed");
+		this.$run_status
+			.find("[data-resume-filtered-run]")
+			.toggleClass("hidden", run.run_status === "Completed");
 		this.$run_status
 			.find("[data-cancel-filtered-run]")
 			.toggleClass("hidden", !["Frozen", "In Progress"].includes(run.run_status));
@@ -749,7 +895,14 @@ class AYPCandidateReview {
 		if (!run) return;
 		const dialog = new frappe.ui.Dialog({
 			title: __("Cancelar cohorte congelada"),
-			fields: [{ fieldname: "reason", fieldtype: "Small Text", label: __("Motivo de cancelación"), reqd: 1 }],
+			fields: [
+				{
+					fieldname: "reason",
+					fieldtype: "Small Text",
+					label: __("Motivo de cancelación"),
+					reqd: 1,
+				},
+			],
 			primary_action_label: __("Cancelar sin borrar historial"),
 			primary_action: async (values) => {
 				await frappe.call({
@@ -774,14 +927,38 @@ class AYPCandidateReview {
 		});
 		const escape = frappe.utils.escape_html;
 		const rows = (response.message || [])
-			.map((member) => `<tr><td><a class="btn btn-link btn-xs" href="/app/job-applicant/${encodeURIComponent(member.applicant)}">${escape(member.applicant)}</a></td><td>${escape(member.frozen_status || "")}</td><td>${escape(member.previous_status || "")}</td><td>${escape(member.outcome_detail || "")}</td></tr>`)
+			.map(
+				(member) =>
+					`<tr><td><a class="btn btn-link btn-xs" href="/app/job-applicant/${encodeURIComponent(
+						member.applicant,
+					)}">${escape(member.applicant)}</a></td><td>${escape(
+						member.frozen_status || "",
+					)}</td><td>${escape(member.previous_status || "")}</td><td>${escape(
+						member.outcome_detail || "",
+					)}</td></tr>`,
+			)
 			.join("");
 		const dialog = new frappe.ui.Dialog({
 			title: __("Omitidos de la cohorte {0}", [run.run]),
 			size: "large",
 			fields: [
-				{ fieldname: "members", fieldtype: "HTML", options: `<div class="review-table-wrap"><table class="table"><thead><tr><th>${__("Candidato")}</th><th>${__("Estado congelado")}</th><th>${__("Estado actual")}</th><th>${__("Motivo")}</th></tr></thead><tbody>${rows}</tbody></table></div>` },
-				{ fieldname: "reason", fieldtype: "Small Text", label: __("Cierre documentado de los omitidos"), reqd: 1 },
+				{
+					fieldname: "members",
+					fieldtype: "HTML",
+					options: `<div class="review-table-wrap"><table class="table"><thead><tr><th>${__(
+						"Candidato",
+					)}</th><th>${__("Estado congelado")}</th><th>${__(
+						"Estado actual",
+					)}</th><th>${__(
+						"Motivo",
+					)}</th></tr></thead><tbody>${rows}</tbody></table></div>`,
+				},
+				{
+					fieldname: "reason",
+					fieldtype: "Small Text",
+					label: __("Cierre documentado de los omitidos"),
+					reqd: 1,
+				},
 			],
 			primary_action_label: __("Confirmar revisión y cerrar"),
 			primary_action: async (values) => {
@@ -815,8 +992,7 @@ class AYPCandidateReview {
 			primary_action_label: __("Registrar verificación"),
 			primary_action: async (values) => {
 				await frappe.call({
-					method:
-						"hrms.hr.page.ayp_candidate_review.ayp_candidate_review.verify_candidate_document_manually",
+					method: "hrms.hr.page.ayp_candidate_review.ayp_candidate_review.verify_candidate_document_manually",
 					args: { applicant, reason: values.reason },
 					freeze: true,
 					freeze_message: __("Registrando verificación documental…"),
@@ -841,9 +1017,13 @@ class AYPCandidateReview {
 			fields.push({
 				fieldname: "latest_summary",
 				fieldtype: "HTML",
-				options: `<div class="scorecard-latest"><strong>${__("Última evaluación")}: ${frappe.utils.escape_html(
+				options: `<div class="scorecard-latest"><strong>${__(
+					"Última evaluación",
+				)}: ${frappe.utils.escape_html(
 					String(payload.latest.total_score),
-				)}/100</strong><span>${frappe.utils.escape_html(payload.latest.recommendation || "")}</span></div>`,
+				)}/100</strong><span>${frappe.utils.escape_html(
+					payload.latest.recommendation || "",
+				)}</span></div>`,
 			});
 		}
 		payload.criteria.forEach((criterion) => {
@@ -865,7 +1045,9 @@ class AYPCandidateReview {
 				fieldname: `evidence__${criterion.criterion_key}`,
 				fieldtype: "Small Text",
 				label: __("Evidencia comprobable"),
-				description: __("Describe una observación verificable de al menos 20 caracteres; máximo 500."),
+				description: __(
+					"Describe una observación verificable de al menos 20 caracteres; máximo 500.",
+				),
 				default: criterion.evidence || "",
 				reqd: 1,
 			});
@@ -890,9 +1072,13 @@ class AYPCandidateReview {
 				dialog.hide();
 				frappe.msgprint({
 					title: __("Evaluación guardada"),
-					message: `<strong>${frappe.utils.escape_html(String(result.total_score))}/100</strong><br>${frappe.utils.escape_html(
+					message: `<strong>${frappe.utils.escape_html(
+						String(result.total_score),
+					)}/100</strong><br>${frappe.utils.escape_html(
 						result.recommendation || "",
-					)}<p class="text-muted">${__("La recomendación es asistida; la decisión final corresponde a una persona.")}</p>`,
+					)}<p class="text-muted">${__(
+						"La recomendación es asistida; la decisión final corresponde a una persona.",
+					)}</p>`,
 					indicator: "green",
 				});
 				await this.load_candidates({ reset: true });
@@ -922,10 +1108,15 @@ class AYPCandidateReview {
 			),
 		);
 		const scorecards = Object.fromEntries(
-			selected_rows.map((row, index) => [row.name, scorecard_responses[index].message || {}]),
+			selected_rows.map((row, index) => [
+				row.name,
+				scorecard_responses[index].message || {},
+			]),
 		);
-		const ranked = [...selected_rows].sort((left, right) =>
-			Number(right.custom_candidate_score || -1) - Number(left.custom_candidate_score || -1),
+		const ranked = [...selected_rows].sort(
+			(left, right) =>
+				Number(right.custom_candidate_score || -1) -
+				Number(left.custom_candidate_score || -1),
 		);
 		const rows = ranked
 			.map((row) => {
@@ -933,19 +1124,37 @@ class AYPCandidateReview {
 				const latest = scorecard.latest || {};
 				const criterion_evidence = (scorecard.criteria || [])
 					.map(
-						(criterion) => `<li><strong>${escape(criterion.criterion_label || criterion.criterion_key || "")}: ${Number(
-							criterion.rating || 0,
-						).toFixed(0)}/5</strong><br>${escape(criterion.evidence || __("Sin evidencia registrada"))}</li>`,
+						(criterion) =>
+							`<li><strong>${escape(
+								criterion.criterion_label || criterion.criterion_key || "",
+							)}: ${Number(criterion.rating || 0).toFixed(0)}/5</strong><br>${escape(
+								criterion.evidence || __("Sin evidencia registrada"),
+							)}</li>`,
 					)
 					.join("");
 				const audit = latest.name
-					? `${escape(latest.scored_by || "")} · ${latest.scored_on ? escape(frappe.datetime.str_to_user(latest.scored_on)) : ""}`
+					? `${escape(latest.scored_by || "")} · ${
+							latest.scored_on
+								? escape(frappe.datetime.str_to_user(latest.scored_on))
+								: ""
+					  }`
 					: __("Sin evaluación versionada");
 				return `<tr>
-					<td><strong>${escape(row.applicant_name || row.name)}</strong><small>${escape(row.name)}</small></td>
+					<td><strong>${escape(row.applicant_name || row.name)}</strong><small>${escape(
+						row.name,
+					)}</small></td>
 					<td>${escape(row.status || "")}</td>
-					<td>${row.custom_candidate_score === null || row.custom_candidate_score === undefined ? "—" : `${Number(row.custom_candidate_score).toFixed(1)}/100`}<small>${escape(row.custom_candidate_recommendation || __("Sin evaluar"))}</small></td>
-					<td><ol class="review-evidence-list">${criterion_evidence || `<li>${__("Sin criterios evaluados")}</li>`}</ol><small>${audit}</small></td>
+					<td>${
+						row.custom_candidate_score === null ||
+						row.custom_candidate_score === undefined
+							? "—"
+							: `${Number(row.custom_candidate_score).toFixed(1)}/100`
+					}<small>${escape(
+						row.custom_candidate_recommendation || __("Sin evaluar"),
+					)}</small></td>
+					<td><ol class="review-evidence-list">${
+						criterion_evidence || `<li>${__("Sin criterios evaluados")}</li>`
+					}</ol><small>${audit}</small></td>
 					<td>${Number(row.rating_out_of_five || 0).toFixed(1)}/5</td>
 					<td>${escape(row.custom_dedupe_status || __("Sin clasificar"))}</td>
 				</tr>`;
@@ -958,7 +1167,15 @@ class AYPCandidateReview {
 				{
 					fieldname: "comparison",
 					fieldtype: "HTML",
-					options: `<div class="review-comparison"><p>${__("Orden visual por score; decide usando la evidencia y el contexto de la vacante.")}</p><div class="review-table-wrap"><table class="table"><thead><tr><th>${__("Candidato")}</th><th>${__("Estado")}</th><th>${__("Score")}</th><th>${__("Criterios y evidencia")}</th><th>${__("Rating")}</th><th>${__("Dedupe")}</th></tr></thead><tbody>${rows}</tbody></table></div></div>`,
+					options: `<div class="review-comparison"><p>${__(
+						"Orden visual por score; decide usando la evidencia y el contexto de la vacante.",
+					)}</p><div class="review-table-wrap"><table class="table"><thead><tr><th>${__(
+						"Candidato",
+					)}</th><th>${__("Estado")}</th><th>${__("Score")}</th><th>${__(
+						"Criterios y evidencia",
+					)}</th><th>${__("Rating")}</th><th>${__(
+						"Dedupe",
+					)}</th></tr></thead><tbody>${rows}</tbody></table></div></div>`,
 				},
 			],
 		});

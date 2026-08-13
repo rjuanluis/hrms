@@ -73,9 +73,7 @@ def run_volume_pilot(candidate_count: int = 250) -> dict:
 	for index, candidate in enumerate(candidates, start=1):
 		profile_actions[candidate] = "Prioritario" if index <= 50 else "Activo"
 	dedupe_resolutions = {
-		candidate: "Manual"
-		for index, candidate in enumerate(candidates, start=1)
-		if index % 10 == 0
+		candidate: "Manual" for index, candidate in enumerate(candidates, start=1) if index % 10 == 0
 	}
 	assert len(profile_actions) == candidate_count
 	assert sum(status == "Prioritario" for status in profile_actions.values()) == 50

@@ -114,8 +114,14 @@ def _load_parser() -> None:
 	from pypdf import PdfReader as _PdfReader
 	from pypdf.generic import (
 		ArrayObject as _ArrayObject,
+	)
+	from pypdf.generic import (
 		DictionaryObject as _DictionaryObject,
+	)
+	from pypdf.generic import (
 		IndirectObject as _IndirectObject,
+	)
+	from pypdf.generic import (
 		NameObject as _NameObject,
 	)
 
@@ -136,7 +142,9 @@ def _name(value) -> str:
 		if payload[index] != "#":
 			index += 1
 			continue
-		if index + 2 >= len(payload) or any(character not in "0123456789abcdefABCDEF" for character in payload[index + 1 : index + 3]):
+		if index + 2 >= len(payload) or any(
+			character not in "0123456789abcdefABCDEF" for character in payload[index + 1 : index + 3]
+		):
 			raise PDFSecurityError("malformed-name-escape")
 		index += 3
 	return name

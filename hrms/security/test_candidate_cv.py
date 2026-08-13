@@ -14,9 +14,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import frappe
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import DictionaryObject, IndirectObject, NameObject, TextStringObject
+
+import frappe
 
 from hrms.security.candidate_cv import (
 	CandidateCVSecurityError,
@@ -222,7 +223,9 @@ class TestCandidateCVSecurity(unittest.TestCase):
 	def test_rejects_embedded_file_without_optional_type(self):
 		entry = b"/Names << /EmbeddedFiles << /Names [(payload) << /Type /Filespec /F (x.txt) /EF << /F 4 0 R >> >>] >> >>"
 		base = make_pdf_with_raw_catalog_entry(entry)
-		base = base.replace(b"xref\n0 4", b"4 0 obj\n<< /Length 4 >>\nstream\ntest\nendstream\nendobj\nxref\n0 4")
+		base = base.replace(
+			b"xref\n0 4", b"4 0 obj\n<< /Length 4 >>\nstream\ntest\nendstream\nendobj\nxref\n0 4"
+		)
 		with self.assertRaises(CandidateCVSecurityError):
 			validate_cv_file("cv.pdf", base)
 
@@ -230,7 +233,9 @@ class TestCandidateCVSecurity(unittest.TestCase):
 		with self.assertRaises(CandidateCVSecurityError):
 			validate_cv_file(
 				"cv.pdf",
-				make_pdf_with_raw_catalog_entry(b"/OpenAction << /S /SubmitForm /F (https://invalid.example/) >>"),
+				make_pdf_with_raw_catalog_entry(
+					b"/OpenAction << /S /SubmitForm /F (https://invalid.example/) >>"
+				),
 			)
 
 	def test_accepts_inert_name_js(self):
@@ -263,7 +268,9 @@ class TestCandidateCVSecurity(unittest.TestCase):
 
 		with (
 			patch.dict(os.environ, {"AYP_PDF_VALIDATOR_SELF_TEST": "memory"}),
-			patch.object(pdf_cv_validator, "_set_limits", side_effect=pdf_cv_validator.PDFSecurityError("no-limit")),
+			patch.object(
+				pdf_cv_validator, "_set_limits", side_effect=pdf_cv_validator.PDFSecurityError("no-limit")
+			),
 			patch.object(pdf_cv_validator, "_load_parser") as load_parser,
 		):
 			result = pdf_cv_validator.main()

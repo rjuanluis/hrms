@@ -18,7 +18,6 @@ from frappe.rate_limiter import rate_limit
 from frappe.utils import now_datetime
 from frappe.utils.file_manager import get_file
 
-
 MAX_CV_BYTES = 5 * 1024 * 1024
 MAX_DOCX_UNCOMPRESSED_BYTES = 20 * 1024 * 1024
 MAX_DOCX_ENTRIES = 1000
@@ -91,7 +90,9 @@ def _validate_pdf(content: bytes) -> None:
 			env={"PATH": os.environ.get("PATH", "")},
 		)
 	except (OSError, subprocess.SubprocessError) as exc:
-		raise CandidateCVSecurityError(_("El PDF está dañado o no supera la validación estructural.")) from exc
+		raise CandidateCVSecurityError(
+			_("El PDF está dañado o no supera la validación estructural.")
+		) from exc
 	if completed.returncode != 0:
 		raise CandidateCVSecurityError(_("El PDF está dañado, protegido o contiene contenido activo."))
 
@@ -139,8 +140,12 @@ def _validate_image(extension: str, content: bytes) -> None:
 		".jpg": content.startswith(b"\xff\xd8\xff"),
 		".jpeg": content.startswith(b"\xff\xd8\xff"),
 		".png": content.startswith(b"\x89PNG\r\n\x1a\n"),
-		".heic": len(content) >= 12 and content[4:8] == b"ftyp" and content[8:12] in {b"heic", b"heix", b"hevc", b"hevx", b"mif1"},
-		".heif": len(content) >= 12 and content[4:8] == b"ftyp" and content[8:12] in {b"heic", b"heix", b"hevc", b"hevx", b"mif1"},
+		".heic": len(content) >= 12
+		and content[4:8] == b"ftyp"
+		and content[8:12] in {b"heic", b"heix", b"hevc", b"hevx", b"mif1"},
+		".heif": len(content) >= 12
+		and content[4:8] == b"ftyp"
+		and content[8:12] in {b"heic", b"heix", b"hevc", b"hevx", b"mif1"},
 	}[extension]
 	if not valid:
 		raise CandidateCVSecurityError(_("La imagen no coincide con el formato declarado."))
@@ -159,7 +164,9 @@ def validate_cv_file(filename: str, content: bytes) -> None:
 
 	extension = Path(filename or "").suffix.lower()
 	if extension not in ALLOWED_EXTENSIONS:
-		raise CandidateCVSecurityError(_("Solo se permiten CV en PDF, Word DOC/DOCX o imagen JPG, PNG y HEIC/HEIF."))
+		raise CandidateCVSecurityError(
+			_("Solo se permiten CV en PDF, Word DOC/DOCX o imagen JPG, PNG y HEIC/HEIF.")
+		)
 	if extension == ".pdf":
 		_validate_pdf(content)
 	elif extension == ".docx":

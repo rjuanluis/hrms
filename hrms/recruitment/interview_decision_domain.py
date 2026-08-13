@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 FINAL_INTERVIEW_STATUSES = frozenset({"Cleared", "Rejected"})
 INTERVIEW_TO_APPLICATION_STATUS = {"Cleared": "Accepted", "Rejected": "Rejected"}
@@ -24,13 +25,11 @@ def validate_decision_rationale(interview_status: str, rationale: Any) -> str:
 		return text
 	if len(text) < MIN_DECISION_RATIONALE_LENGTH:
 		raise InterviewDecisionValidationError(
-			"La decisión final exige una justificación de al menos {0} caracteres.".format(
-				MIN_DECISION_RATIONALE_LENGTH
-			)
+			f"La decisión final exige una justificación de al menos {MIN_DECISION_RATIONALE_LENGTH} caracteres."
 		)
 	if len(text) > MAX_DECISION_RATIONALE_LENGTH:
 		raise InterviewDecisionValidationError(
-			"La justificación no puede exceder {0} caracteres.".format(MAX_DECISION_RATIONALE_LENGTH)
+			f"La justificación no puede exceder {MAX_DECISION_RATIONALE_LENGTH} caracteres."
 		)
 	return text
 
@@ -56,7 +55,7 @@ def validate_interview_backed_application_decision(
 	interview_status = str(_value(interview, "status") or "")
 	if interview_status != expected_interview_status:
 		raise InterviewDecisionValidationError(
-			"La decisión {0} requiere una entrevista {1}.".format(target_status, expected_interview_status)
+			f"La decisión {target_status} requiere una entrevista {expected_interview_status}."
 		)
 	questions_snapshot = str(_value(interview, "custom_ayp_questions_snapshot") or "").strip()
 	if require_ayp and not questions_snapshot:

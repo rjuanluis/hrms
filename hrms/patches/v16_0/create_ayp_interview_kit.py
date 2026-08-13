@@ -15,20 +15,35 @@ QUESTIONS = """1. ¿Qué te interesa de esta vacante y qué entendiste de sus re
 Regla de evidencia: registrar ejemplos observables y respuestas concretas; no inferir edad, salud, estado familiar, religión, origen u otras características protegidas."""
 
 SKILLS = (
-	("AyP - Cumplimiento de requisitos", "Demuestra los requisitos indispensables de la vacante con evidencia verificable."),
-	("AyP - Experiencia y conocimiento del rol", "Conecta experiencias concretas con las responsabilidades reales del puesto."),
-	("AyP - Servicio y comunicación", "Comunica con claridad y demuestra orientación de servicio y colaboración."),
-	("AyP - Resolución de situaciones", "Analiza casos, prioriza y explica decisiones de forma estructurada."),
-	("AyP - Motivación y disponibilidad", "Muestra interés informado y compatibilidad con condiciones ya publicadas."),
+	(
+		"AyP - Cumplimiento de requisitos",
+		"Demuestra los requisitos indispensables de la vacante con evidencia verificable.",
+	),
+	(
+		"AyP - Experiencia y conocimiento del rol",
+		"Conecta experiencias concretas con las responsabilidades reales del puesto.",
+	),
+	(
+		"AyP - Servicio y comunicación",
+		"Comunica con claridad y demuestra orientación de servicio y colaboración.",
+	),
+	(
+		"AyP - Resolución de situaciones",
+		"Analiza casos, prioriza y explica decisiones de forma estructurada.",
+	),
+	(
+		"AyP - Motivación y disponibilidad",
+		"Muestra interés informado y compatibilidad con condiciones ya publicadas.",
+	),
 )
 
 
 def execute():
 	for skill_name, description in SKILLS:
 		if not frappe.db.exists("Skill", skill_name):
-			frappe.get_doc(
-				{"doctype": "Skill", "skill_name": skill_name, "description": description}
-			).insert(ignore_permissions=True)
+			frappe.get_doc({"doctype": "Skill", "skill_name": skill_name, "description": description}).insert(
+				ignore_permissions=True
+			)
 
 	if frappe.db.exists("Interview Type", INTERVIEW_TYPE):
 		doc = frappe.get_doc("Interview Type", INTERVIEW_TYPE)

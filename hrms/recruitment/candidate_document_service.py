@@ -133,6 +133,7 @@ def enqueue_candidate_document(doc, method=None) -> None:
 		return
 	registered.add(callback_key)
 	frappe.db.after_rollback.add(lambda: registered.discard(callback_key))
+
 	def enqueue_committed_candidate_document():
 		try:
 			_enqueue_candidate_document_job(*callback_key)
@@ -250,7 +251,8 @@ def process_candidate_document(applicant_name: str, expected_sha256: str) -> dic
 		return {"status": "stale"}
 	if (
 		applicant.custom_cv_processed_sha256 == expected_sha256
-		and applicant.custom_cv_processing_status in READY_FOR_SCORING | TERMINAL_FAILURES | {"Ilegible", "Revisión manual"}
+		and applicant.custom_cv_processing_status
+		in READY_FOR_SCORING | TERMINAL_FAILURES | {"Ilegible", "Revisión manual"}
 	):
 		frappe.db.rollback()
 		return {"status": "already-processed"}

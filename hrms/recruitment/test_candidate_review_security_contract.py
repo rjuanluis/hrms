@@ -32,8 +32,10 @@ def _decorator_is_post_only(node: ast.FunctionDef | ast.AsyncFunctionDef) -> boo
 		):
 			continue
 		for keyword in decorator.keywords:
-			if keyword.arg == "methods" and isinstance(keyword.value, (ast.List, ast.Tuple)):
-				methods = [element.value for element in keyword.value.elts if isinstance(element, ast.Constant)]
+			if keyword.arg == "methods" and isinstance(keyword.value, ast.List | ast.Tuple):
+				methods = [
+					element.value for element in keyword.value.elts if isinstance(element, ast.Constant)
+				]
 				return methods == ["POST"]
 	return False
 
@@ -49,10 +51,12 @@ class TestCandidateReviewSecurityContract(unittest.TestCase):
 			functions = {
 				node.name: node
 				for node in ast.walk(tree)
-				if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names
+				if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name in names
 			}
 			self.assertEqual(set(functions), names)
-			self.assertEqual([name for name, node in functions.items() if not _decorator_is_post_only(node)], [])
+			self.assertEqual(
+				[name for name, node in functions.items() if not _decorator_is_post_only(node)], []
+			)
 
 	def test_fresh_install_runs_idempotent_ayp_initializers(self):
 		install = (ROOT / "hrms" / "install.py").read_text(encoding="utf-8")
@@ -86,7 +90,8 @@ class TestCandidateReviewSecurityContract(unittest.TestCase):
 		mutations = [
 			node
 			for node in tree.body
-			if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith(MUTATING_PREFIXES)
+			if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+			and node.name.startswith(MUTATING_PREFIXES)
 		]
 		self.assertTrue(mutations)
 		self.assertEqual(
@@ -97,15 +102,26 @@ class TestCandidateReviewSecurityContract(unittest.TestCase):
 	def test_cancelled_run_is_terminal_for_chunk_processing(self):
 		text = REVIEW.read_text(encoding="utf-8")
 		module = ast.parse(text)
-		function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "process_filtered_run_chunk")
+		function = next(
+			node
+			for node in module.body
+			if isinstance(node, ast.FunctionDef) and node.name == "process_filtered_run_chunk"
+		)
 		source = ast.get_source_segment(text, function) or ""
 		self.assertIn('run_doc.run_status not in {"Frozen", "In Progress"}', source)
-		self.assertLess(source.index('run_doc.run_status not in {"Frozen", "In Progress"}'), source.index("_pending_run_members_for_update"))
+		self.assertLess(
+			source.index('run_doc.run_status not in {"Frozen", "In Progress"}'),
+			source.index("_pending_run_members_for_update"),
+		)
 
 	def test_talent_pool_update_serializes_with_identity_and_reloads_applicant(self):
 		text = REVIEW.read_text(encoding="utf-8")
 		module = ast.parse(text)
-		function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "update_candidate_profile")
+		function = next(
+			node
+			for node in module.body
+			if isinstance(node, ast.FunctionDef) and node.name == "update_candidate_profile"
+		)
 		source = ast.get_source_segment(text, function) or ""
 		self.assertIn("acquire_candidate_identity_lock()", source)
 		self.assertIn("SELECT name FROM `tabJob Applicant`", source)
@@ -116,7 +132,11 @@ class TestCandidateReviewSecurityContract(unittest.TestCase):
 	def test_child_member_worklist_uses_parent_authorized_sql(self):
 		text = REVIEW.read_text(encoding="utf-8")
 		module = ast.parse(text)
-		function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "get_filtered_run_members")
+		function = next(
+			node
+			for node in module.body
+			if isinstance(node, ast.FunctionDef) and node.name == "get_filtered_run_members"
+		)
 		source = ast.get_source_segment(text, function) or ""
 		self.assertIn("frappe.db.sql", source)
 		self.assertNotIn("frappe.get_list", source)
@@ -124,7 +144,11 @@ class TestCandidateReviewSecurityContract(unittest.TestCase):
 	def test_scorecard_reloads_applicant_after_row_lock(self):
 		text = REVIEW.read_text(encoding="utf-8")
 		module = ast.parse(text)
-		function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "save_scorecard")
+		function = next(
+			node
+			for node in module.body
+			if isinstance(node, ast.FunctionDef) and node.name == "save_scorecard"
+		)
 		source = ast.get_source_segment(text, function) or ""
 		lock_at = source.index("SELECT name FROM `tabJob Applicant`")
 		reload_at = source.rindex('frappe.get_doc("Job Applicant", applicant, for_update=True)')
@@ -145,11 +169,20 @@ class TestCandidateReviewSecurityContract(unittest.TestCase):
 			encoding="utf-8"
 		)
 		self.assertIn('"fieldname": "custom_ayp_governed"', patch)
-		self.assertLess(patch.index('"fieldname": "custom_ayp_governed"'), patch.index("backfill_candidate_profiles()"))
+		self.assertLess(
+			patch.index('"fieldname": "custom_ayp_governed"'), patch.index("backfill_candidate_profiles()")
+		)
 
 	def test_frozen_cohort_and_durable_merge_have_schema_support(self):
 		run = json.loads(
-			(ROOT / "hrms" / "hr" / "doctype" / "ayp_candidate_review_run" / "ayp_candidate_review_run.json").read_text()
+			(
+				ROOT
+				/ "hrms"
+				/ "hr"
+				/ "doctype"
+				/ "ayp_candidate_review_run"
+				/ "ayp_candidate_review_run.json"
+			).read_text()
 		)
 		member = json.loads(
 			(
@@ -162,10 +195,15 @@ class TestCandidateReviewSecurityContract(unittest.TestCase):
 			).read_text()
 		)
 		profile = json.loads(
-			(ROOT / "hrms" / "hr" / "doctype" / "ayp_candidate_profile" / "ayp_candidate_profile.json").read_text()
+			(
+				ROOT / "hrms" / "hr" / "doctype" / "ayp_candidate_profile" / "ayp_candidate_profile.json"
+			).read_text()
 		)
 		self.assertTrue(
-			any(field.get("fieldname") == "members" and field.get("fieldtype") == "Table" for field in run["fields"])
+			any(
+				field.get("fieldname") == "members" and field.get("fieldtype") == "Table"
+				for field in run["fields"]
+			)
 		)
 		self.assertEqual(member.get("istable"), 1)
 		self.assertEqual(member.get("permissions"), [])
@@ -176,7 +214,11 @@ class TestCandidateReviewSecurityContract(unittest.TestCase):
 	def test_new_applicant_without_persisted_profile_skips_redirect_resolution(self):
 		talent_pool = (ROOT / "hrms" / "recruitment" / "talent_pool.py").read_text(encoding="utf-8")
 		tree = ast.parse(talent_pool)
-		function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_profile_name_for_update")
+		function = next(
+			node
+			for node in tree.body
+			if isinstance(node, ast.FunctionDef) and node.name == "_profile_name_for_update"
+		)
 		self.assertTrue(
 			any(
 				isinstance(node, ast.If)

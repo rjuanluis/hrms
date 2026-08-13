@@ -261,7 +261,9 @@ def load_api(fake_frappe):
 class TestCandidateReviewAPI(unittest.TestCase):
 	def test_locked_candidate_review_state_is_reloaded_authoritatively(self):
 		root = Path(__file__).resolve().parents[2]
-		source = (root / "hrms" / "hr" / "page" / "ayp_candidate_review" / "ayp_candidate_review.py").read_text()
+		source = (
+			root / "hrms" / "hr" / "page" / "ayp_candidate_review" / "ayp_candidate_review.py"
+		).read_text()
 		self.assertGreaterEqual(source.count("revalidate_candidate_document(doc)"), 3)
 		for fragment in (
 			'frappe.get_doc("Job Applicant", applicant_name, for_update=True)',
@@ -297,7 +299,9 @@ class TestCandidateReviewAPI(unittest.TestCase):
 		self.assertTrue(result["has_more"])
 		self.assertEqual(result["total_count"], 3)
 		_, query = next(
-			call for call in self.frappe.get_list_calls if call[0] == "Job Applicant" and call[1].get("start") == 0
+			call
+			for call in self.frappe.get_list_calls
+			if call[0] == "Job Applicant" and call[1].get("start") == 0
 		)
 		self.assertEqual(query["page_length"], 3)
 		self.assertEqual(query["filters"]["job_title"], "JOB-1")
@@ -374,7 +378,9 @@ class TestCandidateReviewAPI(unittest.TestCase):
 		self.assertEqual(row["existing_interview"], "INT-1")
 		self.assertEqual(row["missing_feedback"], 1)
 		self.assertTrue(row["feedback_disagreement"])
-		interview_query = next(kwargs for doctype, kwargs in self.frappe.get_list_calls if doctype == "Interview")
+		interview_query = next(
+			kwargs for doctype, kwargs in self.frappe.get_list_calls if doctype == "Interview"
+		)
 		self.assertEqual(interview_query["filters"]["interview_type"], self.api.AYP_INTERVIEW_TYPE)
 
 	def test_batch_scope_is_validated_before_any_document_is_saved(self):
@@ -405,7 +411,9 @@ class TestCandidateReviewAPI(unittest.TestCase):
 			job_title="JOB-1",
 		)
 		self.assertEqual(result, {"batch_id": "batch123456", "updated": 2})
-		self.assertEqual([self.frappe.docs[name].status for name in ("A", "B")], ["Shortlisted", "Shortlisted"])
+		self.assertEqual(
+			[self.frappe.docs[name].status for name in ("A", "B")], ["Shortlisted", "Shortlisted"]
+		)
 		self.assertEqual([self.frappe.docs[name].saved for name in ("A", "B")], [1, 1])
 		self.assertEqual(len(self.frappe.events), 2)
 		self.assertEqual(self.frappe.events[0][0]["previous_status"], "Open")
@@ -583,7 +591,6 @@ class TestCandidateReviewAPI(unittest.TestCase):
 		self.assertEqual(result["talent_pool_status"], "Prioritario")
 		self.assertEqual(profile.saved, 1)
 		self.assertEqual(self.frappe.events[-1][0]["action"], "Decisión Talent Pool")
-
 
 	def test_identity_split_creates_new_profile_and_relinks_only_selected_application(self):
 		applicant = FakeDoc("A", "Open", "JOB-1", "PROFILE-A")

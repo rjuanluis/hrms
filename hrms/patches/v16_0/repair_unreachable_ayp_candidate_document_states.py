@@ -1,6 +1,5 @@
 import frappe
 
-
 REPAIRABLE_STATUSES = ("Revisión manual", "Ilegible")
 
 

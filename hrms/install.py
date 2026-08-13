@@ -1,5 +1,6 @@
-import click
 from importlib import import_module
+
+import click
 
 from hrms.setup import after_install as setup
 

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 MAX_EVIDENCE_LENGTH = 500
 MIN_EVIDENCE_LENGTH = 20
@@ -73,13 +74,13 @@ class Scorecard:
 	explanation: str
 
 	@classmethod
-	def from_input(cls, value: Any) -> "Scorecard":
+	def from_input(cls, value: Any) -> Scorecard:
 		if isinstance(value, str):
 			try:
 				value = json.loads(value)
 			except json.JSONDecodeError as exc:
 				raise CandidateScoringValidationError("El scorecard no es JSON válido.") from exc
-		if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+		if not isinstance(value, Sequence) or isinstance(value, str | bytes):
 			raise CandidateScoringValidationError("El scorecard debe contener una lista de criterios.")
 
 		input_by_key = {}
@@ -103,22 +104,18 @@ class Scorecard:
 				rating = int(raw_row.get("rating"))
 			except (TypeError, ValueError) as exc:
 				raise CandidateScoringValidationError(
-					"La calificación de {0} debe ser un entero.".format(criterion.label)
+					f"La calificación de {criterion.label} debe ser un entero."
 				) from exc
 			if rating < 0 or rating > 5:
 				raise CandidateScoringValidationError("Las calificaciones deben estar entre 0 y 5.")
 			evidence = str(raw_row.get("evidence") or "").strip()
 			if len(evidence) < MIN_EVIDENCE_LENGTH:
 				raise CandidateScoringValidationError(
-					"La evidencia de {0} debe describir una observación comprobable de al menos {1} caracteres.".format(
-						criterion.label, MIN_EVIDENCE_LENGTH
-					)
+					f"La evidencia de {criterion.label} debe describir una observación comprobable de al menos {MIN_EVIDENCE_LENGTH} caracteres."
 				)
 			if len(evidence) > MAX_EVIDENCE_LENGTH:
 				raise CandidateScoringValidationError(
-					"La evidencia de {0} no puede exceder {1} caracteres.".format(
-						criterion.label, MAX_EVIDENCE_LENGTH
-					)
+					f"La evidencia de {criterion.label} no puede exceder {MAX_EVIDENCE_LENGTH} caracteres."
 				)
 			weighted_score = round(criterion.weight * rating / 5, 2)
 			rows.append(
@@ -140,12 +137,7 @@ class Scorecard:
 		else:
 			recommendation = "No priorizar"
 		explanation = "; ".join(
-			"{0}: {1}/5 × {2}% = {3:.1f}".format(
-				row.criterion_label,
-				row.rating,
-				row.weight,
-				row.weighted_score,
-			)
+			f"{row.criterion_label}: {row.rating}/5 × {row.weight}% = {row.weighted_score:.1f}"
 			for row in rows
 		)
 		return cls(

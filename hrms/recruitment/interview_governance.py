@@ -101,9 +101,7 @@ def validate_interview(doc, method=None):
 	if not doc.is_new() and (
 		doc.has_value_changed("interview_type") or doc.has_value_changed("custom_ayp_questions_snapshot")
 	):
-		submitted_feedback = frappe.db.exists(
-			"Interview Feedback", {"interview": doc.name, "docstatus": 1}
-		)
+		submitted_feedback = frappe.db.exists("Interview Feedback", {"interview": doc.name, "docstatus": 1})
 		if submitted_feedback:
 			frappe.throw(
 				_("El kit y el snapshot de una entrevista con feedback enviado son inmutables."),
@@ -120,7 +118,8 @@ def validate_interview(doc, method=None):
 		)
 		if not structured_questions and doc.interview_type:
 			interview_type_questions = (
-				frappe.db.get_value("Interview Type", doc.interview_type, "custom_ayp_structured_questions") or ""
+				frappe.db.get_value("Interview Type", doc.interview_type, "custom_ayp_structured_questions")
+				or ""
 			)
 			if interview_type_questions:
 				frappe.throw(
@@ -155,13 +154,17 @@ def validate_ayp_interview_feedback(doc, method=None):
 	if not _is_ayp_interview(interview):
 		return
 
-	evidence_lines = [line.strip() for line in str(doc.get("custom_ayp_question_evidence") or "").splitlines() if line.strip()]
+	evidence_lines = [
+		line.strip()
+		for line in str(doc.get("custom_ayp_question_evidence") or "").splitlines()
+		if line.strip()
+	]
 	required_count = _question_count(interview.custom_ayp_questions_snapshot)
 	if required_count and len(evidence_lines) < required_count:
 		frappe.throw(
-			_("La entrevista AyP exige al menos una línea de evidencia observable por cada pregunta ({0}).").format(
-				required_count
-			),
+			_(
+				"La entrevista AyP exige al menos una línea de evidencia observable por cada pregunta ({0})."
+			).format(required_count),
 			frappe.ValidationError,
 		)
 	if any(len(line) < 10 for line in evidence_lines):
@@ -176,7 +179,10 @@ def validate_ayp_interview_submission(doc, method=None):
 		return
 	assigned = {row.interviewer for row in doc.interview_details if row.interviewer}
 	if not assigned:
-		frappe.throw(_("La entrevista AyP debe tener al menos una persona entrevistadora asignada."), frappe.ValidationError)
+		frappe.throw(
+			_("La entrevista AyP debe tener al menos una persona entrevistadora asignada."),
+			frappe.ValidationError,
+		)
 	submitted = set(
 		frappe.get_all(
 			"Interview Feedback",
@@ -201,9 +207,14 @@ def validate_ayp_interview_cancellation(doc, method=None):
 		return
 	if interview.docstatus == 2:
 		return
-	if applicant.custom_ayp_final_interview == interview.name and applicant.status in {"Accepted", "Rejected"}:
+	if applicant.custom_ayp_final_interview == interview.name and applicant.status in {
+		"Accepted",
+		"Rejected",
+	}:
 		frappe.throw(
-			_("No puedes cancelar la entrevista que respalda una decisión final AyP. Registra otra decisión auditada."),
+			_(
+				"No puedes cancelar la entrevista que respalda una decisión final AyP. Registra otra decisión auditada."
+			),
 			frappe.ValidationError,
 		)
 
@@ -215,7 +226,10 @@ def validate_ayp_feedback_cancellation(doc, method=None):
 		raise frappe.ValidationError(CONCURRENT_CHANGE_MESSAGE)
 	if not _is_ayp_interview(interview):
 		return
-	if applicant.custom_ayp_final_interview == interview.name and applicant.status in {"Accepted", "Rejected"}:
+	if applicant.custom_ayp_final_interview == interview.name and applicant.status in {
+		"Accepted",
+		"Rejected",
+	}:
 		frappe.throw(
 			_("No puedes cancelar feedback que sustenta una decisión final AyP."),
 			frappe.ValidationError,
@@ -267,9 +281,9 @@ def update_job_applicant_from_downstream(job_applicant: str, status: str, source
 		return
 	if state.custom_ayp_governed:
 		frappe.throw(
-			_("{0} no puede cambiar directamente la decisión final de un candidato AyP. Finaliza primero la entrevista.").format(
-				source
-			),
+			_(
+				"{0} no puede cambiar directamente la decisión final de un candidato AyP. Finaliza primero la entrevista."
+			).format(source),
 			frappe.ValidationError,
 		)
 	frappe.db.set_value("Job Applicant", job_applicant, "status", status)

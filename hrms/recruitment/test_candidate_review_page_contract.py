@@ -33,7 +33,7 @@ class TestCandidateReviewPageContract(unittest.TestCase):
 			"total_count",
 			"interview_scheduled_on",
 			"assigned_interviewers",
-			'data-score-applicant',
+			"data-score-applicant",
 			"Comparar seleccionados",
 			"show_compare_dialog",
 			"Promise.all",
@@ -46,7 +46,7 @@ class TestCandidateReviewPageContract(unittest.TestCase):
 			"talent_pool_status",
 			"No contactar",
 			"resolve_candidate_identity",
-			'identity_operation',
+			"identity_operation",
 			'value: "split"',
 			'value: "relink"',
 			'value: "merge"',
@@ -109,10 +109,12 @@ class TestCandidateReviewPageContract(unittest.TestCase):
 	def test_server_count_uses_frappe_v16_function_dict_contract(self):
 		server = (PAGE / "ayp_candidate_review.py").read_text(encoding="utf-8")
 		self.assertIn('{"COUNT": "name", "as": "total"}', server)
-		self.assertNotIn('count(name) as total', server)
+		self.assertNotIn("count(name) as total", server)
 
 	def test_recruitment_sidebar_links_to_candidate_review(self):
-		sidebar = json.loads((ROOT / "hrms" / "workspace_sidebar" / "recruitment.json").read_text(encoding="utf-8"))
+		sidebar = json.loads(
+			(ROOT / "hrms" / "workspace_sidebar" / "recruitment.json").read_text(encoding="utf-8")
+		)
 		matches = [item for item in sidebar["items"] if item.get("link_to") == "ayp-candidate-review"]
 		self.assertEqual(len(matches), 1)
 		self.assertEqual(matches[0]["link_type"], "Page")
