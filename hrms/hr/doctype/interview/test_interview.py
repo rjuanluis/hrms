@@ -191,7 +191,12 @@ class TestInterview(HRMSTestSuite):
 
 	def test_job_applicant_status_update_on_interview_submit(self):
 		job_applicant = create_job_applicant()
-		interview = create_interview_and_dependencies(job_applicant.name, status="Cleared")
+		interview = create_interview_and_dependencies(
+			job_applicant.name,
+			from_time="10:00:00",
+			to_time="11:00:00",
+			status="Cleared",
+		)
 		interview.submit()
 
 		update_job_applicant_status(
