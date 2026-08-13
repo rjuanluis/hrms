@@ -33,6 +33,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.RELEASE_SHA }}
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
@@ -86,6 +87,19 @@ jobs:
           missing_hooks = [hook for hook in required_hooks if hook not in hooks]
           if missing_hooks:
               raise SystemExit(f'Missing candidate CV security hooks: {missing_hooks}')
+          workflow = Path('.github/workflows/ayp-production.yml').read_text()
+          required_image_contracts = [
+              'git archive --format=tar --output=frappe_docker/hrms-source.tar "$RELEASE_SHA"',
+              'git get-tar-commit-id < frappe_docker/hrms-source.tar',
+              'file:///opt/frappe/hrms-src',
+              'apps.release.json',
+              '/home/frappe/frappe-bench/apps/hrms/.ayp-release-sha',
+              'antiword -h 2>&1 | grep -qi "antiword"',
+              "github.event_name == 'push' && github.ref == 'refs/heads/ayp-production'",
+          ]
+          missing_image_contracts = [x for x in required_image_contracts if x not in workflow]
+          if missing_image_contracts:
+              raise SystemExit(f'Missing exact-image contracts: {missing_image_contracts}')
           PY
 
   build:
@@ -103,6 +117,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ env.RELEASE_SHA }}
+          fetch-depth: 0
 
       - name: Checkout official frappe_docker release
         uses: actions/checkout@v4
@@ -115,8 +130,44 @@ jobs:
         id: image
         run: echo "value=${REGISTRY}/${IMAGE_NAME}:${RELEASE_SHA}" >> "$GITHUB_OUTPUT"
 
-      - name: Stage AyP document processing runtime in production build context
+      - name: Stage exact AyP source and document runtime in production build context
         run: |
+          git archive --format=tar --output=frappe_docker/hrms-source.tar "$RELEASE_SHA"
+          test "$(git get-tar-commit-id < frappe_docker/hrms-source.tar)" = "$RELEASE_SHA"
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          apps = json.loads(Path("deploy/apps.json").read_text())
+          hrms = [app for app in apps if app["url"].rstrip("/").endswith("/hrms")]
+          if len(hrms) != 1:
+              raise SystemExit("deploy/apps.json must contain exactly one HRMS source")
+          hrms[0].update({"url": "file:///opt/frappe/hrms-src", "branch": "image-release"})
+          Path("frappe_docker/apps.release.json").write_text(json.dumps(apps, indent=2) + "\n")
+
+          containerfile = Path("frappe_docker/images/layered/Containerfile")
+          text = containerfile.read_text()
+          anchor = "USER frappe\n\nRUN --mount=type=secret,id=apps_json"
+          replacement = (
+              "USER frappe\n\n"
+              "COPY --chown=frappe:frappe hrms-source.tar /tmp/hrms-source.tar\n"
+              "RUN mkdir -p /opt/frappe/hrms-src \\\n"
+              "    && tar -xf /tmp/hrms-source.tar -C /opt/frappe/hrms-src \\\n"
+              "    && rm /tmp/hrms-source.tar \\\n"
+              "    && cd /opt/frappe/hrms-src \\\n"
+              "    && printf '%s\\n' \"${CACHE_BUST}\" > .ayp-release-sha \\\n"
+              "    && git init \\\n"
+              "    && git config user.name 'AyP Release Builder' \\\n"
+              "    && git config user.email 'release-builder@aroypedal.com' \\\n"
+              "    && git add . \\\n"
+              "    && git commit -m \"AyP HRMS ${CACHE_BUST}\" \\\n"
+              "    && git branch -M image-release\n\n"
+              "RUN --mount=type=secret,id=apps_json"
+          )
+          if text.count(anchor) != 1:
+              raise SystemExit("frappe_docker builder anchor changed")
+          containerfile.write_text(text.replace(anchor, replacement, 1))
+          PY
           install -m 0755 docker/configure_ayp_document_queue.py \
             frappe_docker/configure_ayp_document_queue.py
           cat >> frappe_docker/images/layered/Containerfile <<'EOF'
@@ -157,7 +208,7 @@ jobs:
             FRAPPE_BRANCH=version-16
             CACHE_BUST=${{ env.RELEASE_SHA }}
           secret-files: |
-            apps_json=${{ github.workspace }}/deploy/apps.json
+            apps_json=${{ github.workspace }}/frappe_docker/apps.release.json
           tags: |
             ${{ steps.image.outputs.value }}
           cache-from: type=gha
@@ -167,6 +218,7 @@ jobs:
         run: |
           docker pull "${{ steps.image.outputs.value }}"
           docker run --rm --entrypoint bash "${{ steps.image.outputs.value }}" -ec '
+            test "$(cat /home/frappe/frappe-bench/apps/hrms/.ayp-release-sha)" = "${{ env.RELEASE_SHA }}"
             for executable in pdfinfo pdftotext pdftoppm tesseract antiword heif-convert; do
               command -v "$executable" >/dev/null
             done
@@ -175,7 +227,7 @@ jobs:
             pdfinfo -v 2>&1 | grep -q "pdfinfo version"
             pdftotext -v 2>&1 | grep -q "pdftotext version"
             pdftoppm -v 2>&1 | grep -q "pdftoppm version"
-            antiword -h 2>&1 | grep -q "Antiword"
+            antiword -h 2>&1 | grep -qi "antiword"
             heif-convert --help 2>&1 | grep -q "heif-convert"
           '
           docker run --rm --entrypoint /usr/local/bin/configure-ayp-document-queue \
