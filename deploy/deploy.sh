@@ -8,26 +8,68 @@ COMPOSE_PROJECT="${EASYPANEL_PROJECT}_${EASYPANEL_SERVICE}"
 COMPOSE_DIR="/etc/easypanel/projects/${EASYPANEL_PROJECT}/${EASYPANEL_SERVICE}/code"
 COMPOSE_FILE="${COMPOSE_DIR}/docker-compose.yml"
 COMPOSE_OVERRIDE="${COMPOSE_DIR}/docker-compose.override.yml"
+EASYPANEL_IMAGE="easypanel/easypanel"
 PRODUCTION_IMAGE="ghcr.io/rjuanluis/ayp-hrms:production"
 SITES_VOLUME="ayp_hr_sites"
 LOGS_VOLUME="ayp_hr_logs"
 SECRETS_DIR="/opt/ayp-hr/secrets"
 DEPLOY_URL_FILE="${SECRETS_DIR}/easypanel_deploy_url"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-IMAGE="${1:-}"
+IMAGE_TAG="${1:-}"
+IMAGE="${2:-}"
+if [[ -z "$IMAGE" ]]; then
+  IFS= read -r IMAGE || true
+fi
+RELEASE_SHA="${IMAGE_TAG##*:}"
+COMPOSE_ROLLBACK_PATH=""
+CANDIDATE_COMPOSE_PATH=""
+ROLLBACK_ARMED=0
+DEPLOY_PHASE="preflight"
+PREVIOUS_SERVICE_COUNT=0
+declare -A PREVIOUS_APP_IMAGE_IDS=()
+declare -A PREVIOUS_APP_PRESENT=()
+APP_SERVICES=(backend frontend websocket queue-short queue-long queue-documents scheduler)
 
-if [[ ! "$IMAGE" =~ ^ghcr\.io/rjuanluis/ayp-hrms:[0-9a-f]{40}$ ]]; then
+cleanup_candidate_compose() {
+  [[ -z "$CANDIDATE_COMPOSE_PATH" ]] || rm -f "$CANDIDATE_COMPOSE_PATH"
+}
+trap cleanup_candidate_compose EXIT
+
+if [[ ! "$IMAGE_TAG" =~ ^ghcr\.io/rjuanluis/ayp-hrms:[0-9a-f]{40}$ ]] \
+  || [[ ! "$IMAGE" =~ ^ghcr\.io/rjuanluis/ayp-hrms@sha256:[0-9a-f]{64}$ ]]; then
   echo "Invalid immutable AyP HR image reference" >&2
+  exit 2
+fi
+if [[ "$(git -C "$ROOT_DIR" rev-parse HEAD)" != "$RELEASE_SHA" ]]; then
+  echo "Deployment source does not match the image release SHA" >&2
   exit 2
 fi
 
 for path in \
   "$SECRETS_DIR/db_root_password" \
   "$SECRETS_DIR/admin_password" \
-  "$DEPLOY_URL_FILE" \
-  "$COMPOSE_FILE"; do
+  "$ROOT_DIR/deploy/easypanel-compose.yml" \
+  "$ROOT_DIR/deploy/easypanel_compose_api.js"; do
   [[ -s "$path" ]] || { echo "Missing required file: $path" >&2; exit 3; }
 done
+
+for ref in "$IMAGE_TAG" "$IMAGE"; do
+  if ! docker image inspect "$ref" >/dev/null 2>&1; then
+    docker pull "$ref" >/dev/null
+  fi
+done
+tag_image_id="$(docker image inspect "$IMAGE_TAG" --format '{{.Id}}')"
+new_image_id="$(docker image inspect "$IMAGE" --format '{{.Id}}')"
+[[ -n "$tag_image_id" && "$tag_image_id" == "$new_image_id" ]] || {
+  echo "Release tag and registry digest do not identify the same image" >&2
+  exit 2
+}
+installed_release_sha="$(docker run --rm --entrypoint cat "$IMAGE" \
+  /home/frappe/frappe-bench/apps/hrms/.ayp-release-sha 2>/dev/null || true)"
+[[ "$installed_release_sha" == "$RELEASE_SHA" ]] || {
+  echo "Image HRMS marker does not match the deployment release SHA" >&2
+  exit 2
+}
 
 for volume in "$SITES_VOLUME" "$LOGS_VOLUME" ayp_hr_db_data ayp_hr_redis_queue_data ayp_hr_clamav_data; do
   docker volume inspect "$volume" >/dev/null 2>&1 || docker volume create "$volume" >/dev/null
@@ -39,6 +81,70 @@ compose() {
   docker compose "${args[@]}" "$@"
 }
 
+deploy_compose_source() {
+  local source="${1:?rendered Compose source is required}"
+  local helper="$ROOT_DIR/deploy/easypanel_compose_api.js"
+  local panel_id candidate_path helper_path result deploy_rc started_epoch discovered_path
+  panel_id="$(docker ps -q --filter "ancestor=$EASYPANEL_IMAGE" | head -1)"
+  [[ -n "$panel_id" ]] || { echo "EasyPanel control-plane container not found" >&2; return 1; }
+  docker inspect "$panel_id" --format '{{.Config.Image}}' | grep -q '^easypanel/easypanel:' || {
+    echo "Unexpected EasyPanel control-plane container identity" >&2
+    return 1
+  }
+  candidate_path="/tmp/ayp-hrms-compose-$$.yml"
+  helper_path="/tmp/ayp-hrms-compose-api-$$.js"
+  docker cp "$source" "$panel_id:$candidate_path"
+  docker cp "$helper" "$panel_id:$helper_path"
+  started_epoch="$(date +%s)"
+  if result="$(docker exec "$panel_id" node "$helper_path" "$candidate_path")"; then
+    deploy_rc=0
+  else
+    deploy_rc=$?
+  fi
+  COMPOSE_ROLLBACK_PATH="$(python3 -c 'import json,sys
+for line in sys.stdin:
+    try: data=json.loads(line)
+    except json.JSONDecodeError: continue
+    if data.get("rollbackPath"): print(data["rollbackPath"])' <<<"$result" | tail -1 || true)"
+  if [[ -z "$COMPOSE_ROLLBACK_PATH" ]]; then
+    discovered_path="$(
+      find /etc/easypanel/hermes-backups -mindepth 1 -maxdepth 1 -type d \
+        -name 'ayp-hrms-compose-pre-*' -newermt "@$started_epoch" -print 2>/dev/null \
+        | sort | tail -1 || true
+    )"
+    COMPOSE_ROLLBACK_PATH="$discovered_path"
+  fi
+  docker exec "$panel_id" rm -f "$candidate_path" "$helper_path" >/dev/null 2>&1 || true
+  if (( deploy_rc != 0 )); then
+    return "$deploy_rc"
+  fi
+  [[ "$result" == *'"canonicalSourceMatch":true'* ]] || {
+    echo "EasyPanel canonical source verification failed" >&2
+    return 1
+  }
+  echo "EasyPanel canonical Compose updated; rollback artifact: $COMPOSE_ROLLBACK_PATH"
+}
+
+render_candidate_compose() {
+  local template="$ROOT_DIR/deploy/easypanel-compose.yml"
+  CANDIDATE_COMPOSE_PATH="$(mktemp /tmp/ayp-hrms-compose-rendered.XXXXXX.yml)"
+  python3 - "$template" "$CANDIDATE_COMPOSE_PATH" "$IMAGE" <<'PY'
+import sys
+from pathlib import Path
+
+template, output, image = sys.argv[1:]
+source = Path(template).read_text(encoding="utf-8")
+placeholder = "ghcr.io/rjuanluis/ayp-hrms:AYP_RELEASE_SHA"
+if source.count(placeholder) != 2:
+    raise SystemExit("canonical Compose template must contain exactly two immutable app-image placeholders")
+rendered = source.replace(placeholder, image)
+if placeholder in rendered or rendered.count(image) != 2:
+    raise SystemExit("failed to render exact immutable app image into canonical Compose")
+Path(output).write_text(rendered, encoding="utf-8")
+PY
+  chmod 0600 "$CANDIDATE_COMPOSE_PATH"
+}
+
 container_id() {
   docker ps -q \
     --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" \
@@ -48,7 +154,7 @@ container_id() {
 wait_for_compose() {
   local previous_backend_id="${1:-}"
   local expect_replacement="${2:-0}"
-  local expected=10
+  local expected="${3:-11}"
   local stable_seconds=0
   local last_backend_id=""
   for _ in {1..120}; do
@@ -95,27 +201,166 @@ wait_for_compose() {
   return 1
 }
 
+verify_candidate_image_ids() {
+  local service id actual status found
+  for service in "${APP_SERVICES[@]}"; do
+    id="$(container_id "$service")"
+    [[ -n "$id" ]] || { echo "Missing application container: $service" >&2; return 1; }
+    actual="$(docker inspect "$id" --format '{{.Image}}')"
+    [[ "$actual" == "$new_image_id" ]] || {
+      echo "Application container $service is not using the candidate image ID" >&2
+      return 1
+    }
+  done
+  found=0
+  while IFS= read -r id; do
+    [[ -n "$id" ]] || continue
+    actual="$(docker inspect "$id" --format '{{.Image}}')"
+    status="$(docker inspect "$id" --format '{{.State.Status}}:{{.State.ExitCode}}')"
+    if [[ "$actual" == "$new_image_id" && "$status" == "exited:0" ]]; then
+      found=1
+      break
+    fi
+  done < <(docker ps -aq \
+    --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" \
+    --filter "label=com.docker.compose.service=configure-workers")
+  [[ "$found" == 1 ]] || {
+    echo "No successful configure-workers execution used the candidate image ID" >&2
+    return 1
+  }
+}
+
+capture_previous_app_image_ids() {
+  local service id
+  for service in "${APP_SERVICES[@]}"; do
+    id="$(container_id "$service")"
+    if [[ -n "$id" ]]; then
+      PREVIOUS_APP_PRESENT["$service"]=1
+      PREVIOUS_APP_IMAGE_IDS["$service"]="$(docker inspect "$id" --format '{{.Image}}')"
+    else
+      PREVIOUS_APP_PRESENT["$service"]=0
+      PREVIOUS_APP_IMAGE_IDS["$service"]=""
+    fi
+  done
+}
+
+verify_previous_app_image_ids() {
+  local service id actual
+  for service in "${APP_SERVICES[@]}"; do
+    id="$(container_id "$service")"
+    if [[ "${PREVIOUS_APP_PRESENT[$service]}" == 1 ]]; then
+      [[ -n "$id" ]] || { echo "Rollback application service is missing: $service" >&2; return 1; }
+      actual="$(docker inspect "$id" --format '{{.Image}}')"
+      [[ "$actual" == "${PREVIOUS_APP_IMAGE_IDS[$service]}" ]] || {
+        echo "Rollback application service has the wrong image ID: $service" >&2
+        return 1
+      }
+    elif [[ -n "$id" ]]; then
+      echo "Rollback left an application service that was absent before deploy: $service" >&2
+      return 1
+    fi
+  done
+}
+
+rollback_pre_migration() {
+  local reason="${1:-pre-migration deployment failure}"
+  local source="$COMPOSE_ROLLBACK_PATH/source-before.yml"
+  local helper="$ROOT_DIR/deploy/easypanel_compose_api.js"
+  local panel_id helper_path result rollback_rc
+  ROLLBACK_ARMED=0
+  set +e
+  echo "Restoring pre-migration EasyPanel state after: $reason" >&2
+  if [[ -n "$old_production_id" ]]; then
+    docker tag "$old_production_id" "$PRODUCTION_IMAGE"
+  fi
+  panel_id="$(docker ps -q --filter "ancestor=$EASYPANEL_IMAGE" | head -1)"
+  helper_path="/tmp/ayp-hrms-compose-api-rollback-$$.js"
+  if [[ -z "$panel_id" || ! -s "$source" ]]; then
+    echo "Rollback prerequisites are missing; manual recovery required" >&2
+    set -e
+    return 1
+  fi
+  docker cp "$helper" "$panel_id:$helper_path"
+  if result="$(docker exec "$panel_id" node "$helper_path" "$source" --rollback)"; then
+    rollback_rc=0
+  else
+    rollback_rc=$?
+  fi
+  docker exec "$panel_id" rm -f "$helper_path" >/dev/null 2>&1 || true
+  if (( rollback_rc != 0 )) || [[ "$result" != *'"canonicalSourceMatch":true'* ]] || [[ "$result" != *'"managedSourceMatch":true'* ]]; then
+    echo "Canonical EasyPanel rollback failed; manual recovery required" >&2
+    set -e
+    return 1
+  fi
+  if ! wait_for_compose "" 0 "$PREVIOUS_SERVICE_COUNT"; then
+    echo "Rollback runtime did not recover all prior persistent services" >&2
+    set -e
+    return 1
+  fi
+  cmp -s "$source" "$COMPOSE_FILE" || {
+    echo "Rollback managed Compose does not match prior canonical source" >&2
+    set -e
+    return 1
+  }
+  if ! verify_previous_app_image_ids; then
+    echo "Rollback application services do not match their previous image IDs" >&2
+    set -e
+    return 1
+  fi
+  echo "Pre-migration rollback verified at canonical, managed-file, and runtime layers" >&2
+  set -e
+}
+
+on_deploy_error() {
+  local rc="$1" line="$2"
+  trap - ERR
+  if [[ "$ROLLBACK_ARMED" == 1 && "$DEPLOY_PHASE" == "pre_migration" ]]; then
+    rollback_pre_migration "exit $rc at line $line" || true
+  else
+    echo "Deployment stopped in phase $DEPLOY_PHASE at line $line; automatic image downgrade is disabled" >&2
+  fi
+  exit "$rc"
+}
+
+trap 'on_deploy_error $? $LINENO' ERR
+
 backend_id="$(container_id backend)"
-if [[ -n "$backend_id" ]] && docker exec "$backend_id" test -f "sites/$SITE_NAME/site_config.json"; then
-  echo "Creating pre-deploy backup"
-  docker exec "$backend_id" bench --site "$SITE_NAME" backup --with-files
+PREVIOUS_SERVICE_COUNT="$(docker ps \
+  --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" \
+  --format '{{.Label "com.docker.compose.service"}}' | sort -u | wc -l | tr -d ' ')"
+(( PREVIOUS_SERVICE_COUNT > 0 )) || { echo "No existing EasyPanel services found" >&2; exit 4; }
+[[ -n "$backend_id" ]] || { echo "Existing production backend is required" >&2; exit 4; }
+if ! docker exec "$backend_id" test -f "sites/$SITE_NAME/site_config.json"; then
+  echo "Existing production site could not be verified; refusing to mutate EasyPanel" >&2
+  exit 4
 fi
+capture_previous_app_image_ids
+echo "Creating pre-deploy backup"
+docker exec "$backend_id" bench --site "$SITE_NAME" backup --with-files
 
 echo "Preparing immutable image $IMAGE"
-old_production_id="$(docker image inspect "$PRODUCTION_IMAGE" --format '{{.Id}}' 2>/dev/null || true)"
-if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
-  docker pull "$IMAGE" >/dev/null
-fi
-new_image_id="$(docker image inspect "$IMAGE" --format '{{.Id}}')"
+old_production_id="$(docker inspect "$backend_id" --format '{{.Image}}')"
+old_production_tags="$(docker image inspect "$old_production_id" --format '{{json .RepoTags}}' 2>/dev/null || true)"
+[[ -n "$old_production_id" ]] || {
+  echo "Previous production image ID is required for pre-migration rollback" >&2
+  exit 5
+}
 expect_replacement=0
 if [[ -z "$old_production_id" || "$old_production_id" != "$new_image_id" ]]; then
   expect_replacement=1
 fi
-docker tag "$IMAGE" "$PRODUCTION_IMAGE"
+render_candidate_compose
 
-echo "Requesting deployment through EasyPanel"
-curl -fsS --max-time 30 -X POST "$(<"$DEPLOY_URL_FILE")" >/dev/null
+echo "Synchronizing canonical EasyPanel Compose source"
+DEPLOY_PHASE="pre_migration"
+ROLLBACK_ARMED=1
+deploy_compose_source "$CANDIDATE_COMPOSE_PATH"
 wait_for_compose "$backend_id" "$expect_replacement"
+verify_candidate_image_ids
+cmp -s "$CANDIDATE_COMPOSE_PATH" "$COMPOSE_FILE" || {
+  echo "Managed EasyPanel Compose file does not match canonical repository source" >&2
+  on_deploy_error 8 "$LINENO"
+}
 
 HOOK_DIR="/opt/ayp-hr/deploy-hooks"
 install -d -m 700 "$HOOK_DIR"
@@ -134,17 +379,37 @@ compose exec -T backend bash -ec '
   bench set-config -g chromium_path /usr/bin/chromium-headless-shell
 '
 
-if compose exec -T backend test -f "sites/$SITE_NAME/site_config.json"; then
-  echo "Migrating existing site"
-  compose exec -T backend bench --site "$SITE_NAME" migrate
+site_probe=""
+if site_probe="$(compose exec -T backend sh -ec '
+  if test -f "sites/'"$SITE_NAME"'/site_config.json"; then
+    printf PRESENT
+  else
+    printf ABSENT
+  fi
+')"; then
+  :
 else
-  echo "Creating official site $SITE_NAME"
-  compose run --rm \
-    -e "AYP_SITE_NAME=$SITE_NAME" \
-    -v "$SECRETS_DIR:/run/ayp-secrets:ro" \
-    -v "$HOOK_DIR/bootstrap_site.py:/opt/ayp/bootstrap_site.py:ro" \
-    backend /home/frappe/frappe-bench/env/bin/python /opt/ayp/bootstrap_site.py
+  probe_rc=$?
+  echo "Could not determine whether the production site exists" >&2
+  on_deploy_error "$probe_rc" "$LINENO"
 fi
+case "$site_probe" in
+  PRESENT)
+    echo "Migrating existing site"
+    DEPLOY_PHASE="migration_started"
+    ROLLBACK_ARMED=0
+    compose exec -T backend bench --site "$SITE_NAME" migrate
+    ;;
+  ABSENT)
+    echo "Existing production site disappeared before migration" >&2
+    on_deploy_error 9 "$LINENO"
+    ;;
+  *)
+    echo "Unexpected production site probe result" >&2
+    on_deploy_error 9 "$LINENO"
+    ;;
+esac
+DEPLOY_PHASE="post_migration"
 
 compose exec -T backend bench --site "$SITE_NAME" set-config host_name "https://$SITE_NAME"
 
@@ -155,8 +420,26 @@ compose run --rm \
   -v "$HOOK_DIR/configure_standard.py:/opt/ayp/configure_standard.py:ro" \
   backend /home/frappe/frappe-bench/env/bin/python /opt/ayp/configure_standard.py
 
-compose restart backend frontend websocket queue-short queue-long scheduler >/dev/null
+compose restart backend frontend websocket queue-short queue-long queue-documents scheduler >/dev/null
 wait_for_compose
+
+
+echo "Verifying dedicated candidate-document worker"
+documents_id="$(container_id queue-documents)"
+[[ -n "$documents_id" ]] || { echo "Candidate-document worker is not running" >&2; exit 8; }
+documents_command="$(docker inspect "$documents_id" --format '{{json .Config.Cmd}}')"
+[[ "$documents_command" == *'"documents"'* ]] || {
+  echo "Candidate-document worker is not consuming the documents queue" >&2
+  exit 8
+}
+compose exec -T backend python3 - <<'PY'
+import json
+from pathlib import Path
+config = json.loads(Path("sites/common_site_config.json").read_text(encoding="utf-8"))
+documents = config.get("workers", {}).get("documents")
+if documents != {"timeout": 600, "background_workers": 1}:
+    raise SystemExit(f"Invalid documents worker configuration: {documents!r}")
+PY
 
 echo "Verifying public recruitment routes"
 frontend_id="$(container_id frontend)"
@@ -184,7 +467,7 @@ case "$legacy_status" in
     ;;
 esac
 
-python3 - "$IMAGE" <<'PY'
+python3 - "$IMAGE" "$RELEASE_SHA" "$old_production_id" "$old_production_tags" "$COMPOSE_ROLLBACK_PATH" <<'PY'
 import json, sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -194,6 +477,10 @@ receipt = {
     "project": "web",
     "service": "ayp-hrms",
     "image": sys.argv[1],
+    "release_sha": sys.argv[2],
+    "previous_image_id": sys.argv[3] or None,
+    "previous_image_tags": json.loads(sys.argv[4]) if sys.argv[4] else [],
+    "compose_rollback": sys.argv[5] or None,
     "site": "hr.aroypedal.com",
     "deployed_at": datetime.now(timezone.utc).isoformat(),
 }
@@ -205,4 +492,5 @@ tmp.replace(path)
 PY
 
 rm -rf "$HOOK_DIR"
+DEPLOY_PHASE="completed"
 echo "EasyPanel deployment completed for $IMAGE"

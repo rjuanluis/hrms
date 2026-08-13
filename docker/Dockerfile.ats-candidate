@@ -3,12 +3,12 @@ USER root
 RUN mkdir -p /var/lib/apt/lists/partial \
     && apt-get update -qq \
     && apt-get install -y --no-install-recommends \
-      antiword=0.37-16 \
-      libheif-examples=1.15.1-1+deb12u1 \
-      poppler-utils=22.12.0-2+deb12u3 \
-      tesseract-ocr=5.3.0-2 \
-      tesseract-ocr-eng=1:4.1.0-2 \
-      tesseract-ocr-spa=1:4.1.0-2 \
+      antiword \
+      libheif-examples \
+      poppler-utils \
+      tesseract-ocr \
+      tesseract-ocr-eng \
+      tesseract-ocr-spa \
     && rm -rf /var/lib/apt/lists/*
 COPY --chown=frappe:frappe hrms/ /home/frappe/frappe-bench/apps/hrms/hrms/
 COPY docker/patch_frappe_bootstrap.py /tmp/patch_frappe_bootstrap.py

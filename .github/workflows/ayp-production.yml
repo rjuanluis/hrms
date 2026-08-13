@@ -4,6 +4,14 @@ name: AyP HR Production
   push:
     branches:
       - ayp-production
+  pull_request:
+    branches:
+      - ayp-production
+    paths:
+      - .github/workflows/ayp-production.yml
+      - deploy/**
+      - docker/**
+      - hrms/**
   workflow_dispatch:
 
 concurrency:
@@ -13,6 +21,13 @@ concurrency:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: rjuanluis/ayp-hrms
+  RELEASE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  FRAPPE_SHA: 6a329d068416768ec47ccd3326b9cc95a8d7bf99
+  ERPNEXT_SHA: 81a6f97566b83609c3917404a560b673050e907d
+  FRAPPE_DOCKER_SHA: d4a310089f5d6fc38ed1317b898d75b9c74901db
+  FRAPPE_BUILD_DIGEST: sha256:2e5af8f2ae6a61dc0ad219d23fb37df89d86a9c9bf4b5ac6d815dd82fabe7f58
+  FRAPPE_BASE_DIGEST: sha256:101676c067d777383e259618cf0df51350a676786c7ced3514f750aebc9668e7
+  DEBIAN_SNAPSHOT: 20260813T170000Z
 
 jobs:
   validate:
@@ -22,6 +37,9 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
@@ -30,15 +48,57 @@ jobs:
           python -m compileall -q hrms deploy/bootstrap_site.py deploy/configure_standard.py
           python -m json.tool deploy/apps.json >/dev/null
           bash -n deploy/deploy.sh deploy/host-deploy-wrapper.sh deploy/provision-host.sh deploy/backup.sh
+          node --check deploy/easypanel_compose_api.js
           python - <<'PY'
           from pathlib import Path
           text = Path('deploy/easypanel-compose.yml').read_text()
-          required = ['backend:', 'frontend:', 'websocket:', 'queue-short:', 'queue-long:', 'scheduler:', 'db:', 'redis-cache:', 'redis-queue:', 'clamav:']
+          required = ['configure-workers:', 'backend:', 'frontend:', 'websocket:', 'queue-short:', 'queue-long:', 'queue-documents:', 'scheduler:', 'db:', 'redis-cache:', 'redis-queue:', 'clamav:']
           missing = [x for x in required if x not in text]
           if missing:
               raise SystemExit(f'Missing EasyPanel Compose services: {missing}')
           if 'name: easypanel' not in text or 'external: true' not in text:
               raise SystemExit('EasyPanel external network is not configured')
+          deploy = Path('deploy/deploy.sh').read_text()
+          helper = Path('deploy/easypanel_compose_api.js').read_text()
+          required_deploy_contracts = [
+              'deploy_compose_source',
+              'local expected="${3:-11}"',
+              'ROLLBACK_ARMED=1',
+              'DEPLOY_PHASE="pre_migration"',
+              'rollback_pre_migration',
+              'queue-documents scheduler',
+              'Verifying dedicated candidate-document worker',
+              'compose_rollback',
+              'render_candidate_compose',
+              'source.replace(placeholder, image)',
+              'deploy_compose_source "$CANDIDATE_COMPOSE_PATH"',
+              'cmp -s "$CANDIDATE_COMPOSE_PATH" "$COMPOSE_FILE"',
+              'verify_candidate_image_ids',
+              'APP_SERVICES=(backend frontend websocket queue-short queue-long queue-documents scheduler)',
+              'capture_previous_app_image_ids',
+              'verify_previous_app_image_ids',
+              'Deployment source does not match the image release SHA',
+              'Release tag and registry digest do not identify the same image',
+              'Image HRMS marker does not match the deployment release SHA',
+              "'{{.State.Status}}:{{.State.ExitCode}}'",
+              "docker inspect \"$backend_id\" --format '{{.Image}}'",
+          ]
+          forbidden_deploy_contracts = ['docker tag "$IMAGE" "$PRODUCTION_IMAGE"']
+          present_forbidden_contracts = [x for x in forbidden_deploy_contracts if x in deploy]
+          if present_forbidden_contracts:
+              raise SystemExit(f'Unsafe mutable deployment contracts: {present_forbidden_contracts}')
+          missing_deploy_contracts = [x for x in required_deploy_contracts if x not in deploy]
+          if missing_deploy_contracts:
+              raise SystemExit(f'Missing deployment topology contracts: {missing_deploy_contracts}')
+          required_helper_contracts = [
+              '/services/compose/updateSourceInline',
+              '/services/compose/deployService',
+              'canonicalSourceMatch',
+              'preflight_ok',
+          ]
+          missing_helper_contracts = [x for x in required_helper_contracts if x not in helper]
+          if missing_helper_contracts:
+              raise SystemExit(f'Missing EasyPanel API contracts: {missing_helper_contracts}')
           hooks = Path('hrms/hooks.py').read_text()
           required_hooks = [
               'hrms.security.candidate_cv.guard_candidate_cv_upload',
@@ -50,31 +110,187 @@ jobs:
           missing_hooks = [hook for hook in required_hooks if hook not in hooks]
           if missing_hooks:
               raise SystemExit(f'Missing candidate CV security hooks: {missing_hooks}')
+          workflow = Path('.github/workflows/ayp-production.yml').read_text()
+          required_image_contracts = [
+              'git archive --format=tar --output=frappe_docker/hrms-source.tar "$RELEASE_SHA"',
+              'git -C frappe_source archive --format=tar',
+              'git -C erpnext_source archive --format=tar',
+              'git get-tar-commit-id < frappe_docker/hrms-source.tar',
+              'FRAPPE_SHA: 6a329d068416768ec47ccd3326b9cc95a8d7bf99',
+              'ERPNEXT_SHA: 81a6f97566b83609c3917404a560b673050e907d',
+              'FRAPPE_DOCKER_SHA: d4a310089f5d6fc38ed1317b898d75b9c74901db',
+              'FRAPPE_BUILD_DIGEST: sha256:2e5af8f2ae6a61dc0ad219d23fb37df89d86a9c9bf4b5ac6d815dd82fabe7f58',
+              'FRAPPE_BASE_DIGEST: sha256:101676c067d777383e259618cf0df51350a676786c7ced3514f750aebc9668e7',
+              'DEBIAN_SNAPSHOT: 20260813T170000Z',
+              'ref: $' + '{{ env.FRAPPE_DOCKER_SHA }}',
+              'snapshot.debian.org/archive/debian/$' + '{{ env.DEBIAN_SNAPSHOT }}',
+              'antiword=0.37-16',
+              'poppler-utils=22.12.0-2+deb12u3',
+              'file:///home/frappe/frappe-src',
+              'file:///home/frappe/erpnext-src',
+              'file:///home/frappe/hrms-src',
+              'apps.release.json',
+              '/home/frappe/frappe-bench/apps/frappe/.ayp-frappe-sha',
+              '/home/frappe/frappe-bench/apps/erpnext/.ayp-erpnext-sha',
+              '/home/frappe/frappe-bench/apps/hrms/.ayp-release-sha',
+              'antiword -h 2>&1 | grep -qi "antiword"',
+              'steps.build.outputs.digest',
+              'steps.release.outputs.value',
+              'sha256:[0-9a-f]{64}',
+              'needs: [build, deploy]',
+              'Promote successfully deployed digest',
+              'deploy $IMAGE_TAG $GITHUB_ACTOR',
+              "github.event_name == 'push' && github.ref == 'refs/heads/ayp-production'",
+          ]
+          missing_image_contracts = [x for x in required_image_contracts if x not in workflow]
+          if missing_image_contracts:
+              raise SystemExit(f'Missing exact-image contracts: {missing_image_contracts}')
+          wrapper = Path('deploy/host-deploy-wrapper.sh').read_text()
+          required_wrapper_contracts = [
+              'git -C "$ROOT_DIR" fetch --depth=1 origin "$RELEASE_SHA"',
+              'git -C "$ROOT_DIR" reset --hard "$RELEASE_SHA"',
+              '"$ROOT_DIR/deploy/deploy.sh" "$IMAGE_TAG" "$IMAGE_DIGEST"',
+          ]
+          missing_wrapper_contracts = [x for x in required_wrapper_contracts if x not in wrapper]
+          if missing_wrapper_contracts:
+              raise SystemExit(f'Missing exact-release wrapper contracts: {missing_wrapper_contracts}')
+          if 'reset --hard origin/ayp-production' in wrapper:
+              raise SystemExit('Wrapper must not execute mutable deployment code')
           PY
 
   build:
     name: Build and publish Frappe v16 + ERPNext + HRMS
     needs: validate
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     outputs:
-      image: ${{ steps.image.outputs.value }}
+      image: ${{ steps.release.outputs.value }}
+      tag: ${{ steps.image.outputs.value }}
     steps:
       - name: Checkout AyP HRMS source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+          fetch-depth: 0
 
       - name: Checkout official frappe_docker release
         uses: actions/checkout@v4
         with:
           repository: frappe/frappe_docker
-          ref: v3.2.1
+          ref: ${{ env.FRAPPE_DOCKER_SHA }}
           path: frappe_docker
+
+      - name: Checkout pinned Frappe source
+        uses: actions/checkout@v4
+        with:
+          repository: frappe/frappe
+          ref: ${{ env.FRAPPE_SHA }}
+          path: frappe_source
+
+      - name: Checkout pinned ERPNext source
+        uses: actions/checkout@v4
+        with:
+          repository: frappe/erpnext
+          ref: ${{ env.ERPNEXT_SHA }}
+          path: erpnext_source
 
       - name: Set immutable image reference
         id: image
-        run: echo "value=${REGISTRY}/${IMAGE_NAME}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+        run: echo "value=${REGISTRY}/${IMAGE_NAME}:${RELEASE_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Stage exact AyP source and document runtime in production build context
+        run: |
+          test "$(git -C frappe_docker rev-parse HEAD)" = "$FRAPPE_DOCKER_SHA"
+          git -C frappe_source archive --format=tar --output="$GITHUB_WORKSPACE/frappe_docker/frappe-source.tar" "$FRAPPE_SHA"
+          test "$(git get-tar-commit-id < frappe_docker/frappe-source.tar)" = "$FRAPPE_SHA"
+          git -C erpnext_source archive --format=tar --output="$GITHUB_WORKSPACE/frappe_docker/erpnext-source.tar" "$ERPNEXT_SHA"
+          test "$(git get-tar-commit-id < frappe_docker/erpnext-source.tar)" = "$ERPNEXT_SHA"
+          git archive --format=tar --output=frappe_docker/hrms-source.tar "$RELEASE_SHA"
+          test "$(git get-tar-commit-id < frappe_docker/hrms-source.tar)" = "$RELEASE_SHA"
+          export FRAPPE_COMMIT_DATE="$(git -C frappe_source show -s --format=%cI "$FRAPPE_SHA")"
+          export ERPNEXT_COMMIT_DATE="$(git -C erpnext_source show -s --format=%cI "$ERPNEXT_SHA")"
+          export HRMS_COMMIT_DATE="$(git show -s --format=%cI "$RELEASE_SHA")"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          apps = json.loads(Path("deploy/apps.json").read_text())
+          erpnext = [app for app in apps if app["url"].rstrip("/").endswith("/erpnext")]
+          hrms = [app for app in apps if app["url"].rstrip("/").endswith("/hrms")]
+          if len(erpnext) != 1 or len(hrms) != 1:
+              raise SystemExit("deploy/apps.json must contain exactly one ERPNext and HRMS source")
+          erpnext[0].update({"url": "file:///home/frappe/erpnext-src", "branch": "image-release"})
+          hrms[0].update({"url": "file:///home/frappe/hrms-src", "branch": "image-release"})
+          Path("frappe_docker/apps.release.json").write_text(json.dumps(apps, indent=2) + "\n")
+
+          containerfile = Path("frappe_docker/images/layered/Containerfile")
+          text = containerfile.read_text()
+          build_from = "FROM ${FRAPPE_IMAGE_PREFIX}/build:${FRAPPE_BRANCH} AS builder"
+          base_from = "FROM ${FRAPPE_IMAGE_PREFIX}/base:${FRAPPE_BRANCH} AS backend"
+          if text.count(build_from) != 1 or text.count(base_from) != 1:
+              raise SystemExit("frappe_docker base image anchors changed")
+          text = text.replace(build_from, f"FROM frappe/build@{os.environ['FRAPPE_BUILD_DIGEST']} AS builder")
+          text = text.replace(base_from, f"FROM frappe/base@{os.environ['FRAPPE_BASE_DIGEST']} AS backend")
+          anchor = "USER frappe\n\nRUN --mount=type=secret,id=apps_json"
+          sources = (
+              ("frappe", "frappe-source.tar", ".ayp-frappe-sha", os.environ["FRAPPE_SHA"], os.environ["FRAPPE_COMMIT_DATE"]),
+              ("erpnext", "erpnext-source.tar", ".ayp-erpnext-sha", os.environ["ERPNEXT_SHA"], os.environ["ERPNEXT_COMMIT_DATE"]),
+              ("hrms", "hrms-source.tar", ".ayp-release-sha", os.environ["RELEASE_SHA"], os.environ["HRMS_COMMIT_DATE"]),
+          )
+          setup = []
+          for app, archive, marker, sha, commit_date in sources:
+              dest = f"/home/frappe/{app}-src"
+              setup.extend([
+                  f"    && mkdir -p {dest} \\",
+                  f"    && tar -xf /tmp/{archive} -C {dest} \\",
+                  f"    && rm /tmp/{archive} \\",
+                  f"    && cd {dest} \\",
+                  f"    && printf '%s\\n' '{sha}' > {marker} \\",
+                  "    && git init \\",
+                  "    && git config user.name 'AyP Release Builder' \\",
+                  "    && git config user.email 'release-builder@aroypedal.com' \\",
+                  "    && git add . \\",
+                  f"    && GIT_AUTHOR_DATE='{commit_date}' GIT_COMMITTER_DATE='{commit_date}' git commit -m '{app} {sha}' \\",
+                  "    && git branch -M image-release \\",
+              ])
+          setup[-1] = setup[-1].removesuffix(" \\")
+          replacement = (
+              "USER frappe\n\n"
+              "COPY --chown=frappe:frappe frappe-source.tar erpnext-source.tar hrms-source.tar /tmp/\n"
+              "RUN true \\\n" + "\n".join(setup) + "\n\n"
+              "RUN --mount=type=secret,id=apps_json"
+          )
+          if text.count(anchor) != 1:
+              raise SystemExit("frappe_docker builder anchor changed")
+          containerfile.write_text(text.replace(anchor, replacement, 1))
+          PY
+          install -m 0755 docker/configure_ayp_document_queue.py \
+            frappe_docker/configure_ayp_document_queue.py
+          cat >> frappe_docker/images/layered/Containerfile <<'EOF'
+          USER root
+          RUN rm -f /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list \
+              && printf '%s\n' \
+                'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${{ env.DEBIAN_SNAPSHOT }} bookworm main' \
+                'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${{ env.DEBIAN_SNAPSHOT }} bookworm-security main' \
+                > /etc/apt/sources.list \
+              && mkdir -p /var/lib/apt/lists/partial \
+              && apt-get -o Acquire::Check-Valid-Until=false update -qq \
+              && apt-get install -y --no-install-recommends \
+                antiword=0.37-16 \
+                libheif-examples=1.15.1-1+deb12u1 \
+                poppler-utils=22.12.0-2+deb12u3 \
+                tesseract-ocr=5.3.0-2 \
+                tesseract-ocr-eng=1:4.1.0-2 \
+                tesseract-ocr-spa=1:4.1.0-2 \
+              && rm -rf /var/lib/apt/lists/*
+          COPY --chown=frappe:frappe configure_ayp_document_queue.py /usr/local/bin/configure-ayp-document-queue
+          RUN chmod 0755 /usr/local/bin/configure-ayp-document-queue
+          USER frappe
+          EOF
 
       - uses: docker/setup-buildx-action@v3
 
@@ -86,6 +302,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push production image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: frappe_docker
@@ -93,21 +310,46 @@ jobs:
           push: true
           platforms: linux/amd64
           build-args: |
-            FRAPPE_PATH=https://github.com/frappe/frappe
-            FRAPPE_BRANCH=version-16
-            CACHE_BUST=${{ github.sha }}
+            FRAPPE_PATH=file:///home/frappe/frappe-src
+            FRAPPE_BRANCH=image-release
+            CACHE_BUST=${{ env.RELEASE_SHA }}
           secret-files: |
-            apps_json=${{ github.workspace }}/deploy/apps.json
+            apps_json=${{ github.workspace }}/frappe_docker/apps.release.json
           tags: |
             ${{ steps.image.outputs.value }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:production
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Bind release to immutable registry digest
+        id: release
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "value=${REGISTRY}/${IMAGE_NAME}@${DIGEST}" >> "$GITHUB_OUTPUT"
+
       - name: Test candidate CV security in production image
         run: |
-          docker pull "${{ steps.image.outputs.value }}"
-          docker run --rm --entrypoint bash "${{ steps.image.outputs.value }}" -lc '
+          docker pull "${{ steps.release.outputs.value }}"
+          docker run --rm --entrypoint bash "${{ steps.release.outputs.value }}" -ec '
+            test "$(cat /home/frappe/frappe-bench/apps/frappe/.ayp-frappe-sha)" = "${{ env.FRAPPE_SHA }}"
+            test "$(cat /home/frappe/frappe-bench/apps/erpnext/.ayp-erpnext-sha)" = "${{ env.ERPNEXT_SHA }}"
+            test "$(cat /home/frappe/frappe-bench/apps/hrms/.ayp-release-sha)" = "${{ env.RELEASE_SHA }}"
+            for executable in pdfinfo pdftotext pdftoppm tesseract antiword heif-convert; do
+              command -v "$executable" >/dev/null
+            done
+            tesseract --list-langs 2>&1 | grep -Fxq eng
+            tesseract --list-langs 2>&1 | grep -Fxq spa
+            pdfinfo -v 2>&1 | grep -q "pdfinfo version"
+            pdftotext -v 2>&1 | grep -q "pdftotext version"
+            pdftoppm -v 2>&1 | grep -q "pdftoppm version"
+            antiword -h 2>&1 | grep -qi "antiword"
+            heif-convert --help 2>&1 | grep -q "heif-convert"
+          '
+          docker run --rm --entrypoint /usr/local/bin/configure-ayp-document-queue \
+            "${{ steps.release.outputs.value }}" /tmp/common_site_config.json | \
+            python -c 'import json,sys; result=json.load(sys.stdin); assert result == {"background_workers": 1, "queue": "documents", "timeout": 600}'
+          docker run --rm --entrypoint bash "${{ steps.release.outputs.value }}" -lc '
             mkdir -p /tmp/frappe-test-sites/test /home/frappe/logs /home/frappe/frappe-bench/test/logs
             printf "{}\n" > /tmp/frappe-test-sites/test/site_config.json
             printf "frappe\nerpnext\nhrms\n" > /tmp/frappe-test-sites/apps.txt
@@ -140,7 +382,7 @@ jobs:
   deploy:
     name: Deploy official hr.aroypedal.com
     needs: build
-    if: ${{ vars.AYP_AUTO_DEPLOY == 'true' }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/ayp-production' && vars.AYP_AUTO_DEPLOY == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -163,8 +405,30 @@ jobs:
       - name: Deploy immutable image
         env:
           IMAGE: ${{ needs.build.outputs.image }}
+          IMAGE_TAG: ${{ needs.build.outputs.tag }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          printf '%s\n' "$GHCR_TOKEN" | \
+          printf '%s\n%s\n' "$GHCR_TOKEN" "$IMAGE" | \
             ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes \
-              aypdeploy@${{ vars.AYP_DEPLOY_HOST }} "deploy $IMAGE $GITHUB_ACTOR"
+              aypdeploy@${{ vars.AYP_DEPLOY_HOST }} "deploy $IMAGE_TAG $GITHUB_ACTOR"
+
+  promote:
+    name: Promote deployed image to production alias
+    needs: [build, deploy]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/ayp-production' && vars.AYP_AUTO_DEPLOY == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote successfully deployed digest
+        run: |
+          docker buildx imagetools create \
+            --tag "${REGISTRY}/${IMAGE_NAME}:production" \
+            "${{ needs.build.outputs.image }}"
