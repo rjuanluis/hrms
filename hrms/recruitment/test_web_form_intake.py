@@ -31,7 +31,7 @@ class TestRecruitmentWebFormIntake(unittest.TestCase):
 
 		with (
 			patch.object(web_form_intake.frappe, "get_all", return_value=[form]),
-			patch.object(web_form_intake, "frappe_web_form_accept", side_effect=original_accept),
+			patch.object(web_form_intake, "_frappe_web_form_accept", side_effect=original_accept),
 		):
 			result = web_form_intake.accept(form.name, "{}")
 		self.assertEqual(result.name, "HR-APP-1")
@@ -48,7 +48,7 @@ class TestRecruitmentWebFormIntake(unittest.TestCase):
 
 		with (
 			patch.object(web_form_intake.frappe, "get_all", return_value=[]),
-			patch.object(web_form_intake, "frappe_web_form_accept", side_effect=original_accept),
+			patch.object(web_form_intake, "_frappe_web_form_accept", side_effect=original_accept),
 		):
 			web_form_intake.accept("Lookalike", "{}")
 		self.assertEqual(observed, [None])

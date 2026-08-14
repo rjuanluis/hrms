@@ -13,10 +13,14 @@ from frappe.translate import set_default_language
 
 from hrms.recruitment.email_intake import APPLICANT_SOURCE, disable_existing_recruitment_mailbox_auto_reply
 from hrms.recruitment.talent_pool import backfill_candidate_profiles
-from hrms.recruitment.web_form_intake import ensure_web_applicant_source
+from hrms.recruitment.web_form_intake import (
+	DEFAULT_JOB_OPENING,
+	ensure_web_applicant_source,
+)
 
 SITE = os.environ.get("AYP_SITE_NAME", "hr.aroypedal.com")
 COMPANY = "ARO Y PEDAL SRL"
+RECRUITMENT_JOB_TITLE = "Asesor Venta Online"
 TAX_ID = "101-57005-9"
 ADMIN_EMAIL = "juanluis@aroypedal.com"
 LEAVE_PERIOD_START = "2026-01-01"
@@ -539,6 +543,41 @@ def ensure_recruitment_web_form() -> tuple[str, list[str]]:
 	return web_form.name, retired
 
 
+def ensure_recruitment_job_opening() -> str:
+	if not frappe.db.exists("Designation", RECRUITMENT_JOB_TITLE):
+		frappe.get_doc({"doctype": "Designation", "designation_name": RECRUITMENT_JOB_TITLE}).insert(
+			ignore_permissions=True
+		)
+
+	expected = {
+		"job_title": RECRUITMENT_JOB_TITLE,
+		"designation": RECRUITMENT_JOB_TITLE,
+		"company": COMPANY,
+		"status": "Open",
+	}
+	if not frappe.db.exists("Job Opening", DEFAULT_JOB_OPENING):
+		frappe.get_doc(
+			{
+				"doctype": "Job Opening",
+				**expected,
+				"publish": 0,
+				"job_application_route": RECRUITMENT_WEB_FORM_ROUTE,
+			}
+		).insert(ignore_permissions=True, set_name=DEFAULT_JOB_OPENING)
+
+	stored = frappe.db.get_value(
+		"Job Opening",
+		DEFAULT_JOB_OPENING,
+		list(expected),
+		as_dict=True,
+	)
+	if not stored or any(stored.get(fieldname) != value for fieldname, value in expected.items()):
+		raise RuntimeError(
+			f"Job Opening {DEFAULT_JOB_OPENING} must remain the open {RECRUITMENT_JOB_TITLE} vacancy"
+		)
+	return DEFAULT_JOB_OPENING
+
+
 def enable_restricted_guest_cv_uploads() -> None:
 	frappe.db.set_single_value("System Settings", "allow_guests_to_upload_files", 1)
 	frappe.db.set_single_value("System Settings", "allowed_doctypes_for_guest_uploads", "Job Applicant")
@@ -587,6 +626,7 @@ def main() -> None:
 		ensure_recruitment_security_fields()
 		recruitment_email_source = ensure_recruitment_email_source()
 		recruitment_web_source = ensure_web_applicant_source()
+		recruitment_job_opening = ensure_recruitment_job_opening()
 		recruitment_email_accounts = disable_existing_recruitment_mailbox_auto_reply()
 		candidate_profiles_backfilled = backfill_candidate_profiles()
 		recruitment_web_form, retired_recruitment_web_forms = ensure_recruitment_web_form()
@@ -610,6 +650,7 @@ def main() -> None:
 				"recruitment_web_form": recruitment_web_form,
 				"recruitment_email_source": recruitment_email_source,
 				"recruitment_web_source": recruitment_web_source,
+				"recruitment_job_opening": recruitment_job_opening,
 				"recruitment_email_accounts_auto_reply_disabled": recruitment_email_accounts,
 				"retired_recruitment_web_forms": retired_recruitment_web_forms,
 				"candidate_profiles_backfilled": candidate_profiles_backfilled,

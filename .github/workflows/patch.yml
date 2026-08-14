@@ -211,6 +211,18 @@ jobs:
               assert frappe.db.exists("Company", "ARO Y PEDAL SRL")
               assert frappe.db.exists("Job Applicant Source", "Email Recursos Humanos")
               assert frappe.db.exists("Job Applicant Source", "Sitio Web")
+              opening = frappe.db.get_value(
+                  "Job Opening",
+                  "HR-OPN-2026-0001",
+                  ["job_title", "designation", "company", "status"],
+                  as_dict=True,
+              )
+              assert opening == {
+                  "job_title": "Asesor Venta Online",
+                  "designation": "Asesor Venta Online",
+                  "company": "ARO Y PEDAL SRL",
+                  "status": "Open",
+              }, opening
 
               for fieldname in (
                   "custom_ayp_email_intake_status",

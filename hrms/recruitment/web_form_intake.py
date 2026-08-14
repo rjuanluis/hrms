@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import frappe
-from frappe.website.doctype.web_form.web_form import accept as frappe_web_form_accept
 
 RECRUITMENT_WEB_FORM_ROUTE = "empleos/solicitud"
 WEB_SOURCE = "Sitio Web"
@@ -25,6 +24,18 @@ def ensure_web_applicant_source() -> str:
 
 def authoritative_recruitment_web_form_context():
 	return getattr(frappe.flags, _CONTEXT_FLAG, None)
+
+
+def _frappe_web_form_accept(*, web_form: str, data: str | dict, web_form_request_key: str | None = None):
+	# Import only after Frappe has initialized its site and log paths. Importing
+	# WebForm at module load time breaks standalone post-install configurators.
+	from frappe.website.doctype.web_form.web_form import accept as native_accept
+
+	return native_accept(
+		web_form=web_form,
+		data=data,
+		web_form_request_key=web_form_request_key,
+	)
 
 
 def _authoritative_form(web_form_name: str):
@@ -84,7 +95,7 @@ def accept(web_form: str, data: str | dict, web_form_request_key: str | None = N
 			),
 		)
 	try:
-		return frappe_web_form_accept(
+		return _frappe_web_form_accept(
 			web_form=web_form,
 			data=data,
 			web_form_request_key=web_form_request_key,

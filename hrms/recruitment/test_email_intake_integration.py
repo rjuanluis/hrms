@@ -30,6 +30,19 @@ WEB_SOURCE = "Sitio Web"
 class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 	def setUp(self):
 		super().setUp()
+		required_fields = (
+			("File", "custom_av_scan_status"),
+			("File", "custom_cv_sha256"),
+			("Communication", INTAKE_STATUS_FIELD),
+			("Job Applicant", "custom_candidate_cv_file"),
+		)
+		if any(not frappe.get_meta(doctype).has_field(fieldname) for doctype, fieldname in required_fields):
+			self.skipTest("requires the AyP recruitment schema provisioned by Patch Test")
+		if not frappe.db.exists(
+			"Job Opening",
+			{"name": email_intake._configured_job_opening(), "status": "Open"},
+		):
+			self.skipTest("requires the configured AyP recruitment Job Opening")
 		frappe.set_user("Administrator")
 		for source in (APPLICANT_SOURCE, WEB_SOURCE):
 			if not frappe.db.exists("Job Applicant Source", source):
