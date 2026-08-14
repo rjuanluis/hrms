@@ -266,12 +266,26 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 			STATUS_CURRENT_VACANCY_ONLY,
 		)
 
-		web_application = self._applicant(
-			email=email,
-			source=WEB_SOURCE,
-			consent=1,
-			privacy_version=PRIVACY_NOTICE_VERSION,
-		)
+		try:
+			with patch.dict(
+				frappe.conf,
+				{
+					"mail_server": "127.0.0.1",
+					"mail_login": "_test-no-reply@example.com",
+				},
+				clear=False,
+			):
+				# Fresh installs have no default outgoing Email Account. Exercise
+				# the official site-config fallback; sendmail only creates Email Queue.
+				frappe.local.outgoing_email_account = {}
+				web_application = self._applicant(
+					email=email,
+					source=WEB_SOURCE,
+					consent=1,
+					privacy_version=PRIVACY_NOTICE_VERSION,
+				)
+		finally:
+			frappe.local.outgoing_email_account = {}
 		self.assertEqual(web_application.custom_candidate_profile, profile_name)
 		self.assertEqual(
 			frappe.db.get_value("AYP Candidate Profile", profile_name, "talent_pool_status"),
