@@ -425,32 +425,30 @@ def has_candidate_cv_file_permission(doc, ptype=None, user=None, debug=False) ->
 
 
 def validate_job_applicant_cv(doc, method=None) -> None:
+	consent_evidence_fields = (
+		"custom_consent_capture_method",
+		"custom_consent_evidence_id",
+		"custom_consent_recorded_on",
+		"custom_consent_form_route",
+	)
+	before_save = doc.get_doc_before_save() if hasattr(doc, "get_doc_before_save") else None
+	previous_values = before_save if before_save is not None else {}
+	is_new = before_save is None
 	if frappe.session.user == "Guest" and not doc.get("custom_data_processing_consent"):
 		raise CandidateCVSecurityError(_("Debes aceptar el aviso de privacidad para enviar la solicitud."))
-	if frappe.session.user == "Guest":
+	if frappe.session.user == "Guest" and is_new:
 		doc.set("custom_privacy_notice_version", PRIVACY_NOTICE_VERSION)
-		if doc.get("custom_data_processing_consent"):
-			doc.set("custom_consent_capture_method", "Web Form")
-			doc.set("custom_consent_evidence_id", frappe.generate_hash(length=32))
-			doc.set("custom_consent_recorded_on", now_datetime())
-			doc.set("custom_consent_form_route", CONSENT_WEB_FORM_ROUTE)
-	elif doc.is_new():
+		doc.set("custom_consent_capture_method", "Web Form")
+		doc.set("custom_consent_evidence_id", frappe.generate_hash(length=32))
+		doc.set("custom_consent_recorded_on", now_datetime())
+		doc.set("custom_consent_form_route", CONSENT_WEB_FORM_ROUTE)
+	elif is_new:
 		# Internal imports cannot self-declare authoritative Web consent.
-		for fieldname in (
-			"custom_consent_capture_method",
-			"custom_consent_evidence_id",
-			"custom_consent_recorded_on",
-			"custom_consent_form_route",
-		):
+		for fieldname in consent_evidence_fields:
 			doc.set(fieldname, "")
 	elif any(
-		doc.has_value_changed(fieldname)
-		for fieldname in (
-			"custom_consent_capture_method",
-			"custom_consent_evidence_id",
-			"custom_consent_recorded_on",
-			"custom_consent_form_route",
-		)
+		str(doc.get(fieldname) or "") != str(previous_values.get(fieldname) or "")
+		for fieldname in consent_evidence_fields
 	):
 		raise CandidateCVSecurityError(_("La evidencia de consentimiento Web es inmutable."))
 

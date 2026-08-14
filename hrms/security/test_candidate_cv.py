@@ -38,6 +38,7 @@ from hrms.security.candidate_cv import (
 	scan_bytes_with_clamd,
 	scan_stored_candidate_cv,
 	validate_cv_file,
+	validate_job_applicant_cv,
 )
 
 
@@ -180,6 +181,62 @@ class TestCandidateCVSecurity(unittest.TestCase):
 		frappe.local.form_dict = frappe._dict()
 		frappe.local.session = frappe._dict(user="Guest")
 		frappe.local.request = SimpleNamespace(path="/api/method/upload_file", method="POST", files={})
+
+	def _consent_doc(self, values, before_save):
+		doc = Mock()
+		doc.get.side_effect = values.get
+		doc.set.side_effect = values.__setitem__
+		doc.get_doc_before_save.return_value = before_save
+		doc.resume_attachment = ""
+		return doc
+
+	def test_internal_insert_clears_forged_web_consent_evidence(self):
+		frappe.local.session.user = "Administrator"
+		values = {
+			"custom_data_processing_consent": 1,
+			"custom_consent_capture_method": "Web Form",
+			"custom_consent_evidence_id": "forged",
+			"custom_consent_recorded_on": "2026-08-14 00:00:00",
+			"custom_consent_form_route": "empleos/solicitud",
+		}
+		doc = self._consent_doc(values, None)
+		with patch("hrms.security.candidate_cv.frappe.db.has_column", return_value=False):
+			validate_job_applicant_cv(doc)
+		for fieldname in (
+			"custom_consent_capture_method",
+			"custom_consent_evidence_id",
+			"custom_consent_recorded_on",
+			"custom_consent_form_route",
+		):
+			self.assertEqual(values[fieldname], "")
+
+	def test_empty_consent_evidence_normalizes_none_and_empty_on_existing_save(self):
+		frappe.local.session.user = "Administrator"
+		fields = (
+			"custom_consent_capture_method",
+			"custom_consent_evidence_id",
+			"custom_consent_recorded_on",
+			"custom_consent_form_route",
+		)
+		values = {"custom_data_processing_consent": 0, **dict.fromkeys(fields, "")}
+		before_values = dict.fromkeys(fields, None)
+		doc = self._consent_doc(values, SimpleNamespace(get=before_values.get))
+		with patch("hrms.security.candidate_cv.frappe.db.has_column", return_value=False):
+			validate_job_applicant_cv(doc)
+
+	def test_existing_web_consent_evidence_is_immutable(self):
+		frappe.local.session.user = "Administrator"
+		before_values = {
+			"custom_consent_capture_method": "Web Form",
+			"custom_consent_evidence_id": "original",
+			"custom_consent_recorded_on": "2026-08-14 00:00:00",
+			"custom_consent_form_route": "empleos/solicitud",
+		}
+		values = {"custom_data_processing_consent": 1, **before_values}
+		values["custom_consent_evidence_id"] = "changed"
+		doc = self._consent_doc(values, SimpleNamespace(get=before_values.get))
+		with self.assertRaises(CandidateCVSecurityError):
+			validate_job_applicant_cv(doc)
 
 	def test_guest_job_applicant_upload_rejects_other_fields(self):
 		frappe.local.form_dict.update(doctype="Job Applicant", fieldname="cover_letter")
@@ -473,10 +530,8 @@ class TestCandidateCVSecurity(unittest.TestCase):
 			attached_to_doctype="Communication",
 			attached_to_name="COMM-1",
 		)
-		with patch(
-			"hrms.security.candidate_cv.frappe.db.get_value",
-			side_effect=["RECRUITMENT", "empleos@aroypedal.com"],
-		):
+		db = SimpleNamespace(get_value=Mock(side_effect=["RECRUITMENT", "empleos@aroypedal.com"]))
+		with patch("hrms.security.candidate_cv.frappe.db", db):
 			self.assertTrue(_is_recruitment_candidate_file(record))
 
 	def test_clean_file_persists_preflight_sha256_when_field_exists(self):

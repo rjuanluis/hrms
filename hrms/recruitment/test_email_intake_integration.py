@@ -33,7 +33,9 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 			if not frappe.db.exists("Job Applicant Source", source):
 				frappe.get_doc({"doctype": "Job Applicant Source", "source_name": source}).insert()
 
-	def _applicant(self, *, email: str, source: str, consent: int, privacy_version: str):
+	def _applicant(
+		self, *, email: str, source: str, consent: int, privacy_version: str, as_guest: bool = False
+	):
 		doc = frappe.get_doc(
 			{
 				"doctype": "Job Applicant",
@@ -46,7 +48,7 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 				"custom_privacy_notice_version": privacy_version,
 			}
 		)
-		if source != WEB_SOURCE:
+		if not as_guest:
 			return doc.insert(ignore_permissions=True)
 		previous_user = frappe.session.user
 		try:
@@ -370,6 +372,7 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 					source=WEB_SOURCE,
 					consent=1,
 					privacy_version=PRIVACY_NOTICE_VERSION,
+					as_guest=True,
 				)
 		finally:
 			frappe.local.outgoing_email_account = {}
