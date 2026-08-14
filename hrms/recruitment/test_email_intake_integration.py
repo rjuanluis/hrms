@@ -106,7 +106,7 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 				account.name,
 				("enable_auto_reply", "notify_if_unreplied", "send_notification_to", "append_to"),
 			),
-			(0, 0, None, "Communication"),
+			(0, 0, "", "Communication"),
 		)
 		self.assertEqual(
 			frappe.get_all(

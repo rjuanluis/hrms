@@ -4,7 +4,7 @@ import hashlib
 import uuid
 
 import frappe
-from frappe.utils import now_datetime
+from frappe.utils import add_to_date, now_datetime
 
 from hrms.recruitment.email_intake_domain import (
 	EmailIntakeDomainError,
@@ -447,6 +447,7 @@ def recover_stale_recruitment_email_intakes(communication_name: str | None = Non
 
 	if not _has_intake_fields():
 		return 0
+	stale_before = add_to_date(now_datetime(), minutes=-INTAKE_STALE_MINUTES)
 	rows = frappe.db.sql(
 		"""
 		SELECT name
@@ -454,11 +455,11 @@ def recover_stale_recruitment_email_intakes(communication_name: str | None = Non
 		WHERE (
 			(custom_ayp_email_intake_status = %s AND (
 				custom_ayp_email_intake_queued_on IS NULL
-				OR custom_ayp_email_intake_queued_on < TIMESTAMPADD(MINUTE, %s, NOW())
+				OR custom_ayp_email_intake_queued_on < %s
 			))
 			OR (custom_ayp_email_intake_status = %s AND (
 				custom_ayp_email_intake_started_on IS NULL
-				OR custom_ayp_email_intake_started_on < TIMESTAMPADD(MINUTE, %s, NOW())
+				OR custom_ayp_email_intake_started_on < %s
 			))
 		)
 		AND (%s IS NULL OR name = %s)
@@ -468,9 +469,9 @@ def recover_stale_recruitment_email_intakes(communication_name: str | None = Non
 		""",
 		(
 			INTAKE_PENDING,
-			-INTAKE_STALE_MINUTES,
+			stale_before,
 			INTAKE_PROCESSING,
-			-INTAKE_STALE_MINUTES,
+			stale_before,
 			communication_name,
 			communication_name,
 		),
