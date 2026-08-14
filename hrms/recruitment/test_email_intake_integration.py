@@ -3,7 +3,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import frappe
-from frappe.tests.utils import IntegrationTestCase
+from frappe.tests import IntegrationTestCase
 from frappe.utils import add_to_date, now_datetime
 
 from hrms.recruitment import email_intake
@@ -110,7 +110,8 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 				side_effect=RuntimeError("simulated redis outage"),
 			):
 				with self.assertRaisesRegex(RuntimeError, "simulated redis outage"):
-					frappe.db.commit()
+					# Execute the real post-commit callback to prove Pending survives Redis failure.
+					frappe.db.commit()  # nosemgrep
 			self.assertEqual(
 				frappe.db.get_value("Communication", communication.name, INTAKE_STATUS_FIELD),
 				INTAKE_PENDING,
@@ -123,16 +124,19 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 				add_to_date(now_datetime(), minutes=-20),
 				update_modified=False,
 			)
-			frappe.db.commit()
+			# Persist the intentionally aged durable intent before reconciliation.
+			frappe.db.commit()  # nosemgrep
 			with patch.object(email_intake, "_enqueue_pending_intake", return_value=True) as enqueue:
 				self.assertGreaterEqual(email_intake.recover_stale_recruitment_email_intakes(), 1)
-				frappe.db.commit()
+				# Execute the reconciler's real post-commit enqueue callback.
+				frappe.db.commit()  # nosemgrep
 			enqueue.assert_any_call(communication.name)
 		finally:
 			if communication_name:
 				frappe.db.delete("Communication", {"name": communication_name})
 			frappe.db.delete("Email Account", {"name": account_name})
-			frappe.db.commit()
+			# Clean records committed by this post-commit boundary test.
+			frappe.db.commit()  # nosemgrep
 
 	def test_email_is_silent_web_is_acknowledged_and_profile_activates(self):
 		email = f"email-intake-{frappe.generate_hash(length=12)}@example.com"

@@ -107,7 +107,7 @@ def enqueue_recruitment_email_intake(doc, method=None) -> None:
 	if not _is_recruitment_email(doc) or (doc.reference_doctype == "Job Applicant" and doc.reference_name):
 		return
 	if not _has_intake_fields():
-		frappe.throw("El estado durable del intake de reclutamiento no está instalado; ejecuta migrate.")
+		frappe.throw(frappe._("Durable recruitment intake state is not installed; run migrate."))
 	if doc.get(INTAKE_STATUS_FIELD) in (INTAKE_COMPLETED, INTAKE_BLOCKED):
 		return
 	doc.db_set(
@@ -351,7 +351,8 @@ def process_recruitment_email_safely(communication_name: str) -> dict:
 				},
 				update_modified=False,
 			)
-			frappe.db.commit()
+			# Persist terminal Blocked state before re-raising; the job runner rolls back exceptions.
+			frappe.db.commit()  # nosemgrep
 		frappe.log_error(
 			title=f"Recruitment email intake blocked {fingerprint}",
 			message=frappe.get_traceback(),
@@ -365,24 +366,24 @@ def recover_stale_recruitment_email_intakes() -> int:
 	if not _has_intake_fields():
 		return 0
 	rows = frappe.db.sql(
-		f"""
+		"""
 		SELECT name
 		FROM `tabCommunication`
 		WHERE (
-			({INTAKE_STATUS_FIELD} = %s AND (
+			(custom_ayp_email_intake_status = %s AND (
 				custom_ayp_email_intake_queued_on IS NULL
-				OR custom_ayp_email_intake_queued_on < DATE_SUB(NOW(), INTERVAL {INTAKE_STALE_MINUTES} MINUTE)
+				OR custom_ayp_email_intake_queued_on < TIMESTAMPADD(MINUTE, %s, NOW())
 			))
-			OR ({INTAKE_STATUS_FIELD} = %s AND (
+			OR (custom_ayp_email_intake_status = %s AND (
 				custom_ayp_email_intake_started_on IS NULL
-				OR custom_ayp_email_intake_started_on < DATE_SUB(NOW(), INTERVAL {INTAKE_STALE_MINUTES} MINUTE)
+				OR custom_ayp_email_intake_started_on < TIMESTAMPADD(MINUTE, %s, NOW())
 			))
 		)
 		ORDER BY creation, name
 		LIMIT 100
 		FOR UPDATE
 		""",
-		(INTAKE_PENDING, INTAKE_PROCESSING),
+		(INTAKE_PENDING, -INTAKE_STALE_MINUTES, INTAKE_PROCESSING, -INTAKE_STALE_MINUTES),
 		as_dict=True,
 	)
 	for row in rows:

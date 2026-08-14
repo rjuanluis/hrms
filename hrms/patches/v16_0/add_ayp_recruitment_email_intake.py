@@ -82,7 +82,7 @@ RECRUITMENT_EMAIL_INTAKE_FIELDS = {
 
 def _sync_application_received_notification() -> None:
 	if not frappe.db.exists("Notification", NOTIFICATION_NAME):
-		frappe.throw(f"No existe la Notification estándar requerida: {NOTIFICATION_NAME}")
+		frappe.throw(frappe._("Required standard Notification does not exist: {0}").format(NOTIFICATION_NAME))
 	expected = {
 		"enabled": 1,
 		"document_type": "Job Applicant",
