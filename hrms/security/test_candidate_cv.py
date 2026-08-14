@@ -36,11 +36,13 @@ from hrms.security.candidate_cv import (
 	guard_candidate_cv_upload,
 	has_candidate_cv_file_permission,
 	mark_scanned_candidate_cv_file,
+	prevent_recruitment_cv_file_deletion,
 	read_stored_candidate_cv_bytes,
 	scan_bytes_with_clamd,
 	scan_stored_candidate_cv,
 	validate_cv_file,
 	validate_job_applicant_cv,
+	validate_recruitment_cv_file_immutability,
 )
 
 
@@ -602,6 +604,59 @@ class TestCandidateCVSecurity(unittest.TestCase):
 			self.assertFalse(has_candidate_cv_file_permission(pending, ptype="read"))
 			pending.custom_av_scan_status = "Clean"
 			self.assertTrue(has_candidate_cv_file_permission(pending, ptype="read"))
+			for permission_type in ("write", "delete", "share"):
+				self.assertFalse(has_candidate_cv_file_permission(pending, ptype=permission_type))
+
+	def test_persisted_recruitment_cv_cannot_be_made_public_or_relinked(self):
+		persisted = frappe._dict(
+			name="FILE-CV",
+			file_name="cv.pdf",
+			file_url="/private/files/cv.pdf",
+			file_size=128,
+			content_hash="content-hash",
+			is_private=1,
+			attached_to_doctype="Job Applicant",
+			attached_to_name="HR-APP-1",
+			attached_to_field="resume_attachment",
+			custom_av_scan_status="Clean",
+			custom_av_scan_engine="ClamAV",
+			custom_av_scanned_on="2026-08-14 04:00:00",
+			custom_cv_sha256="a" * 64,
+		)
+		mutated = frappe._dict(persisted.copy())
+		mutated.is_private = 0
+		mutated.file_url = "/files/cv.pdf"
+		mutated.attached_to_name = "HR-APP-OTHER"
+		with (
+			patch("hrms.security.candidate_cv.frappe.db.get_value", return_value=persisted),
+			patch("hrms.security.candidate_cv._is_recruitment_candidate_file", return_value=True),
+		):
+			with self.assertRaises(CandidateCVSecurityError):
+				validate_recruitment_cv_file_immutability(mutated)
+
+	def test_persisted_recruitment_cv_rejects_delete_but_allows_unchanged_validation(self):
+		persisted = frappe._dict(
+			name="FILE-CV",
+			file_name="cv.pdf",
+			file_url="/private/files/cv.pdf",
+			file_size=128,
+			content_hash="content-hash",
+			is_private=1,
+			attached_to_doctype="Job Applicant",
+			attached_to_name="HR-APP-1",
+			attached_to_field="resume_attachment",
+			custom_av_scan_status="Clean",
+			custom_av_scan_engine="ClamAV",
+			custom_av_scanned_on="2026-08-14 04:00:00",
+			custom_cv_sha256="a" * 64,
+		)
+		with (
+			patch("hrms.security.candidate_cv.frappe.db.get_value", return_value=persisted),
+			patch("hrms.security.candidate_cv._is_recruitment_candidate_file", return_value=True),
+		):
+			validate_recruitment_cv_file_immutability(frappe._dict(persisted.copy()))
+			with self.assertRaises(CandidateCVSecurityError):
+				prevent_recruitment_cv_file_deletion(persisted)
 
 	def test_clean_alias_cannot_read_bytes_shared_with_pending_recruitment_file(self):
 		alias = frappe._dict(

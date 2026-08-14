@@ -157,6 +157,7 @@ has_upload_permission = {"Employee": "erpnext.setup.doctype.employee.employee.ha
 
 override_doctype_class = {
 	"Employee": "hrms.overrides.employee_master.EmployeeMaster",
+	"File": "hrms.overrides.recruitment_file.RecruitmentProtectedFile",
 	"Timesheet": "hrms.overrides.employee_timesheet.EmployeeTimesheet",
 	"Payment Entry": "hrms.overrides.employee_payment_entry.EmployeePaymentEntry",
 	"Project": "hrms.overrides.employee_project.EmployeeProject",
@@ -253,7 +254,10 @@ doc_events = {
 		"before_submit": "hrms.recruitment.interview_governance.validate_ayp_interview_feedback",
 		"before_cancel": "hrms.recruitment.interview_governance.validate_ayp_feedback_cancellation",
 	},
-	"File": {"after_insert": "hrms.security.candidate_cv.mark_scanned_candidate_cv_file"},
+	"File": {
+		"before_validate": "hrms.security.candidate_cv.validate_recruitment_cv_file_immutability",
+		"after_insert": "hrms.security.candidate_cv.mark_scanned_candidate_cv_file",
+	},
 	"Project": {"validate": "hrms.controllers.employee_boarding_controller.update_employee_boarding_status"},
 	"Task": {"on_update": "hrms.controllers.employee_boarding_controller.update_task"},
 }

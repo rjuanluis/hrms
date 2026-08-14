@@ -37,6 +37,20 @@ PDF_VALIDATION_TIMEOUT_SECONDS = 7
 ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx", ".heic", ".heif", ".jpeg", ".jpg", ".png"}
 PDF_NAME_ESCAPE = re.compile(rb"#([0-9a-fA-F]{2})")
 CONSENT_WEB_FORM_ROUTE = RECRUITMENT_WEB_FORM_ROUTE
+IMMUTABLE_RECRUITMENT_FILE_FIELDS = (
+	"file_name",
+	"file_url",
+	"file_size",
+	"content_hash",
+	"is_private",
+	"attached_to_doctype",
+	"attached_to_name",
+	"attached_to_field",
+	"custom_av_scan_status",
+	"custom_av_scan_engine",
+	"custom_av_scanned_on",
+	"custom_cv_sha256",
+)
 
 
 class CandidateCVSecurityError(frappe.ValidationError):
@@ -399,6 +413,54 @@ def _file_url_is_quarantined(file_url: str, *, fallback=None) -> bool:
 	)
 
 
+def _persisted_recruitment_file(file_doc):
+	"""Return exact persisted authority when this File already belongs to recruitment."""
+
+	file_name = file_doc.get("name") if hasattr(file_doc, "get") else getattr(file_doc, "name", None)
+	if not file_name:
+		return None
+	persisted = frappe.db.get_value(
+		"File",
+		file_name,
+		["name", *IMMUTABLE_RECRUITMENT_FILE_FIELDS],
+		as_dict=True,
+	)
+	return persisted if persisted and _is_recruitment_candidate_file(persisted) else None
+
+
+def _immutable_file_value(fieldname: str, value):
+	if fieldname in {"file_size", "is_private"}:
+		return int(value or 0)
+	return str(value or "")
+
+
+def validate_recruitment_cv_file_immutability(file_doc, method=None) -> None:
+	"""Reject mutation before Frappe can move or rewrite a protected CV."""
+
+	persisted = _persisted_recruitment_file(file_doc)
+	if not persisted:
+		return
+	changed = [
+		fieldname
+		for fieldname in IMMUTABLE_RECRUITMENT_FILE_FIELDS
+		if _immutable_file_value(fieldname, file_doc.get(fieldname))
+		!= _immutable_file_value(fieldname, persisted.get(fieldname))
+	]
+	if changed:
+		raise CandidateCVSecurityError(
+			_("El archivo del CV es inmutable. Carga un CV nuevo para volver a ponerlo en cuarentena.")
+		)
+
+
+def prevent_recruitment_cv_file_deletion(file_doc, method=None) -> None:
+	"""Require explicit retention governance instead of generic File deletion."""
+
+	if _persisted_recruitment_file(file_doc) or _is_recruitment_candidate_file(file_doc):
+		raise CandidateCVSecurityError(
+			_("El archivo del CV no puede eliminarse fuera de una operación gobernada de retención.")
+		)
+
+
 def guard_candidate_cv_download() -> None:
 	"""Deny direct/API download of recruitment CVs until the exact File is Clean."""
 
@@ -419,8 +481,10 @@ def guard_candidate_cv_download() -> None:
 
 
 def has_candidate_cv_file_permission(doc, ptype=None, user=None, debug=False) -> bool:
-	"""Deny File reads through non-download APIs while a recruitment CV is quarantined."""
+	"""Deny mutation and quarantine reads for recruitment CV File rows."""
 
+	if ptype in {"write", "delete", "share"} and _is_recruitment_candidate_file(doc):
+		return False
 	if ptype in {"read", "select", "print", "email"}:
 		if _is_recruitment_candidate_file(doc) and doc.get("custom_av_scan_status") != "Clean":
 			return False

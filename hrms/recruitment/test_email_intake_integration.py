@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from email.message import EmailMessage
 from io import BytesIO
+from pathlib import Path
 from unittest.mock import patch
 
 from pypdf import PdfWriter
@@ -155,6 +156,56 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 		with patch.object(frappe, "sendmail") as sendmail:
 			notify_unreplied()
 		sendmail.assert_not_called()
+
+	def test_persisted_recruitment_cv_file_is_immutable_and_not_deletable(self):
+		email = f"immutable-cv-{frappe.generate_hash(length=12)}@example.com"
+		applicant = self._applicant(
+			email=email,
+			source=APPLICANT_SOURCE,
+			consent=0,
+			privacy_version="",
+		)
+		profile_name = applicant.custom_candidate_profile
+		file_doc = None
+		file_path = None
+		try:
+			pdf = BytesIO()
+			writer = PdfWriter()
+			writer.add_blank_page(width=72, height=72)
+			writer.write(pdf)
+			file_doc = frappe.get_doc(
+				{
+					"doctype": "File",
+					"file_name": f"immutable-cv-{frappe.generate_hash(length=10)}.pdf",
+					"is_private": 1,
+					"content": pdf.getvalue(),
+					"attached_to_doctype": "Job Applicant",
+					"attached_to_name": applicant.name,
+					"attached_to_field": "resume_attachment",
+				}
+			).insert(ignore_permissions=True)
+			file_path = Path(file_doc.get_full_path())
+			with patch.object(candidate_cv, "scan_bytes_with_clamd", return_value="stream: OK"):
+				candidate_cv.scan_stored_candidate_cv(file_doc)
+			file_doc.reload()
+			private_url = file_doc.file_url
+			file_doc.is_private = 0
+			with self.assertRaises(candidate_cv.CandidateCVSecurityError):
+				file_doc.save(ignore_permissions=True)
+			file_doc.reload()
+			self.assertEqual(file_doc.is_private, 1)
+			self.assertEqual(file_doc.file_url, private_url)
+			with self.assertRaises(candidate_cv.CandidateCVSecurityError):
+				frappe.delete_doc("File", file_doc.name, ignore_permissions=True)
+			self.assertTrue(frappe.db.exists("File", file_doc.name))
+		finally:
+			if file_doc:
+				frappe.db.delete("File", {"name": file_doc.name})
+			if file_path:
+				file_path.unlink(missing_ok=True)
+			frappe.db.delete("Job Applicant", {"name": applicant.name})
+			if profile_name:
+				frappe.db.delete("AYP Candidate Profile", {"name": profile_name})
 
 	def test_post_commit_enqueue_failure_is_recovered_from_durable_pending(self):
 		account_name = f"_Test Recruitment Recovery {frappe.generate_hash(length=8)}"
