@@ -627,8 +627,10 @@ class TestCandidateCVSecurity(unittest.TestCase):
 		mutated.is_private = 0
 		mutated.file_url = "/files/cv.pdf"
 		mutated.attached_to_name = "HR-APP-OTHER"
+		db = self._db_stub()
+		db.get_value.return_value = persisted
 		with (
-			patch("hrms.security.candidate_cv.frappe.db.get_value", return_value=persisted),
+			patch("hrms.security.candidate_cv.frappe.db", db),
 			patch("hrms.security.candidate_cv._is_recruitment_candidate_file", return_value=True),
 		):
 			with self.assertRaises(CandidateCVSecurityError):
@@ -650,8 +652,10 @@ class TestCandidateCVSecurity(unittest.TestCase):
 			custom_av_scanned_on="2026-08-14 04:00:00",
 			custom_cv_sha256="a" * 64,
 		)
+		db = self._db_stub()
+		db.get_value.return_value = persisted
 		with (
-			patch("hrms.security.candidate_cv.frappe.db.get_value", return_value=persisted),
+			patch("hrms.security.candidate_cv.frappe.db", db),
 			patch("hrms.security.candidate_cv._is_recruitment_candidate_file", return_value=True),
 		):
 			validate_recruitment_cv_file_immutability(frappe._dict(persisted.copy()))
