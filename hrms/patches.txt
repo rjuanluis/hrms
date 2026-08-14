@@ -55,3 +55,4 @@ hrms.patches.v16_0.add_ayp_candidate_document_durability #2026-08-12
 hrms.patches.v16_0.repair_unreachable_ayp_candidate_document_states #2026-08-12
 hrms.patches.v16_0.add_ayp_interview_governance #2026-08-11
 hrms.patches.v16_0.create_ayp_interview_kit #2026-08-11
+hrms.patches.v16_0.add_ayp_recruitment_email_intake #2026-08-13

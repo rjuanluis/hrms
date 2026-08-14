@@ -15,6 +15,7 @@ def setup_ayp_recruitment():
 		"create_ayp_candidate_profiles",
 		"add_ayp_candidate_review_fields",
 		"add_ayp_candidate_document_processing",
+		"add_ayp_recruitment_email_intake",
 		"add_ayp_interview_governance",
 		"create_ayp_interview_kit",
 	):

@@ -14,6 +14,7 @@ from hrms.recruitment import email_intake
 from hrms.recruitment.talent_pool import (
 	STATUS_ACTIVE,
 	STATUS_CURRENT_VACANCY_ONLY,
+	_save_profile_from_application,
 	initial_talent_pool_status,
 	should_activate_talent_pool_profile,
 )
@@ -28,6 +29,14 @@ class FakeDocument(SimpleNamespace):
 			setattr(self, fieldname, value)
 
 
+class FakeCallbackManager:
+	def __init__(self, callbacks):
+		self.callbacks = callbacks
+
+	def add(self, callback):
+		self.callbacks.append(callback)
+
+
 class TestRecruitmentEmailIntake(unittest.TestCase):
 	def _communication(self):
 		return FakeDocument(
@@ -36,6 +45,9 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 			sender_full_name="Demo Candidate",
 			reference_doctype="",
 			reference_name="",
+			custom_ayp_email_intake_status=email_intake.INTAKE_PENDING,
+			custom_ayp_email_intake_claim="",
+			custom_ayp_email_intake_applicant="",
 		)
 
 	def _file(self):
@@ -73,12 +85,65 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 		source = inspect.getsource(email_intake.process_recruitment_email)
 		self.assertNotIn("frappe.db.commit", source)
 
-	def test_hook_enqueues_only_after_commit(self):
-		source = inspect.getsource(email_intake.enqueue_recruitment_email_intake)
-		self.assertIn("frappe.db.after_commit.add", source)
-		self.assertIn("frappe.db.after_rollback.add", source)
-		self.assertIn("deduplicate=True", source)
-		self.assertIn("process_recruitment_email_safely", source)
+	def test_hook_persists_pending_before_enqueue_and_survives_enqueue_failure(self):
+		communication = self._communication()
+		communication.custom_ayp_email_intake_status = ""
+		callbacks = []
+		rollback_callbacks = []
+		with (
+			patch.object(email_intake, "_is_recruitment_email", return_value=True),
+			patch.object(email_intake, "_has_intake_fields", return_value=True),
+			patch.object(email_intake.frappe.db, "after_commit", FakeCallbackManager(callbacks)),
+			patch.object(email_intake.frappe.db, "after_rollback", FakeCallbackManager(rollback_callbacks)),
+			patch.object(email_intake, "_enqueue_pending_intake", side_effect=RuntimeError("redis down")),
+		):
+			email_intake.frappe.local.ayp_email_intake_callbacks = set()
+			email_intake.enqueue_recruitment_email_intake(communication)
+			self.assertEqual(communication.custom_ayp_email_intake_status, email_intake.INTAKE_PENDING)
+			self.assertEqual(len(callbacks), 1)
+			with self.assertRaisesRegex(RuntimeError, "redis down"):
+				callbacks[0]()
+		self.assertEqual(communication.custom_ayp_email_intake_status, email_intake.INTAKE_PENDING)
+		self.assertEqual(len(rollback_callbacks), 1)
+
+	def test_pending_enqueue_rechecks_committed_authoritative_state(self):
+		with (
+			patch.object(email_intake, "_has_intake_fields", return_value=True),
+			patch.object(
+				email_intake.frappe.db,
+				"get_value",
+				return_value=email_intake.INTAKE_PENDING,
+			),
+			patch.object(email_intake.frappe, "enqueue") as enqueue,
+		):
+			self.assertTrue(email_intake._enqueue_pending_intake("COMM-TEST-1"))
+		enqueue.assert_called_once()
+		self.assertEqual(enqueue.call_args.kwargs["job_id"], "ayp-email-intake:COMM-TEST-1")
+
+	def test_recovery_resets_stale_claim_and_registers_after_commit_enqueue(self):
+		callbacks = []
+		row = SimpleNamespace(name="COMM-STALE-1")
+		with (
+			patch.object(email_intake, "_has_intake_fields", return_value=True),
+			patch.object(email_intake.frappe.db, "sql", return_value=[row]),
+			patch.object(email_intake.frappe.db, "set_value") as set_value,
+			patch.object(email_intake.frappe.db, "after_commit", FakeCallbackManager(callbacks)),
+			patch.object(email_intake, "_enqueue_pending_intake", return_value=True) as enqueue,
+		):
+			self.assertEqual(email_intake.recover_stale_recruitment_email_intakes(), 1)
+			callbacks[0]()
+		values = set_value.call_args.args[2]
+		self.assertEqual(values[email_intake.INTAKE_STATUS_FIELD], email_intake.INTAKE_PENDING)
+		self.assertEqual(values["custom_ayp_email_intake_claim"], "")
+		enqueue.assert_called_once_with(row.name)
+
+	def test_recruitment_email_account_forces_auto_reply_off(self):
+		account = FakeDocument(email_id="empleos@aroypedal.com", enable_auto_reply=1)
+		email_intake.enforce_recruitment_email_account_safety(account)
+		self.assertEqual(account.enable_auto_reply, 0)
+		other = FakeDocument(email_id="ventas@aroypedal.com", enable_auto_reply=1)
+		email_intake.enforce_recruitment_email_account_safety(other)
+		self.assertEqual(other.enable_auto_reply, 1)
 
 	def test_email_profile_is_limited_to_current_vacancy(self):
 		self.assertEqual(
@@ -133,6 +198,7 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 				STATUS_CURRENT_VACANCY_ONLY,
 				"Sitio Web",
 				"ayp-candidates-v1",
+				1,
 			)
 		)
 		self.assertFalse(
@@ -140,9 +206,30 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 				STATUS_CURRENT_VACANCY_ONLY,
 				"Email Recursos Humanos",
 				"",
+				0,
+			)
+		)
+		self.assertFalse(
+			should_activate_talent_pool_profile(
+				STATUS_CURRENT_VACANCY_ONLY,
+				"Importación interna",
+				"ayp-candidates-v1",
+				0,
 			)
 		)
 		self.assertEqual(initial_talent_pool_status("Sitio Web"), STATUS_ACTIVE)
+
+	def test_profile_application_save_runs_inside_governance_context(self):
+		observed = []
+		profile = FakeDocument(
+			save=lambda **kwargs: observed.append(
+				(email_intake.frappe.flags.get("ayp_candidate_profile_governance_update"), kwargs)
+			)
+		)
+		previous = email_intake.frappe.flags.get("ayp_candidate_profile_governance_update")
+		_save_profile_from_application(profile)
+		self.assertEqual(observed, [(True, {"ignore_permissions": True})])
+		self.assertEqual(email_intake.frappe.flags.get("ayp_candidate_profile_governance_update"), previous)
 
 	def test_duplicate_message_links_email_and_keeps_private_evidence(self):
 		communication = self._communication()
@@ -165,6 +252,7 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 			link = stack.enter_context(patch.object(email_intake, "_link_communication"))
 			result = email_intake.process_recruitment_email(communication.name)
 		self.assertEqual(result["status"], "duplicate_message")
+		self.assertEqual(communication.custom_ayp_email_intake_status, email_intake.INTAKE_COMPLETED)
 		link.assert_called_once_with(communication, applicant.name)
 
 	def test_updated_cv_preserves_original_source_and_replaces_attachment(self):
@@ -192,6 +280,7 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 			stack.enter_context(patch.object(email_intake, "_link_communication"))
 			result = email_intake.process_recruitment_email(communication.name)
 		self.assertEqual(result["status"], "updated")
+		self.assertEqual(communication.custom_ayp_email_intake_status, email_intake.INTAKE_COMPLETED)
 		self.assertEqual(applicant.resume_attachment, file_doc.file_url)
 		self.assertEqual(applicant.source, "Sitio Web")
 		detach.assert_called_once_with(file_doc)

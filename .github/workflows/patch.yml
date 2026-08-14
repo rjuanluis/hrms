@@ -190,6 +190,10 @@ jobs:
           ./env/bin/python "$GITHUB_WORKSPACE/deploy/configure_standard.py"
           ./env/bin/python "$GITHUB_WORKSPACE/deploy/configure_standard.py"
 
+          bench --site "$AYP_SITE_NAME" run-tests \
+            --app hrms \
+            --module hrms.recruitment.test_email_intake_integration
+
           ./env/bin/python - <<'PY'
           import os
 
@@ -203,6 +207,13 @@ jobs:
           try:
               assert frappe.db.exists("Company", "ARO Y PEDAL SRL")
               assert frappe.db.exists("Job Applicant Source", "Email Recursos Humanos")
+
+              for fieldname in (
+                  "custom_ayp_email_intake_status",
+                  "custom_ayp_email_intake_claim",
+                  "custom_ayp_email_intake_applicant",
+              ):
+                  assert frappe.get_meta("Communication").has_field(fieldname), fieldname
 
               published_forms = frappe.get_all(
                   "Web Form",
@@ -231,6 +242,13 @@ jobs:
               )
               assert len(notification.recipients) == 1
               assert notification.recipients[0].receiver_by_document_field == "email_id"
+
+              unsafe_auto_reply = frappe.get_all(
+                  "Email Account",
+                  filters={"email_id": "empleos@aroypedal.com", "enable_auto_reply": 1},
+                  pluck="name",
+              )
+              assert unsafe_auto_reply == [], unsafe_auto_reply
 
               sent_count = frappe.db.count("Email Queue", {"status": "Sent"})
               assert sent_count == 0

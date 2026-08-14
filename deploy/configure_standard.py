@@ -11,7 +11,7 @@ from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
 from frappe.desk.page.setup_wizard.setup_wizard import setup_complete
 from frappe.translate import set_default_language
 
-from hrms.recruitment.email_intake import APPLICANT_SOURCE
+from hrms.recruitment.email_intake import APPLICANT_SOURCE, disable_existing_recruitment_mailbox_auto_reply
 from hrms.recruitment.talent_pool import backfill_candidate_profiles
 
 SITE = os.environ.get("AYP_SITE_NAME", "hr.aroypedal.com")
@@ -583,6 +583,7 @@ def main() -> None:
 		leave_period = ensure_active_leave_period()
 		ensure_recruitment_security_fields()
 		recruitment_email_source = ensure_recruitment_email_source()
+		recruitment_email_accounts = disable_existing_recruitment_mailbox_auto_reply()
 		candidate_profiles_backfilled = backfill_candidate_profiles()
 		recruitment_web_form, retired_recruitment_web_forms = ensure_recruitment_web_form()
 		enable_restricted_guest_cv_uploads()
@@ -603,6 +604,7 @@ def main() -> None:
 				"leave_period": leave_period,
 				"recruitment_web_form": recruitment_web_form,
 				"recruitment_email_source": recruitment_email_source,
+				"recruitment_email_accounts_auto_reply_disabled": recruitment_email_accounts,
 				"retired_recruitment_web_forms": retired_recruitment_web_forms,
 				"candidate_profiles_backfilled": candidate_profiles_backfilled,
 				"guest_upload_doctypes": ["Job Applicant"],

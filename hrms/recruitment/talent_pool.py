@@ -5,6 +5,7 @@ from functools import partial
 import frappe
 from frappe import _
 
+from hrms.recruitment.candidate_profile_governance import candidate_profile_governance_update
 from hrms.recruitment.matching import (
 	DEDUPE_NEW,
 	DEDUPE_REVIEW,
@@ -176,13 +177,24 @@ def initial_talent_pool_status(source: str | None) -> str:
 
 
 def should_activate_talent_pool_profile(
-	profile_status: str, source: str | None, privacy_version: str | None
+	profile_status: str,
+	source: str | None,
+	privacy_version: str | None,
+	data_processing_consent: bool | int | None,
 ) -> bool:
 	return bool(
 		profile_status == STATUS_CURRENT_VACANCY_ONLY
+		and data_processing_consent
 		and privacy_version
 		and source != "Email Recursos Humanos"
 	)
+
+
+@candidate_profile_governance_update
+def _save_profile_from_application(profile) -> None:
+	"""Persist application-derived profile changes through the governed server path."""
+
+	profile.save(ignore_permissions=True)
 
 
 def _create_candidate_profile(doc, *, email: str, phone: str, cv_sha256: str, dedupe_status: str) -> str:
@@ -366,6 +378,7 @@ def sync_candidate_profile(doc, method=None) -> None:
 		profile.talent_pool_status,
 		doc.get("source"),
 		doc.get("custom_privacy_notice_version"),
+		doc.get("custom_data_processing_consent"),
 	):
 		profile.talent_pool_status = STATUS_ACTIVE
 		profile.privacy_notice_version = doc.get("custom_privacy_notice_version")
@@ -375,4 +388,4 @@ def sync_candidate_profile(doc, method=None) -> None:
 		profile.application_count = application_count
 		changed = True
 	if changed:
-		profile.save(ignore_permissions=True)
+		_save_profile_from_application(profile)

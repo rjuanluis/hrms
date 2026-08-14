@@ -237,6 +237,9 @@ doc_events = {
 	"Communication": {
 		"on_update": "hrms.recruitment.email_intake.enqueue_recruitment_email_intake",
 	},
+	"Email Account": {
+		"validate": "hrms.recruitment.email_intake.enforce_recruitment_email_account_safety",
+	},
 	"Interview": {
 		"validate": "hrms.recruitment.interview_governance.validate_interview",
 		"before_submit": "hrms.recruitment.interview_governance.validate_ayp_interview_submission",
@@ -256,6 +259,7 @@ doc_events = {
 
 scheduler_events = {
 	"all": [
+		"hrms.recruitment.email_intake.recover_stale_recruitment_email_intakes",
 		"hrms.hr.doctype.interview.interview.send_interview_reminder",
 	],
 	"hourly": [

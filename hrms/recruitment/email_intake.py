@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import uuid
 
 import frappe
+from frappe.utils import now_datetime
 
 from hrms.recruitment.email_intake_domain import (
 	EmailIntakeDomainError,
@@ -17,6 +19,12 @@ RECRUITMENT_MAILBOX = "empleos@aroypedal.com"
 DEFAULT_JOB_OPENING = "HR-OPN-2026-0001"
 APPLICANT_SOURCE = "Email Recursos Humanos"
 QUEUE_NAME = "documents"
+INTAKE_PENDING = "Pendiente"
+INTAKE_PROCESSING = "Procesando"
+INTAKE_COMPLETED = "Completado"
+INTAKE_BLOCKED = "Bloqueado"
+INTAKE_STATUS_FIELD = "custom_ayp_email_intake_status"
+INTAKE_STALE_MINUTES = 15
 
 
 def _configured_mailbox() -> str:
@@ -39,11 +47,80 @@ def _is_recruitment_email(doc) -> bool:
 	return str(email_id or "").strip().casefold() == _configured_mailbox()
 
 
+def _has_intake_fields() -> bool:
+	return frappe.db.has_column("Communication", INTAKE_STATUS_FIELD)
+
+
+def enforce_recruitment_email_account_safety(doc, method=None) -> None:
+	"""A recruitment inbox must never use Frappe's independent auto-reply path."""
+
+	if str(doc.email_id or "").strip().casefold() == _configured_mailbox():
+		doc.enable_auto_reply = 0
+
+
+def disable_existing_recruitment_mailbox_auto_reply() -> list[str]:
+	"""Disable and read back auto-reply on already-created recruitment accounts."""
+
+	accounts = frappe.get_all(
+		"Email Account",
+		filters={"email_id": _configured_mailbox()},
+		pluck="name",
+	)
+	for account_name in accounts:
+		frappe.db.set_value("Email Account", account_name, "enable_auto_reply", 0, update_modified=False)
+	unsafe = (
+		frappe.get_all(
+			"Email Account",
+			filters={"name": ["in", accounts], "enable_auto_reply": 1},
+			pluck="name",
+		)
+		if accounts
+		else []
+	)
+	if unsafe:
+		raise RuntimeError(f"Auto-reply sigue activo en cuentas de reclutamiento: {unsafe}")
+	return accounts
+
+
+def _enqueue_pending_intake(communication_name: str) -> bool:
+	"""Enqueue only the authoritative committed Pending state."""
+
+	if not _has_intake_fields():
+		return False
+	status = frappe.db.get_value("Communication", communication_name, INTAKE_STATUS_FIELD)
+	if status != INTAKE_PENDING:
+		return False
+	frappe.enqueue(
+		"hrms.recruitment.email_intake.process_recruitment_email_safely",
+		queue=QUEUE_NAME,
+		timeout=600,
+		job_id=f"ayp-email-intake:{communication_name}",
+		deduplicate=True,
+		communication_name=communication_name,
+	)
+	return True
+
+
 def enqueue_recruitment_email_intake(doc, method=None) -> None:
-	"""Queue one native inbound Communication after Frappe has saved attachments."""
+	"""Persist enqueue intent with the email; after-commit enqueue is only an accelerator."""
 
 	if not _is_recruitment_email(doc) or (doc.reference_doctype == "Job Applicant" and doc.reference_name):
 		return
+	if not _has_intake_fields():
+		frappe.throw("El estado durable del intake de reclutamiento no está instalado; ejecuta migrate.")
+	if doc.get(INTAKE_STATUS_FIELD) in (INTAKE_COMPLETED, INTAKE_BLOCKED):
+		return
+	doc.db_set(
+		{
+			INTAKE_STATUS_FIELD: INTAKE_PENDING,
+			"custom_ayp_email_intake_queued_on": now_datetime(),
+			"custom_ayp_email_intake_started_on": None,
+			"custom_ayp_email_intake_claim": "",
+			"custom_ayp_email_intake_completed_on": None,
+			"custom_ayp_email_intake_error_code": "",
+		},
+		update_modified=False,
+	)
 	callback_key = f"ayp-email-intake:{doc.name}"
 	registered = getattr(frappe.local, "ayp_email_intake_callbacks", set())
 	frappe.local.ayp_email_intake_callbacks = registered
@@ -54,14 +131,7 @@ def enqueue_recruitment_email_intake(doc, method=None) -> None:
 
 	def enqueue_after_commit():
 		try:
-			frappe.enqueue(
-				"hrms.recruitment.email_intake.process_recruitment_email_safely",
-				queue=QUEUE_NAME,
-				timeout=600,
-				job_id=callback_key,
-				deduplicate=True,
-				communication_name=doc.name,
-			)
+			_enqueue_pending_intake(doc.name)
 		finally:
 			registered.discard(callback_key)
 
@@ -118,6 +188,41 @@ def _link_communication(communication, applicant_name: str) -> None:
 	)
 
 
+def _claim_intake(communication) -> str | None:
+	status = communication.get(INTAKE_STATUS_FIELD)
+	if status == INTAKE_COMPLETED:
+		return None
+	if status != INTAKE_PENDING:
+		raise EmailIntakeDomainError("El correo no tiene un estado Pendiente recuperable.")
+	claim = uuid.uuid4().hex
+	communication.db_set(
+		{
+			INTAKE_STATUS_FIELD: INTAKE_PROCESSING,
+			"custom_ayp_email_intake_started_on": now_datetime(),
+			"custom_ayp_email_intake_claim": claim,
+		},
+		update_modified=False,
+	)
+	return claim
+
+
+def _complete_intake(communication, *, claim: str, applicant_name: str) -> None:
+	if communication.get(INTAKE_STATUS_FIELD) != INTAKE_PROCESSING:
+		raise EmailIntakeDomainError("El estado del intake cambió durante el procesamiento.")
+	if communication.get("custom_ayp_email_intake_claim") != claim:
+		raise EmailIntakeDomainError("El claim del intake cambió durante el procesamiento.")
+	communication.db_set(
+		{
+			INTAKE_STATUS_FIELD: INTAKE_COMPLETED,
+			"custom_ayp_email_intake_completed_on": now_datetime(),
+			"custom_ayp_email_intake_claim": "",
+			"custom_ayp_email_intake_error_code": "",
+			"custom_ayp_email_intake_applicant": applicant_name,
+		},
+		update_modified=False,
+	)
+
+
 def _assert_candidate_file_link(file_name: str, applicant_name: str) -> None:
 	link = frappe.db.get_value(
 		"File",
@@ -152,9 +257,17 @@ def process_recruitment_email(communication_name: str) -> dict:
 		(communication_name,),
 	)
 	communication = frappe.get_doc("Communication", communication_name, for_update=True)
+	claim = _claim_intake(communication)
+	if claim is None:
+		return {
+			"status": "already_processed",
+			"applicant": communication.get("custom_ayp_email_intake_applicant")
+			or communication.reference_name,
+		}
 	if not _is_recruitment_email(communication):
-		return {"status": "ignored"}
+		raise EmailIntakeDomainError("El correo Pendiente ya no corresponde al buzón de reclutamiento.")
 	if communication.reference_doctype == "Job Applicant" and communication.reference_name:
+		_complete_intake(communication, claim=claim, applicant_name=communication.reference_name)
 		return {"status": "already_processed", "applicant": communication.reference_name}
 
 	job_opening = _configured_job_opening()
@@ -179,6 +292,7 @@ def process_recruitment_email(communication_name: str) -> dict:
 		applicant = frappe.get_doc("Job Applicant", existing_name, for_update=True)
 		if (applicant.custom_cv_sha256 or "") == cv_sha256:
 			_link_communication(communication, applicant.name)
+			_complete_intake(communication, claim=claim, applicant_name=applicant.name)
 			return {
 				"status": "duplicate_message",
 				"applicant": applicant.name,
@@ -204,6 +318,7 @@ def process_recruitment_email(communication_name: str) -> dict:
 		status = "created"
 
 	_link_communication(communication, applicant.name)
+	_complete_intake(communication, claim=claim, applicant_name=applicant.name)
 	return {
 		"status": status,
 		"applicant": applicant.name,
@@ -213,15 +328,75 @@ def process_recruitment_email(communication_name: str) -> dict:
 
 
 def process_recruitment_email_safely(communication_name: str) -> dict:
-	"""Optional manual wrapper that records a PII-free error title for triage."""
+	"""Record a PII-free terminal block while transient failures remain recoverable Pending work."""
 
 	try:
 		return process_recruitment_email(communication_name)
-	except (CandidateCVSecurityError, EmailIntakeDomainError):
+	except (CandidateCVSecurityError, EmailIntakeDomainError) as exc:
 		frappe.db.rollback()
 		fingerprint = hashlib.sha256(communication_name.encode()).hexdigest()[:12]
+		if _has_intake_fields() and frappe.db.exists("Communication", communication_name):
+			frappe.db.sql(
+				"SELECT name FROM `tabCommunication` WHERE name = %s FOR UPDATE",
+				(communication_name,),
+			)
+			frappe.db.set_value(
+				"Communication",
+				communication_name,
+				{
+					INTAKE_STATUS_FIELD: INTAKE_BLOCKED,
+					"custom_ayp_email_intake_started_on": None,
+					"custom_ayp_email_intake_claim": "",
+					"custom_ayp_email_intake_error_code": type(exc).__name__,
+				},
+				update_modified=False,
+			)
+			frappe.db.commit()
 		frappe.log_error(
 			title=f"Recruitment email intake blocked {fingerprint}",
 			message=frappe.get_traceback(),
 		)
 		raise
+
+
+def recover_stale_recruitment_email_intakes() -> int:
+	"""Recover committed Pending work and abandoned Processing claims."""
+
+	if not _has_intake_fields():
+		return 0
+	rows = frappe.db.sql(
+		f"""
+		SELECT name
+		FROM `tabCommunication`
+		WHERE (
+			({INTAKE_STATUS_FIELD} = %s AND (
+				custom_ayp_email_intake_queued_on IS NULL
+				OR custom_ayp_email_intake_queued_on < DATE_SUB(NOW(), INTERVAL {INTAKE_STALE_MINUTES} MINUTE)
+			))
+			OR ({INTAKE_STATUS_FIELD} = %s AND (
+				custom_ayp_email_intake_started_on IS NULL
+				OR custom_ayp_email_intake_started_on < DATE_SUB(NOW(), INTERVAL {INTAKE_STALE_MINUTES} MINUTE)
+			))
+		)
+		ORDER BY creation, name
+		LIMIT 100
+		FOR UPDATE
+		""",
+		(INTAKE_PENDING, INTAKE_PROCESSING),
+		as_dict=True,
+	)
+	for row in rows:
+		frappe.db.set_value(
+			"Communication",
+			row.name,
+			{
+				INTAKE_STATUS_FIELD: INTAKE_PENDING,
+				"custom_ayp_email_intake_queued_on": now_datetime(),
+				"custom_ayp_email_intake_started_on": None,
+				"custom_ayp_email_intake_claim": "",
+				"custom_ayp_email_intake_error_code": "",
+			},
+			update_modified=False,
+		)
+		frappe.db.after_commit.add(lambda name=row.name: _enqueue_pending_intake(name))
+	return len(rows)
