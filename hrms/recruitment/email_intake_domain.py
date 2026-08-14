@@ -3,8 +3,6 @@ from __future__ import annotations
 from email.utils import parseaddr
 from pathlib import Path
 
-from hrms.recruitment.matching import names_are_compatible
-
 EMAIL_CV_EXTENSIONS = frozenset({".pdf", ".docx"})
 
 
@@ -67,8 +65,8 @@ def same_vacancy_application(
 			"Las señales del candidato coinciden con varias solicitudes de la misma vacante."
 		)
 	name, (row, signals) = matched.popitem()
-	if len(signals) == 1 and not names_are_compatible(applicant_name, row.get("applicant_name")):
+	if len(signals) == 1:
 		raise EmailIntakeDomainError(
-			"La única señal coincidente pertenece a una solicitud con nombre incompatible."
+			"Una sola señal coincide con otra solicitud; el posible cambio requiere revisión manual."
 		)
 	return name

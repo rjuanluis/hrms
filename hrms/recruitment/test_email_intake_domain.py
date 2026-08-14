@@ -86,16 +86,16 @@ class TestEmailIntakeDomain(unittest.TestCase):
 				rows, email="ana@example.com", cv_sha256="abc", applicant_name="Ana Pérez"
 			)
 
-	def test_same_vacancy_application_requires_compatible_name_for_one_signal(self):
+	def test_same_vacancy_application_routes_even_compatible_one_signal_to_review(self):
 		rows = [
 			{
 				"name": "APP-1",
-				"applicant_name": "Carlos Gómez",
+				"applicant_name": "Ana Pérez",
 				"custom_normalized_email": "familia@example.com",
 				"custom_cv_sha256": "old",
 			}
 		]
-		with self.assertRaisesRegex(EmailIntakeDomainError, "nombre incompatible"):
+		with self.assertRaisesRegex(EmailIntakeDomainError, "revisión manual"):
 			same_vacancy_application(
 				rows,
 				email="familia@example.com",

@@ -9,6 +9,7 @@ import struct
 import subprocess
 import sys
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 from xml.etree import ElementTree
 
@@ -29,6 +30,22 @@ PRIVACY_NOTICE_VERSION = "AYP-RH-2026-07-17-v3"
 
 class CandidateCVSecurityError(frappe.ValidationError):
 	pass
+
+
+class CandidateCVInfrastructureError(RuntimeError):
+	"""Retryable failure of infrastructure required to validate a CV."""
+
+
+@contextmanager
+def candidate_cv_file_identity(file_name: str):
+	"""Bind validation and attachment hooks to one exact File row."""
+
+	previous = getattr(frappe.local, "ayp_candidate_cv_file_name", None)
+	frappe.local.ayp_candidate_cv_file_name = file_name
+	try:
+		yield
+	finally:
+		frappe.local.ayp_candidate_cv_file_name = previous
 
 
 def _file_has_column(fieldname: str) -> bool:
@@ -214,7 +231,7 @@ def _scan_candidate_cv(content: bytes) -> None:
 			title="Candidate CV antivirus unavailable",
 			message=f"ClamAV validation failed: {type(exc).__name__}: {exc}",
 		)
-		raise CandidateCVSecurityError(
+		raise CandidateCVInfrastructureError(
 			_("No pudimos validar el CV de forma segura. Intenta nuevamente en unos minutos.")
 		) from exc
 
@@ -314,6 +331,71 @@ def _verified_candidate_cv_sha256(file_record) -> str:
 	return actual_sha256
 
 
+def _candidate_file_record(doc, fields):
+	exact_name = getattr(frappe.local, "ayp_candidate_cv_file_name", None)
+	if exact_name:
+		return frappe.db.get_value("File", exact_name, fields, as_dict=True)
+	return frappe.db.get_value("File", {"file_url": doc.resume_attachment}, fields, as_dict=True)
+
+
+def _is_recruitment_candidate_file(file_record) -> bool:
+	if Path(str(file_record.file_name or "")).suffix.casefold() not in {".pdf", ".docx"}:
+		return False
+	if file_record.attached_to_doctype == "Communication" and file_record.attached_to_name:
+		email_account = frappe.db.get_value("Communication", file_record.attached_to_name, "email_account")
+		email_id = frappe.db.get_value("Email Account", email_account, "email_id") if email_account else None
+		configured = str(frappe.conf.get("ayp_recruitment_mailbox") or "empleos@aroypedal.com")
+		return str(email_id or "").strip().casefold() == configured.strip().casefold()
+	if file_record.attached_to_doctype == "Job Applicant" and file_record.attached_to_name:
+		return (
+			frappe.db.get_value("Job Applicant", file_record.attached_to_name, "source")
+			== "Email Recursos Humanos"
+		)
+	return False
+
+
+def guard_candidate_cv_download() -> None:
+	"""Deny direct/API download of recruitment CVs until the exact File is Clean."""
+
+	request_path = str(getattr(frappe.request, "path", "") or "")
+	file_url = (
+		request_path
+		if request_path.startswith("/private/files/")
+		else str(frappe.form_dict.get("file_url") or "")
+	)
+	if not file_url.startswith("/private/files/"):
+		return
+	filters = {"file_url": file_url}
+	if frappe.form_dict.get("fid"):
+		filters["name"] = str(frappe.form_dict.fid)
+	files = frappe.get_all(
+		"File",
+		filters=filters,
+		fields=[
+			"name",
+			"file_name",
+			"attached_to_doctype",
+			"attached_to_name",
+			"custom_av_scan_status",
+		],
+	)
+	if any(
+		_is_recruitment_candidate_file(file_record) and file_record.custom_av_scan_status != "Clean"
+		for file_record in files
+	):
+		frappe.throw(
+			_("This candidate CV is quarantined until its security scan completes."), frappe.PermissionError
+		)
+
+
+def has_candidate_cv_file_permission(doc, ptype=None, user=None, debug=False) -> bool:
+	"""Deny File reads through non-download APIs while a recruitment CV is quarantined."""
+
+	if ptype in {"read", "select", "print", "email"} and _is_recruitment_candidate_file(doc):
+		return doc.get("custom_av_scan_status") == "Clean"
+	return True
+
+
 def validate_job_applicant_cv(doc, method=None) -> None:
 	if frappe.session.user == "Guest" and not doc.get("custom_data_processing_consent"):
 		raise CandidateCVSecurityError(_("Debes aceptar el aviso de privacidad para enviar la solicitud."))
@@ -352,14 +434,10 @@ def validate_job_applicant_cv(doc, method=None) -> None:
 		"attached_to_field",
 		"custom_cv_sha256",
 	]
-	file_record = frappe.db.get_value(
-		"File",
-		{"file_url": doc.resume_attachment},
-		file_fields,
-		as_dict=True,
-	)
+	file_record = _candidate_file_record(doc, file_fields)
 	invalid_attachment = (
 		not file_record
+		or file_record.file_url != doc.resume_attachment
 		or not file_record.is_private
 		or not file_record.file_url.startswith("/private/files/")
 		or not file_record.file_name
@@ -385,7 +463,8 @@ def attach_job_applicant_cv(doc, method=None) -> None:
 	if not doc.resume_attachment:
 		return
 
-	file_name = frappe.db.get_value("File", {"file_url": doc.resume_attachment}, "name")
+	exact_name = getattr(frappe.local, "ayp_candidate_cv_file_name", None)
+	file_name = exact_name or frappe.db.get_value("File", {"file_url": doc.resume_attachment}, "name")
 	if file_name:
 		frappe.db.set_value(
 			"File",

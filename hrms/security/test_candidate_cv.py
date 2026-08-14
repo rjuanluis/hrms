@@ -20,11 +20,17 @@ from pypdf.generic import DictionaryObject, IndirectObject, NameObject, TextStri
 import frappe
 
 from hrms.security.candidate_cv import (
+	CandidateCVInfrastructureError,
 	CandidateCVSecurityError,
+	_candidate_file_record,
 	_decode_pdf_name,
 	_mark_file_clean,
+	_scan_candidate_cv,
 	_verified_candidate_cv_sha256,
+	candidate_cv_file_identity,
+	guard_candidate_cv_download,
 	guard_candidate_cv_upload,
+	has_candidate_cv_file_permission,
 	mark_scanned_candidate_cv_file,
 	scan_bytes_with_clamd,
 	scan_stored_candidate_cv,
@@ -362,6 +368,60 @@ class TestCandidateCVSecurity(unittest.TestCase):
 		with patch("socket.create_connection", return_value=connection):
 			with self.assertRaises(CandidateCVSecurityError):
 				scan_bytes_with_clamd(b"eicar", host="clamav", port=3310)
+
+	def test_clamd_unavailability_is_retryable_infrastructure_failure(self):
+		with (
+			patch.dict(os.environ, {"CLAMAV_HOST": "clamav", "CLAMAV_PORT": "3310"}),
+			patch(
+				"hrms.security.candidate_cv.scan_bytes_with_clamd",
+				side_effect=ConnectionRefusedError("clamav down"),
+			),
+			patch("hrms.security.candidate_cv.frappe.log_error"),
+		):
+			with self.assertRaises(CandidateCVInfrastructureError):
+				_scan_candidate_cv(b"clean")
+
+	def test_exact_file_identity_overrides_duplicate_file_url_lookup(self):
+		doc = SimpleNamespace(resume_attachment="/private/files/shared.pdf")
+		with (
+			candidate_cv_file_identity("FILE-EXACT"),
+			patch(
+				"hrms.security.candidate_cv.frappe.db.get_value",
+				return_value={"name": "FILE-EXACT"},
+			) as get_value,
+		):
+			self.assertEqual(_candidate_file_record(doc, ["name"]), {"name": "FILE-EXACT"})
+		get_value.assert_called_once_with("File", "FILE-EXACT", ["name"], as_dict=True)
+
+	def test_recruitment_cv_download_is_quarantined_until_clean(self):
+		frappe.local.request = SimpleNamespace(path="/private/files/cv.pdf")
+		frappe.local.form_dict = frappe._dict()
+		pending = frappe._dict(
+			name="FILE-PENDING",
+			file_name="cv.pdf",
+			attached_to_doctype="Communication",
+			attached_to_name="COMM-1",
+			custom_av_scan_status="",
+		)
+		with (
+			patch("hrms.security.candidate_cv.frappe.get_all", return_value=[pending]),
+			patch("hrms.security.candidate_cv._is_recruitment_candidate_file", return_value=True),
+		):
+			with self.assertRaises(frappe.PermissionError):
+				guard_candidate_cv_download()
+		pending.custom_av_scan_status = "Clean"
+		with (
+			patch("hrms.security.candidate_cv.frappe.get_all", return_value=[pending]),
+			patch("hrms.security.candidate_cv._is_recruitment_candidate_file", return_value=True),
+		):
+			guard_candidate_cv_download()
+
+	def test_recruitment_cv_file_permission_denies_non_download_read_until_clean(self):
+		pending = frappe._dict(custom_av_scan_status="")
+		with patch("hrms.security.candidate_cv._is_recruitment_candidate_file", return_value=True):
+			self.assertFalse(has_candidate_cv_file_permission(pending, ptype="read"))
+			pending.custom_av_scan_status = "Clean"
+			self.assertTrue(has_candidate_cv_file_permission(pending, ptype="read"))
 
 	def test_clean_file_persists_preflight_sha256_when_field_exists(self):
 		file_doc = SimpleNamespace(

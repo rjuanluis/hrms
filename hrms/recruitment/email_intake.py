@@ -13,7 +13,12 @@ from hrms.recruitment.email_intake_domain import (
 	sender_identity,
 )
 from hrms.recruitment.talent_pool import acquire_candidate_identity_lock
-from hrms.security.candidate_cv import CandidateCVSecurityError, scan_stored_candidate_cv
+from hrms.security.candidate_cv import (
+	CandidateCVInfrastructureError,
+	CandidateCVSecurityError,
+	candidate_cv_file_identity,
+	scan_stored_candidate_cv,
+)
 
 RECRUITMENT_MAILBOX = "empleos@aroypedal.com"
 DEFAULT_JOB_OPENING = "HR-OPN-2026-0001"
@@ -41,6 +46,7 @@ def _is_recruitment_email(doc) -> bool:
 		or doc.communication_medium != "Email"
 		or not doc.email_account
 		or not doc.has_attachment
+		or str(doc.get("email_status") or "").casefold() in {"spam", "trash"}
 	):
 		return False
 	email_id = frappe.db.get_value("Email Account", doc.email_account, "email_id")
@@ -56,6 +62,7 @@ def enforce_recruitment_email_account_safety(doc, method=None) -> None:
 
 	if str(doc.email_id or "").strip().casefold() == _configured_mailbox():
 		doc.enable_auto_reply = 0
+		doc.notify_if_unreplied = 0
 
 
 def disable_existing_recruitment_mailbox_auto_reply() -> list[str]:
@@ -67,16 +74,19 @@ def disable_existing_recruitment_mailbox_auto_reply() -> list[str]:
 		pluck="name",
 	)
 	for account_name in accounts:
-		frappe.db.set_value("Email Account", account_name, "enable_auto_reply", 0, update_modified=False)
-	unsafe = (
-		frappe.get_all(
+		frappe.db.set_value(
 			"Email Account",
-			filters={"name": ["in", accounts], "enable_auto_reply": 1},
-			pluck="name",
+			account_name,
+			{"enable_auto_reply": 0, "notify_if_unreplied": 0},
+			update_modified=False,
 		)
-		if accounts
-		else []
-	)
+	unsafe = [
+		account_name
+		for account_name in accounts
+		if any(
+			frappe.db.get_value("Email Account", account_name, ("enable_auto_reply", "notify_if_unreplied"))
+		)
+	]
 	if unsafe:
 		raise RuntimeError(f"Auto-reply sigue activo en cuentas de reclutamiento: {unsafe}")
 	return accounts
@@ -139,16 +149,19 @@ def enqueue_recruitment_email_intake(doc, method=None) -> None:
 
 
 def _candidate_files(communication_name: str) -> list[dict]:
-	return frappe.get_all(
-		"File",
-		filters={
-			"attached_to_doctype": "Communication",
-			"attached_to_name": communication_name,
-			"is_private": 1,
-		},
-		fields=["name", "file_name", "file_url", "file_size", "creation"],
-		order_by="creation asc, name asc",
-		limit_page_length=20,
+	return frappe.db.sql(
+		"""
+		SELECT name, file_name, file_url, file_size, creation
+		FROM `tabFile`
+		WHERE attached_to_doctype = 'Communication'
+			AND attached_to_name = %s
+			AND is_private = 1
+			AND (LOWER(file_name) LIKE %s OR LOWER(file_name) LIKE %s)
+		ORDER BY creation, name
+		LIMIT 2
+		""",
+		(communication_name, "%.pdf", "%.docx"),
+		as_dict=True,
 	)
 
 
@@ -299,21 +312,20 @@ def process_recruitment_email(communication_name: str) -> dict:
 				"communication": communication.name,
 				"cv_sha256": cv_sha256,
 			}
-		_detach_for_candidate(file_doc)
-		applicant.resume_attachment = file_doc.file_url
-		applicant.save(ignore_permissions=True)
-		_assert_candidate_file_link(file_doc.name, applicant.name)
-		status = "updated"
+		raise EmailIntakeDomainError(
+			"El cambio de CV requiere revisión manual antes de reemplazar evidencia existente."
+		)
 	else:
 		_detach_for_candidate(file_doc)
-		applicant = frappe.get_doc(
-			_new_applicant_data(
-				applicant_name=applicant_name,
-				email=email,
-				job_opening=job_opening,
-				resume_attachment=file_doc.file_url,
-			)
-		).insert(ignore_permissions=True)
+		with candidate_cv_file_identity(file_doc.name):
+			applicant = frappe.get_doc(
+				_new_applicant_data(
+					applicant_name=applicant_name,
+					email=email,
+					job_opening=job_opening,
+					resume_attachment=file_doc.file_url,
+				)
+			).insert(ignore_permissions=True)
 		_assert_candidate_file_link(file_doc.name, applicant.name)
 		status = "created"
 
@@ -332,6 +344,9 @@ def process_recruitment_email_safely(communication_name: str) -> dict:
 
 	try:
 		return process_recruitment_email(communication_name)
+	except CandidateCVInfrastructureError:
+		frappe.db.rollback()
+		raise
 	except (CandidateCVSecurityError, EmailIntakeDomainError) as exc:
 		frappe.db.rollback()
 		fingerprint = hashlib.sha256(communication_name.encode()).hexdigest()[:12]
@@ -340,19 +355,43 @@ def process_recruitment_email_safely(communication_name: str) -> dict:
 				"SELECT name FROM `tabCommunication` WHERE name = %s FOR UPDATE",
 				(communication_name,),
 			)
-			frappe.db.set_value(
+			state = frappe.db.get_value(
 				"Communication",
 				communication_name,
-				{
-					INTAKE_STATUS_FIELD: INTAKE_BLOCKED,
-					"custom_ayp_email_intake_started_on": None,
-					"custom_ayp_email_intake_claim": "",
-					"custom_ayp_email_intake_error_code": type(exc).__name__,
-				},
-				update_modified=False,
+				[
+					INTAKE_STATUS_FIELD,
+					"custom_ayp_email_intake_applicant",
+					"custom_ayp_email_intake_completed_on",
+					"reference_doctype",
+					"reference_name",
+				],
+				as_dict=True,
 			)
-			# Persist terminal Blocked state before re-raising; the job runner rolls back exceptions.
-			frappe.db.commit()  # nosemgrep
+			if state and (
+				state.get(INTAKE_STATUS_FIELD) == INTAKE_COMPLETED
+				or state.get("custom_ayp_email_intake_applicant")
+				or state.get("custom_ayp_email_intake_completed_on")
+				or (state.get("reference_doctype") == "Job Applicant" and state.get("reference_name"))
+			):
+				return {
+					"status": "already_processed",
+					"applicant": state.get("custom_ayp_email_intake_applicant")
+					or state.get("reference_name"),
+				}
+			if state and state.get(INTAKE_STATUS_FIELD) == INTAKE_PENDING:
+				frappe.db.set_value(
+					"Communication",
+					communication_name,
+					{
+						INTAKE_STATUS_FIELD: INTAKE_BLOCKED,
+						"custom_ayp_email_intake_started_on": None,
+						"custom_ayp_email_intake_claim": "",
+						"custom_ayp_email_intake_error_code": type(exc).__name__,
+					},
+					update_modified=False,
+				)
+				# Persist terminal Blocked state before re-raising; the job runner rolls back exceptions.
+				frappe.db.commit()  # nosemgrep
 		frappe.log_error(
 			title=f"Recruitment email intake blocked {fingerprint}",
 			message=frappe.get_traceback(),

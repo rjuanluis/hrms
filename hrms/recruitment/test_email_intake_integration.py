@@ -3,6 +3,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import frappe
+from frappe.email.doctype.email_account.email_account import notify_unreplied
 from frappe.tests import IntegrationTestCase
 from frappe.utils import add_to_date, now_datetime
 
@@ -57,7 +58,7 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 		)
 		return queue_count, communication_count
 
-	def test_recruitment_email_account_cannot_enable_auto_reply(self):
+	def test_recruitment_email_account_cannot_enable_automatic_mail(self):
 		account = frappe.get_doc(
 			{
 				"doctype": "Email Account",
@@ -66,12 +67,25 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 				"enable_incoming": 0,
 				"enable_outgoing": 0,
 				"enable_auto_reply": 1,
+				"notify_if_unreplied": 1,
 			}
 		).insert(ignore_permissions=True)
 		self.assertEqual(account.enable_auto_reply, 0)
-		self.assertEqual(frappe.db.get_value("Email Account", account.name, "enable_auto_reply"), 0)
+		self.assertEqual(account.notify_if_unreplied, 0)
+		frappe.db.set_value(
+			"Email Account",
+			account.name,
+			{"enable_auto_reply": 1, "notify_if_unreplied": 1, "enable_incoming": 1},
+			update_modified=False,
+		)
 		self.assertIn(account.name, disable_existing_recruitment_mailbox_auto_reply())
-		self.assertEqual(frappe.db.get_value("Email Account", account.name, "enable_auto_reply"), 0)
+		self.assertEqual(
+			frappe.db.get_value("Email Account", account.name, ("enable_auto_reply", "notify_if_unreplied")),
+			(0, 0),
+		)
+		with patch.object(frappe, "sendmail") as sendmail:
+			notify_unreplied()
+		sendmail.assert_not_called()
 
 	def test_post_commit_enqueue_failure_is_recovered_from_durable_pending(self):
 		account_name = f"_Test Recruitment Recovery {frappe.generate_hash(length=8)}"
@@ -120,8 +134,10 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 			frappe.db.set_value(
 				"Communication",
 				communication.name,
-				"custom_ayp_email_intake_queued_on",
-				add_to_date(now_datetime(), minutes=-20),
+				{
+					"custom_ayp_email_intake_queued_on": add_to_date(now_datetime(), minutes=-20),
+					"creation": add_to_date(now_datetime(), years=-10),
+				},
 				update_modified=False,
 			)
 			# Persist the intentionally aged durable intent before reconciliation.

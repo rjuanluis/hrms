@@ -138,13 +138,35 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 		self.assertEqual(values["custom_ayp_email_intake_claim"], "")
 		enqueue.assert_called_once_with(row.name)
 
-	def test_recruitment_email_account_forces_auto_reply_off(self):
-		account = FakeDocument(email_id="empleos@aroypedal.com", enable_auto_reply=1)
+	def test_recruitment_email_account_forces_all_automatic_mail_off(self):
+		account = FakeDocument(email_id="empleos@aroypedal.com", enable_auto_reply=1, notify_if_unreplied=1)
 		email_intake.enforce_recruitment_email_account_safety(account)
 		self.assertEqual(account.enable_auto_reply, 0)
-		other = FakeDocument(email_id="ventas@aroypedal.com", enable_auto_reply=1)
+		self.assertEqual(account.notify_if_unreplied, 0)
+		other = FakeDocument(email_id="ventas@aroypedal.com", enable_auto_reply=1, notify_if_unreplied=1)
 		email_intake.enforce_recruitment_email_account_safety(other)
 		self.assertEqual(other.enable_auto_reply, 1)
+		self.assertEqual(other.notify_if_unreplied, 1)
+
+	def test_spam_and_trash_are_not_recruitment_intakes(self):
+		for email_status in ("Spam", "Trash"):
+			communication = self._communication()
+			communication.sent_or_received = "Received"
+			communication.communication_medium = "Email"
+			communication.email_account = "RECRUITMENT"
+			communication.has_attachment = 1
+			communication.email_status = email_status
+			with patch.object(email_intake.frappe.db, "get_value") as get_value:
+				self.assertFalse(email_intake._is_recruitment_email(communication))
+			get_value.assert_not_called()
+
+	def test_candidate_file_query_filters_before_limiting_to_two(self):
+		with patch.object(email_intake.frappe.db, "sql", return_value=[]) as sql:
+			email_intake._candidate_files("COMM-TEST-1")
+		query, parameters = sql.call_args.args[:2]
+		self.assertIn("LOWER(file_name)", query)
+		self.assertIn("LIMIT 2", query)
+		self.assertEqual(parameters, ("COMM-TEST-1", "%.pdf", "%.docx"))
 
 	def test_email_profile_is_limited_to_current_vacancy(self):
 		self.assertEqual(
@@ -279,7 +301,7 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 		self.assertEqual(communication.custom_ayp_email_intake_status, email_intake.INTAKE_COMPLETED)
 		link.assert_called_once_with(communication, applicant.name)
 
-	def test_updated_cv_preserves_original_source_and_replaces_attachment(self):
+	def test_email_identity_alone_cannot_replace_existing_cv(self):
 		communication = self._communication()
 		file_doc = self._file()
 		applicant = FakeDocument(
@@ -294,22 +316,66 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 			for context in base:
 				stack.enter_context(context)
 			stack.enter_context(
-				patch.object(email_intake, "same_vacancy_application", return_value=applicant.name)
+				patch.object(
+					email_intake,
+					"same_vacancy_application",
+					side_effect=email_intake.EmailIntakeDomainError("revisión manual"),
+				)
 			)
 			stack.enter_context(
-				patch.object(email_intake.frappe, "get_doc", side_effect=[communication, file_doc, applicant])
+				patch.object(email_intake.frappe, "get_doc", side_effect=[communication, file_doc])
 			)
 			detach = stack.enter_context(patch.object(email_intake, "_detach_for_candidate"))
-			assert_link = stack.enter_context(patch.object(email_intake, "_assert_candidate_file_link"))
-			stack.enter_context(patch.object(email_intake, "_link_communication"))
-			result = email_intake.process_recruitment_email(communication.name)
-		self.assertEqual(result["status"], "updated")
-		self.assertEqual(communication.custom_ayp_email_intake_status, email_intake.INTAKE_COMPLETED)
-		self.assertEqual(applicant.resume_attachment, file_doc.file_url)
+			with self.assertRaisesRegex(email_intake.EmailIntakeDomainError, "revisión manual"):
+				email_intake.process_recruitment_email(communication.name)
+		self.assertEqual(applicant.resume_attachment, "/private/files/original.pdf")
 		self.assertEqual(applicant.source, "Sitio Web")
-		detach.assert_called_once_with(file_doc)
-		applicant.save.assert_called_once_with(ignore_permissions=True)
-		assert_link.assert_called_once_with(file_doc.name, applicant.name)
+		detach.assert_not_called()
+		applicant.save.assert_not_called()
+
+	def test_antivirus_infrastructure_failure_remains_retryable(self):
+		with (
+			patch.object(
+				email_intake,
+				"process_recruitment_email",
+				side_effect=email_intake.CandidateCVInfrastructureError("clamav down"),
+			),
+			patch.object(email_intake.frappe.db, "rollback") as rollback,
+			patch.object(email_intake.frappe.db, "set_value") as set_value,
+			patch.object(email_intake.frappe.db, "commit") as commit,
+		):
+			with self.assertRaises(email_intake.CandidateCVInfrastructureError):
+				email_intake.process_recruitment_email_safely("COMM-TEST-1")
+		rollback.assert_called_once()
+		set_value.assert_not_called()
+		commit.assert_not_called()
+
+	def test_late_terminal_worker_cannot_degrade_completed_intake(self):
+		completed = {
+			email_intake.INTAKE_STATUS_FIELD: email_intake.INTAKE_COMPLETED,
+			"custom_ayp_email_intake_applicant": "HR-APP-1",
+			"custom_ayp_email_intake_completed_on": "2026-08-13 22:00:00",
+			"reference_doctype": "Job Applicant",
+			"reference_name": "HR-APP-1",
+		}
+		with (
+			patch.object(
+				email_intake,
+				"process_recruitment_email",
+				side_effect=email_intake.CandidateCVSecurityError("bad cv"),
+			),
+			patch.object(email_intake.frappe.db, "rollback"),
+			patch.object(email_intake.frappe.db, "exists", return_value=True),
+			patch.object(email_intake.frappe.db, "sql"),
+			patch.object(email_intake.frappe.db, "get_value", return_value=completed),
+			patch.object(email_intake.frappe.db, "set_value") as set_value,
+			patch.object(email_intake.frappe.db, "commit") as commit,
+			patch.object(email_intake.frappe, "log_error"),
+		):
+			with self.assertRaises(email_intake.CandidateCVSecurityError):
+				email_intake.process_recruitment_email_safely("COMM-TEST-1")
+		set_value.assert_not_called()
+		commit.assert_not_called()
 
 
 if __name__ == "__main__":

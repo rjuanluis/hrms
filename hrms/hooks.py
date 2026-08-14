@@ -5,7 +5,11 @@ app_description = "Modern HR and Payroll Software"
 app_email = "contact@frappe.io"
 app_license = "GNU General Public License (v3)"
 
-before_request = ["hrms.security.candidate_cv.guard_candidate_cv_upload"]
+before_request = [
+	"hrms.security.candidate_cv.guard_candidate_cv_upload",
+	"hrms.security.candidate_cv.guard_candidate_cv_download",
+]
+has_permission = {"File": "hrms.security.candidate_cv.has_candidate_cv_file_permission"}
 required_apps = ["frappe/erpnext"]
 source_link = "http://github.com/frappe/hrms"
 app_logo_url = "/assets/hrms/images/frappe-hr-logo.svg"

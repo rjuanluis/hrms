@@ -9,6 +9,7 @@ from hrms.recruitment.email_intake import (
 	INTAKE_COMPLETED,
 	INTAKE_PENDING,
 	INTAKE_PROCESSING,
+	disable_existing_recruitment_mailbox_auto_reply,
 )
 
 NOTIFICATION_NAME = "AYP Candidate Application Received"
@@ -109,4 +110,15 @@ def _sync_application_received_notification() -> None:
 def execute():
 	create_custom_fields(RECRUITMENT_EMAIL_INTAKE_FIELDS, update=True)
 	_sync_application_received_notification()
+	disable_existing_recruitment_mailbox_auto_reply()
+	frappe.db.add_index(
+		"Communication",
+		["custom_ayp_email_intake_status", "custom_ayp_email_intake_queued_on"],
+		"idx_ayp_email_intake_pending",
+	)
+	frappe.db.add_index(
+		"Communication",
+		["custom_ayp_email_intake_status", "custom_ayp_email_intake_started_on"],
+		"idx_ayp_email_intake_processing",
+	)
 	frappe.clear_cache(doctype="Communication")
