@@ -88,6 +88,8 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 
 	def test_hook_persists_pending_before_enqueue_and_survives_enqueue_failure(self):
 		communication = self._communication()
+		communication.reference_doctype = "Job Applicant"
+		communication.reference_name = "HR-APP-UNTRUSTED"
 		communication.custom_ayp_email_intake_status = ""
 		callbacks = []
 		rollback_callbacks = []
@@ -97,15 +99,20 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 			patch.object(email_intake.frappe.db, "after_commit", FakeCallbackManager(callbacks)),
 			patch.object(email_intake.frappe.db, "after_rollback", FakeCallbackManager(rollback_callbacks)),
 			patch.object(email_intake, "_enqueue_pending_intake", side_effect=RuntimeError("redis down")),
+			patch.object(email_intake.frappe, "logger") as logger,
 		):
 			email_intake.frappe.local.ayp_email_intake_callbacks = set()
 			email_intake.enqueue_recruitment_email_intake(communication)
 			self.assertEqual(communication.custom_ayp_email_intake_status, email_intake.INTAKE_PENDING)
+			self.assertIsNone(communication.reference_doctype)
+			self.assertIsNone(communication.reference_name)
 			self.assertEqual(len(callbacks), 1)
-			with self.assertRaisesRegex(RuntimeError, "redis down"):
-				callbacks[0]()
+			callbacks[0]()
 		self.assertEqual(communication.custom_ayp_email_intake_status, email_intake.INTAKE_PENDING)
 		self.assertEqual(len(rollback_callbacks), 1)
+		logger.return_value.error.assert_called_once_with(
+			"Recruitment intake enqueue failed; durable Pending will be reconciled."
+		)
 
 	def test_pending_enqueue_rechecks_committed_authoritative_state(self):
 		with (
@@ -139,10 +146,21 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 		enqueue.assert_called_once_with(row.name)
 
 	def test_recruitment_email_account_forces_all_automatic_mail_off(self):
-		account = FakeDocument(email_id="empleos@aroypedal.com", enable_auto_reply=1, notify_if_unreplied=1)
+		folder = FakeDocument(append_to="Job Applicant")
+		account = FakeDocument(
+			email_id="empleos@aroypedal.com",
+			enable_auto_reply=1,
+			notify_if_unreplied=1,
+			send_notification_to="owner@example.com",
+			append_to="Job Applicant",
+			imap_folder=[folder],
+		)
 		email_intake.enforce_recruitment_email_account_safety(account)
 		self.assertEqual(account.enable_auto_reply, 0)
 		self.assertEqual(account.notify_if_unreplied, 0)
+		self.assertEqual(account.send_notification_to, "")
+		self.assertEqual(account.append_to, "Communication")
+		self.assertEqual(folder.append_to, "Communication")
 		other = FakeDocument(email_id="ventas@aroypedal.com", enable_auto_reply=1, notify_if_unreplied=1)
 		email_intake.enforce_recruitment_email_account_safety(other)
 		self.assertEqual(other.enable_auto_reply, 1)

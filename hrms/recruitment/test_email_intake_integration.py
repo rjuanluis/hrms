@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from email.message import EmailMessage
 from unittest.mock import patch
 
 import frappe
 from frappe.email.doctype.email_account.email_account import notify_unreplied
+from frappe.email.receive import InboundMail
 from frappe.tests import IntegrationTestCase
 from frappe.utils import add_to_date, now_datetime
 
@@ -68,20 +70,48 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 				"enable_outgoing": 0,
 				"enable_auto_reply": 1,
 				"notify_if_unreplied": 1,
+				"send_notification_to": "owner@example.com",
+				"append_to": "Job Applicant",
+				"imap_folder": [{"folder_name": "INBOX", "append_to": "Job Applicant"}],
 			}
 		).insert(ignore_permissions=True)
 		self.assertEqual(account.enable_auto_reply, 0)
 		self.assertEqual(account.notify_if_unreplied, 0)
+		self.assertEqual(account.send_notification_to, "")
+		self.assertEqual(account.append_to, "Communication")
+		self.assertTrue(all(folder.append_to == "Communication" for folder in account.imap_folder))
 		frappe.db.set_value(
 			"Email Account",
 			account.name,
-			{"enable_auto_reply": 1, "notify_if_unreplied": 1, "enable_incoming": 1},
+			{
+				"enable_auto_reply": 1,
+				"notify_if_unreplied": 1,
+				"send_notification_to": "owner@example.com",
+				"append_to": "Job Applicant",
+				"enable_incoming": 1,
+			},
 			update_modified=False,
 		)
+		for folder in account.imap_folder:
+			frappe.db.set_value(
+				"IMAP Folder", folder.name, "append_to", "Job Applicant", update_modified=False
+			)
 		self.assertIn(account.name, disable_existing_recruitment_mailbox_auto_reply())
 		self.assertEqual(
-			frappe.db.get_value("Email Account", account.name, ("enable_auto_reply", "notify_if_unreplied")),
-			(0, 0),
+			frappe.db.get_value(
+				"Email Account",
+				account.name,
+				("enable_auto_reply", "notify_if_unreplied", "send_notification_to", "append_to"),
+			),
+			(0, 0, None, "Communication"),
+		)
+		self.assertEqual(
+			frappe.get_all(
+				"IMAP Folder",
+				filters={"parent": account.name, "parentfield": "imap_folder"},
+				pluck="append_to",
+			),
+			["Communication"],
 		)
 		with patch.object(frappe, "sendmail") as sendmail:
 			notify_unreplied()
@@ -123,9 +153,9 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 				"_enqueue_pending_intake",
 				side_effect=RuntimeError("simulated redis outage"),
 			):
-				with self.assertRaisesRegex(RuntimeError, "simulated redis outage"):
-					# Execute the real post-commit callback to prove Pending survives Redis failure.
-					frappe.db.commit()  # nosemgrep
+				# Execute the real callback: Redis failure must not make Frappe
+				# duplicate the raw message in Unhandled Email.
+				frappe.db.commit()  # nosemgrep
 			self.assertEqual(
 				frappe.db.get_value("Communication", communication.name, INTAKE_STATUS_FIELD),
 				INTAKE_PENDING,
@@ -152,6 +182,64 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 				frappe.db.delete("Communication", {"name": communication_name})
 			frappe.db.delete("Email Account", {"name": account_name})
 			# Clean records committed by this post-commit boundary test.
+			frappe.db.commit()  # nosemgrep
+
+	def test_native_inbound_recruitment_mail_creates_no_outbound_email(self):
+		account_name = f"_Test Recruitment Native {frappe.generate_hash(length=8)}"
+		communication_name = None
+		try:
+			account = frappe.get_doc(
+				{
+					"doctype": "Email Account",
+					"email_account_name": account_name,
+					"email_id": "empleos@aroypedal.com",
+					"enable_incoming": 0,
+					"enable_outgoing": 0,
+					"enable_auto_reply": 1,
+					"notify_if_unreplied": 1,
+					"send_notification_to": "owner@example.com",
+					"append_to": "Job Applicant",
+				}
+			).insert(ignore_permissions=True)
+			message = EmailMessage()
+			message["From"] = "_Test Candidate <candidate@example.com>"
+			message["To"] = "empleos@aroypedal.com"
+			message["Subject"] = "_Test native silent recruitment intake"
+			message["Message-ID"] = f"<{frappe.generate_hash(length=20)}@example.com>"
+			message.set_content("_Test application")
+			message.add_attachment(
+				b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n",
+				maintype="application",
+				subtype="pdf",
+				filename="cv.pdf",
+			)
+			queue_before = frappe.db.count("Email Queue")
+			sent_before = frappe.db.count("Communication", {"sent_or_received": "Sent"})
+			with (
+				patch.object(email_intake, "_enqueue_pending_intake", return_value=True),
+				patch.object(frappe, "sendmail") as sendmail,
+			):
+				communication = InboundMail(message.as_bytes(), account).process()
+				communication_name = communication.name
+				frappe.db.commit()  # nosemgrep
+				communication.send_email(is_inbound_mail_communcation=True)
+				sendmail.assert_not_called()
+			self.assertFalse(communication.reference_doctype)
+			self.assertFalse(communication.reference_name)
+			self.assertEqual(communication.get(INTAKE_STATUS_FIELD), INTAKE_PENDING)
+			self.assertEqual(frappe.db.count("Email Queue"), queue_before)
+			self.assertEqual(
+				frappe.db.count("Communication", {"sent_or_received": "Sent"}),
+				sent_before,
+			)
+		finally:
+			if communication_name:
+				frappe.db.delete(
+					"File",
+					{"attached_to_doctype": "Communication", "attached_to_name": communication_name},
+				)
+				frappe.db.delete("Communication", {"name": communication_name})
+			frappe.db.delete("Email Account", {"name": account_name})
 			frappe.db.commit()  # nosemgrep
 
 	def test_email_is_silent_web_is_acknowledged_and_profile_activates(self):

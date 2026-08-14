@@ -58,15 +58,19 @@ def _has_intake_fields() -> bool:
 
 
 def enforce_recruitment_email_account_safety(doc, method=None) -> None:
-	"""A recruitment inbox must never use Frappe's independent auto-reply path."""
+	"""Keep recruitment mail inside the governed Communication-only intake."""
 
 	if str(doc.email_id or "").strip().casefold() == _configured_mailbox():
 		doc.enable_auto_reply = 0
 		doc.notify_if_unreplied = 0
+		doc.send_notification_to = ""
+		doc.append_to = "Communication"
+		for folder in doc.get("imap_folder") or []:
+			folder.append_to = "Communication"
 
 
 def disable_existing_recruitment_mailbox_auto_reply() -> list[str]:
-	"""Disable and read back auto-reply on already-created recruitment accounts."""
+	"""Reconcile and read back existing recruitment-account safety settings."""
 
 	accounts = frappe.get_all(
 		"Email Account",
@@ -77,19 +81,45 @@ def disable_existing_recruitment_mailbox_auto_reply() -> list[str]:
 		frappe.db.set_value(
 			"Email Account",
 			account_name,
-			{"enable_auto_reply": 0, "notify_if_unreplied": 0},
+			{
+				"enable_auto_reply": 0,
+				"notify_if_unreplied": 0,
+				"send_notification_to": "",
+				"append_to": "Communication",
+			},
 			update_modified=False,
 		)
-	unsafe = [
-		account_name
-		for account_name in accounts
-		if any(
-			frappe.db.get_value("Email Account", account_name, ("enable_auto_reply", "notify_if_unreplied"))
-		)
-	]
+		for folder_name in frappe.get_all(
+			"IMAP Folder",
+			filters={"parenttype": "Email Account", "parent": account_name, "parentfield": "imap_folder"},
+			pluck="name",
+		):
+			frappe.db.set_value(
+				"IMAP Folder", folder_name, "append_to", "Communication", update_modified=False
+			)
+	unsafe = [account_name for account_name in accounts if _unsafe_recruitment_email_account(account_name)]
 	if unsafe:
-		raise RuntimeError(f"Auto-reply sigue activo en cuentas de reclutamiento: {unsafe}")
+		raise RuntimeError(f"Configuración insegura en cuentas de reclutamiento: {unsafe}")
 	return accounts
+
+
+def _unsafe_recruitment_email_account(account_name: str) -> bool:
+	settings = frappe.db.get_value(
+		"Email Account",
+		account_name,
+		("enable_auto_reply", "notify_if_unreplied", "send_notification_to", "append_to"),
+	)
+	if not settings:
+		return True
+	enable_auto_reply, notify_if_unreplied, send_notification_to, append_to = settings
+	if enable_auto_reply or notify_if_unreplied or send_notification_to or append_to != "Communication":
+		return True
+	folder_routes = frappe.get_all(
+		"IMAP Folder",
+		filters={"parenttype": "Email Account", "parent": account_name, "parentfield": "imap_folder"},
+		pluck="append_to",
+	)
+	return any(route != "Communication" for route in folder_routes)
 
 
 def _enqueue_pending_intake(communication_name: str) -> bool:
@@ -114,12 +144,17 @@ def _enqueue_pending_intake(communication_name: str) -> bool:
 def enqueue_recruitment_email_intake(doc, method=None) -> None:
 	"""Persist enqueue intent with the email; after-commit enqueue is only an accelerator."""
 
-	if not _is_recruitment_email(doc) or (doc.reference_doctype == "Job Applicant" and doc.reference_name):
+	if not _is_recruitment_email(doc):
 		return
 	if not _has_intake_fields():
 		frappe.throw(frappe._("Durable recruitment intake state is not installed; run migrate."))
 	if doc.get(INTAKE_STATUS_FIELD) in (INTAKE_COMPLETED, INTAKE_BLOCKED):
 		return
+	if doc.reference_doctype or doc.reference_name:
+		# Frappe's inbound thread notifier only has recipients when the
+		# Communication retains a parent/reference. Recruitment mail must remain
+		# standalone until the governed worker links it after a clean CV scan.
+		doc.db_set({"reference_doctype": None, "reference_name": None}, update_modified=False)
 	doc.db_set(
 		{
 			INTAKE_STATUS_FIELD: INTAKE_PENDING,
@@ -141,7 +176,15 @@ def enqueue_recruitment_email_intake(doc, method=None) -> None:
 
 	def enqueue_after_commit():
 		try:
-			_enqueue_pending_intake(doc.name)
+			try:
+				_enqueue_pending_intake(doc.name)
+			except Exception:
+				# The committed Pending row is the source of truth. Redis/RQ is only
+				# an accelerator; the scheduler will retry without duplicating the
+				# raw inbound message in Frappe's Unhandled Email store.
+				frappe.logger("email_intake").error(
+					"Recruitment intake enqueue failed; durable Pending will be reconciled."
+				)
 		finally:
 			registered.discard(callback_key)
 
