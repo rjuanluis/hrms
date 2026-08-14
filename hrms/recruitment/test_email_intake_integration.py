@@ -143,7 +143,7 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 			# Persist the intentionally aged durable intent before reconciliation.
 			frappe.db.commit()  # nosemgrep
 			with patch.object(email_intake, "_enqueue_pending_intake", return_value=True) as enqueue:
-				self.assertGreaterEqual(email_intake.recover_stale_recruitment_email_intakes(), 1)
+				self.assertEqual(email_intake.recover_stale_recruitment_email_intakes(communication.name), 1)
 				# Execute the reconciler's real post-commit enqueue callback.
 				frappe.db.commit()  # nosemgrep
 			enqueue.assert_any_call(communication.name)

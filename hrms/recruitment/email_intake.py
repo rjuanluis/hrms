@@ -399,7 +399,7 @@ def process_recruitment_email_safely(communication_name: str) -> dict:
 		raise
 
 
-def recover_stale_recruitment_email_intakes() -> int:
+def recover_stale_recruitment_email_intakes(communication_name: str | None = None) -> int:
 	"""Recover committed Pending work and abandoned Processing claims."""
 
 	if not _has_intake_fields():
@@ -418,11 +418,19 @@ def recover_stale_recruitment_email_intakes() -> int:
 				OR custom_ayp_email_intake_started_on < TIMESTAMPADD(MINUTE, %s, NOW())
 			))
 		)
+		AND (%s IS NULL OR name = %s)
 		ORDER BY creation, name
 		LIMIT 100
 		FOR UPDATE
 		""",
-		(INTAKE_PENDING, -INTAKE_STALE_MINUTES, INTAKE_PROCESSING, -INTAKE_STALE_MINUTES),
+		(
+			INTAKE_PENDING,
+			-INTAKE_STALE_MINUTES,
+			INTAKE_PROCESSING,
+			-INTAKE_STALE_MINUTES,
+			communication_name,
+			communication_name,
+		),
 		as_dict=True,
 	)
 	for row in rows:
