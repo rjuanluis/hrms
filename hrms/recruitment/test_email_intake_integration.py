@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from email.message import EmailMessage
+from io import BytesIO
 from unittest.mock import patch
+
+from pypdf import PdfWriter
 
 import frappe
 from frappe.email.doctype.email_account.email_account import notify_unreplied
@@ -207,8 +210,12 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 			message["Subject"] = "_Test native silent recruitment intake"
 			message["Message-ID"] = f"<{frappe.generate_hash(length=20)}@example.com>"
 			message.set_content("_Test application")
+			pdf = BytesIO()
+			writer = PdfWriter()
+			writer.add_blank_page(width=72, height=72)
+			writer.write(pdf)
 			message.add_attachment(
-				b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n",
+				pdf.getvalue(),
 				maintype="application",
 				subtype="pdf",
 				filename="cv.pdf",
