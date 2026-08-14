@@ -343,6 +343,10 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 				sendmail.assert_not_called()
 				result = email_intake.process_recruitment_email(communication.name)
 				applicant_name = result["applicant"]
+				# The worker locks and reloads its own authoritative Communication
+				# instance. Read back that state rather than asserting on the
+				# pre-worker object retained by this integration test.
+				communication.reload()
 				applicant = frappe.get_doc("Job Applicant", applicant_name)
 				profile_name = applicant.custom_candidate_profile
 				file_doc = frappe.get_doc("File", applicant.custom_candidate_cv_file)
@@ -429,6 +433,7 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 			"custom_data_processing_consent": 1,
 			"custom_privacy_notice_version": "CLIENT-CONTROLLED",
 		}
+		previous_user = frappe.session.user
 		try:
 			with patch.dict(
 				frappe.conf,
@@ -439,13 +444,16 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 				clear=False,
 			):
 				# Fresh installs have no default outgoing Email Account. Exercise
-				# the official site-config fallback; sendmail only creates Email Queue.
+				# the official site-config fallback through the real Guest boundary;
+				# sendmail only creates Email Queue.
 				frappe.local.outgoing_email_account = {}
+				frappe.set_user("Guest")
 				web_application = web_form_intake.accept(
 					web_form=web_form_name,
 					data=json.dumps(web_payload),
 				)
 		finally:
+			frappe.set_user(previous_user)
 			frappe.local.outgoing_email_account = {}
 		self.assertEqual(web_application.source, WEB_SOURCE)
 		self.assertEqual(web_application.status, "Open")

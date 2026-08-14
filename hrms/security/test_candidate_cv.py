@@ -223,7 +223,10 @@ class TestCandidateCVSecurity(unittest.TestCase):
 			job_opening="HR-OPN-2026-0001",
 		)
 		db = self._db_stub()
-		with patch("hrms.security.candidate_cv.frappe.db", db):
+		with (
+			patch("hrms.security.candidate_cv.frappe.db", db),
+			patch("hrms.security.candidate_cv.now_datetime", return_value="2026-08-14 00:00:00"),
+		):
 			validate_job_applicant_cv(doc)
 		self.assertEqual(values["source"], "Sitio Web")
 		self.assertEqual(values["status"], "Open")
