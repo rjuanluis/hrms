@@ -62,11 +62,16 @@ class TestNativeRecruitmentSetup(TestCase):
 
 		with (
 			patch.object(setup.frappe.db, "exists", side_effect=exists),
-			patch.object(setup.frappe.db, "get_value", return_value=None),
+			patch.object(setup.frappe.db, "get_value", return_value=None) as get_opening_name,
 			patch.object(setup.frappe, "get_doc", side_effect=get_doc),
 		):
 			result = setup.ensure_native_recruitment_job_opening()
 
+		get_opening_name.assert_called_once_with(
+			"Job Opening",
+			{"job_title": setup.RECRUITMENT_JOB_TITLE, "company": setup.COMPANY},
+			"name",
+		)
 		self.assertEqual(result, opening.name)
 		self.assertTrue(opening.inserted)
 		self.assertIsNone(opening.insert_set_name)
