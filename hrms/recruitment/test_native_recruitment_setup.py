@@ -89,21 +89,27 @@ class TestNativeRecruitmentSetup(TestCase):
 		opening.status = "Closed"
 		opening.publish = 1
 
+		def exists(doctype, name):
+			if (doctype, name) == ("Designation", setup.RECRUITMENT_JOB_TITLE):
+				return True
+			if (doctype, name) == ("Job Opening", setup.RECRUITMENT_JOB_OPENING):
+				return opening.name
+			raise AssertionError(f"Unexpected exists call: {(doctype, name)}")
+
+		def get_doc(*args):
+			if args == ("Job Opening", setup.RECRUITMENT_JOB_OPENING):
+				return opening
+			raise AssertionError(f"Unexpected get_doc call: {args}")
+
 		with (
-			patch.object(
-				setup.frappe.db,
-				"exists",
-				side_effect=lambda doctype, name: (
-					opening.name
-					if doctype == "Job Opening" and name == setup.RECRUITMENT_JOB_OPENING
-					else True
-				),
-			),
+			patch.object(setup.frappe.db, "exists", side_effect=exists) as opening_exists,
 			patch.object(setup.frappe.db, "get_value") as get_opening_name,
-			patch.object(setup.frappe, "get_doc", return_value=opening),
+			patch.object(setup.frappe, "get_doc", side_effect=get_doc) as load_opening,
 		):
 			setup.ensure_native_recruitment_job_opening()
 
+		opening_exists.assert_any_call("Job Opening", setup.RECRUITMENT_JOB_OPENING)
+		load_opening.assert_called_once_with("Job Opening", setup.RECRUITMENT_JOB_OPENING)
 		get_opening_name.assert_not_called()
 		self.assertEqual(opening.name, setup.RECRUITMENT_JOB_OPENING)
 		self.assertEqual(opening.job_title, setup.RECRUITMENT_JOB_TITLE)
@@ -112,6 +118,43 @@ class TestNativeRecruitmentSetup(TestCase):
 		self.assertEqual(opening.publish, 1)
 		self.assertEqual(opening.job_application_route, setup.RECRUITMENT_WEB_FORM_ROUTE)
 		self.assertTrue(opening.saved)
+
+	def test_business_key_fallback_reconciles_existing_opening_without_insert(self):
+		opening = _Document("HR-OPN-2025-0009")
+		opening.status = "Closed"
+		opening.publish = 1
+
+		def exists(doctype, name):
+			if (doctype, name) == ("Designation", setup.RECRUITMENT_JOB_TITLE):
+				return True
+			if (doctype, name) == ("Job Opening", setup.RECRUITMENT_JOB_OPENING):
+				return False
+			raise AssertionError(f"Unexpected exists call: {(doctype, name)}")
+
+		def get_doc(*args):
+			if args == ("Job Opening", opening.name):
+				return opening
+			raise AssertionError(f"Unexpected get_doc call: {args}")
+
+		with (
+			patch.object(setup.frappe.db, "exists", side_effect=exists),
+			patch.object(setup.frappe.db, "get_value", return_value=opening.name) as get_opening_name,
+			patch.object(setup.frappe, "get_doc", side_effect=get_doc) as load_opening,
+		):
+			result = setup.ensure_native_recruitment_job_opening()
+
+		get_opening_name.assert_called_once_with(
+			"Job Opening",
+			{"job_title": setup.RECRUITMENT_JOB_TITLE, "company": setup.COMPANY},
+			"name",
+		)
+		load_opening.assert_called_once_with("Job Opening", opening.name)
+		self.assertEqual(result, opening.name)
+		self.assertTrue(opening.saved)
+		self.assertFalse(opening.inserted)
+		self.assertEqual(opening.status, "Closed")
+		self.assertEqual(opening.publish, 1)
+		self.assertEqual(opening.job_application_route, setup.RECRUITMENT_WEB_FORM_ROUTE)
 
 	def test_pop_mailbox_appends_natively_without_auto_reply(self):
 		account = _Document("Recruitment")
@@ -151,8 +194,23 @@ class TestNativeRecruitmentSetup(TestCase):
 		self.assertEqual(account.enable_auto_reply, 0)
 
 	def test_missing_mailbox_is_safe_during_fresh_install(self):
-		with patch.object(setup.frappe, "get_all", return_value=[]):
+		with (
+			patch.object(setup.frappe, "get_all", return_value=[]),
+			patch.object(
+				setup.frappe,
+				"get_doc",
+				side_effect=AssertionError("Missing mailbox must not load a document"),
+			) as get_doc,
+			patch.object(
+				setup.frappe,
+				"new_doc",
+				side_effect=AssertionError("Missing mailbox must not create a document"),
+			) as new_doc,
+		):
 			self.assertEqual(setup.configure_native_recruitment_mailbox(), [])
+
+		get_doc.assert_not_called()
+		new_doc.assert_not_called()
 
 	def test_imap_mailbox_requires_an_inbox_folder(self):
 		account = _Document("Recruitment")
