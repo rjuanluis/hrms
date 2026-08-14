@@ -420,7 +420,7 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 		self.assertTrue(web_form_name)
 		web_payload = {
 			"job_title": "CLIENT-CONTROLLED",
-			"applicant_name": "_Test Authoritative Web Candidate",
+			"applicant_name": "_Test Email Intake Candidate",
 			"email_id": email,
 			"phone_number": "8095550199",
 			"custom_years_sales_experience": "1 a 2 años",
