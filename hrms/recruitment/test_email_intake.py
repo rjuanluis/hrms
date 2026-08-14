@@ -365,6 +365,7 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 				side_effect=email_intake.CandidateCVSecurityError("bad cv"),
 			),
 			patch.object(email_intake.frappe.db, "rollback"),
+			patch.object(email_intake, "_has_intake_fields", return_value=True),
 			patch.object(email_intake.frappe.db, "exists", return_value=True),
 			patch.object(email_intake.frappe.db, "sql"),
 			patch.object(email_intake.frappe.db, "get_value", return_value=completed),
@@ -372,8 +373,8 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 			patch.object(email_intake.frappe.db, "commit") as commit,
 			patch.object(email_intake.frappe, "log_error"),
 		):
-			with self.assertRaises(email_intake.CandidateCVSecurityError):
-				email_intake.process_recruitment_email_safely("COMM-TEST-1")
+			result = email_intake.process_recruitment_email_safely("COMM-TEST-1")
+		self.assertEqual(result, {"status": "already_processed", "applicant": "HR-APP-1"})
 		set_value.assert_not_called()
 		commit.assert_not_called()
 

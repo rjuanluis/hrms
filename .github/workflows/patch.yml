@@ -192,7 +192,8 @@ jobs:
 
           bench --site "$AYP_SITE_NAME" run-tests \
             --app hrms \
-            --module hrms.recruitment.test_email_intake_integration
+            --module hrms.recruitment.test_email_intake_integration \
+            --skip-before-tests
 
           ./env/bin/python - <<'PY'
           import os
