@@ -12,7 +12,7 @@ import zipfile
 import zlib
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import DictionaryObject, IndirectObject, NameObject, TextStringObject
@@ -383,15 +383,13 @@ class TestCandidateCVSecurity(unittest.TestCase):
 
 	def test_exact_file_identity_overrides_duplicate_file_url_lookup(self):
 		doc = SimpleNamespace(resume_attachment="/private/files/shared.pdf")
+		db = SimpleNamespace(get_value=Mock(return_value={"name": "FILE-EXACT"}))
 		with (
 			candidate_cv_file_identity("FILE-EXACT"),
-			patch(
-				"hrms.security.candidate_cv.frappe.db.get_value",
-				return_value={"name": "FILE-EXACT"},
-			) as get_value,
+			patch("hrms.security.candidate_cv.frappe.db", db),
 		):
 			self.assertEqual(_candidate_file_record(doc, ["name"]), {"name": "FILE-EXACT"})
-		get_value.assert_called_once_with("File", "FILE-EXACT", ["name"], as_dict=True)
+		db.get_value.assert_called_once_with("File", "FILE-EXACT", ["name"], as_dict=True)
 
 	def test_recruitment_cv_download_is_quarantined_until_clean(self):
 		frappe.local.request = SimpleNamespace(path="/private/files/cv.pdf")
@@ -448,6 +446,7 @@ class TestCandidateCVSecurity(unittest.TestCase):
 			patch("hrms.security.candidate_cv.read_stored_candidate_cv_bytes", return_value=content),
 			patch("hrms.security.candidate_cv._scan_candidate_cv") as scan,
 			patch("hrms.security.candidate_cv._file_has_column", return_value=True),
+			patch("hrms.security.candidate_cv.now_datetime", return_value="2026-08-13 23:00:00"),
 		):
 			sha256 = scan_stored_candidate_cv(file_doc)
 		self.assertEqual(sha256, hashlib.sha256(content).hexdigest())
