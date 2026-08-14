@@ -166,11 +166,15 @@ class TestCandidateCVSecurity(unittest.TestCase):
 	def test_ascii_pdf_is_read_as_exact_binary_from_real_disk(self):
 		content = make_pdf().replace(b"%\xe2\xe3\xcf\xd3", b"%1234")
 		validate_cv_file("cv.pdf", content)
-		with tempfile.NamedTemporaryFile() as stored:
+		with tempfile.NamedTemporaryFile(delete=False) as stored:
 			stored.write(content)
 			stored.flush()
-			file_doc = SimpleNamespace(get_full_path=lambda: stored.name)
+			path = stored.name
+		try:
+			file_doc = SimpleNamespace(get_full_path=lambda: path)
 			self.assertEqual(read_stored_candidate_cv_bytes(file_doc), content)
+		finally:
+			Path(path).unlink(missing_ok=True)
 
 	def setUp(self):
 		frappe.local.form_dict = frappe._dict()
