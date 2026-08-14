@@ -15,7 +15,6 @@ from hrms.recruitment.talent_pool import backfill_candidate_profiles
 
 SITE = os.environ.get("AYP_SITE_NAME", "hr.aroypedal.com")
 COMPANY = "ARO Y PEDAL SRL"
-RECRUITMENT_JOB_OPENING = "HR-OPN-2026-0001"
 RECRUITMENT_JOB_TITLE = "Asesor Venta Online"
 RECRUITMENT_MAILBOX = "empleos@aroypedal.com"
 TAX_ID = "101-57005-9"
@@ -540,8 +539,13 @@ def ensure_native_recruitment_job_opening() -> str:
 		"company": COMPANY,
 		"job_application_route": RECRUITMENT_WEB_FORM_ROUTE,
 	}
-	if frappe.db.exists("Job Opening", RECRUITMENT_JOB_OPENING):
-		opening = frappe.get_doc("Job Opening", RECRUITMENT_JOB_OPENING)
+	opening_name = frappe.db.get_value(
+		"Job Opening",
+		{"job_title": RECRUITMENT_JOB_TITLE, "company": COMPANY},
+		"name",
+	)
+	if opening_name:
+		opening = frappe.get_doc("Job Opening", opening_name)
 		opening.update(values)
 		opening.save(ignore_permissions=True)
 	else:
@@ -553,11 +557,11 @@ def ensure_native_recruitment_job_opening() -> str:
 				"publish": 0,
 			}
 		)
-		opening.insert(ignore_permissions=True, set_name=RECRUITMENT_JOB_OPENING)
+		opening.insert(ignore_permissions=True)
 
 	opening.reload()
 	if any(opening.get(fieldname) != value for fieldname, value in values.items()):
-		raise RuntimeError(f"Job Opening {RECRUITMENT_JOB_OPENING} did not persist as configured")
+		raise RuntimeError(f"Job Opening {opening.name} did not persist as configured")
 	return opening.name
 
 
@@ -572,6 +576,7 @@ def configure_native_recruitment_mailbox() -> list[str]:
 	for account_name in account_names:
 		account = frappe.get_doc("Email Account", account_name)
 		account.enable_auto_reply = 0
+		account.append_to = "Job Applicant"
 		if account.use_imap:
 			inbox_folders = [
 				folder
@@ -582,8 +587,6 @@ def configure_native_recruitment_mailbox() -> list[str]:
 				raise RuntimeError(f"Email Account {account.name} has no configured IMAP Inbox folder")
 			for folder in inbox_folders:
 				folder.append_to = "Job Applicant"
-		else:
-			account.append_to = "Job Applicant"
 		account.save(ignore_permissions=True)
 	return account_names
 

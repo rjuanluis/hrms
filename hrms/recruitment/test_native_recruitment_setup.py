@@ -21,6 +21,7 @@ class _Document:
 		self.name = name
 		self.saved = False
 		self.inserted = False
+		self.insert_set_name = None
 
 	def update(self, values):
 		for fieldname, value in values.items():
@@ -31,6 +32,7 @@ class _Document:
 
 	def insert(self, *, set_name=None, **kwargs):
 		self.inserted = True
+		self.insert_set_name = set_name
 		if set_name:
 			self.name = set_name
 		return self
@@ -43,9 +45,9 @@ class _Document:
 
 
 class TestNativeRecruitmentSetup(TestCase):
-	def test_internal_job_opening_uses_standard_hrms_doctypes(self):
+	def test_internal_job_opening_uses_native_autonaming(self):
 		designation = _Document()
-		opening = _Document()
+		opening = _Document("HR-OPN-2026-0001")
 
 		def exists(doctype, name):
 			return doctype == "Designation"
@@ -60,12 +62,14 @@ class TestNativeRecruitmentSetup(TestCase):
 
 		with (
 			patch.object(setup.frappe.db, "exists", side_effect=exists),
+			patch.object(setup.frappe.db, "get_value", return_value=None),
 			patch.object(setup.frappe, "get_doc", side_effect=get_doc),
 		):
 			result = setup.ensure_native_recruitment_job_opening()
 
-		self.assertEqual(result, setup.RECRUITMENT_JOB_OPENING)
+		self.assertEqual(result, opening.name)
 		self.assertTrue(opening.inserted)
+		self.assertIsNone(opening.insert_set_name)
 		self.assertEqual(opening.job_title, setup.RECRUITMENT_JOB_TITLE)
 		self.assertEqual(opening.designation, setup.RECRUITMENT_JOB_TITLE)
 		self.assertEqual(opening.company, setup.COMPANY)
@@ -74,12 +78,13 @@ class TestNativeRecruitmentSetup(TestCase):
 		self.assertEqual(opening.job_application_route, setup.RECRUITMENT_WEB_FORM_ROUTE)
 
 	def test_existing_job_opening_preserves_human_lifecycle_state(self):
-		opening = _Document(setup.RECRUITMENT_JOB_OPENING)
+		opening = _Document("HR-OPN-2026-0001")
 		opening.status = "Closed"
 		opening.publish = 1
 
 		with (
 			patch.object(setup.frappe.db, "exists", return_value=True),
+			patch.object(setup.frappe.db, "get_value", return_value=opening.name),
 			patch.object(setup.frappe, "get_doc", return_value=opening),
 		):
 			setup.ensure_native_recruitment_job_opening()
@@ -109,6 +114,7 @@ class TestNativeRecruitmentSetup(TestCase):
 		account = _Document("Recruitment")
 		account.use_imap = 1
 		account.enable_auto_reply = 1
+		account.append_to = "Issue"
 		account.imap_folder = [
 			SimpleNamespace(folder_name="INBOX", append_to="Communication"),
 			SimpleNamespace(folder_name="Archive", append_to="Communication"),
@@ -122,6 +128,7 @@ class TestNativeRecruitmentSetup(TestCase):
 
 		self.assertEqual(account.imap_folder[0].append_to, "Job Applicant")
 		self.assertEqual(account.imap_folder[1].append_to, "Communication")
+		self.assertEqual(account.append_to, "Job Applicant")
 		self.assertEqual(account.enable_auto_reply, 0)
 
 	def test_missing_mailbox_is_safe_during_fresh_install(self):
