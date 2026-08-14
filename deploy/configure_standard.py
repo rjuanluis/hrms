@@ -538,8 +538,6 @@ def ensure_native_recruitment_job_opening() -> str:
 		"job_title": RECRUITMENT_JOB_TITLE,
 		"designation": RECRUITMENT_JOB_TITLE,
 		"company": COMPANY,
-		"status": "Open",
-		"publish": 0,
 		"job_application_route": RECRUITMENT_WEB_FORM_ROUTE,
 	}
 	if frappe.db.exists("Job Opening", RECRUITMENT_JOB_OPENING):
@@ -547,7 +545,14 @@ def ensure_native_recruitment_job_opening() -> str:
 		opening.update(values)
 		opening.save(ignore_permissions=True)
 	else:
-		opening = frappe.get_doc({"doctype": "Job Opening", **values})
+		opening = frappe.get_doc(
+			{
+				"doctype": "Job Opening",
+				**values,
+				"status": "Open",
+				"publish": 0,
+			}
+		)
 		opening.insert(ignore_permissions=True, set_name=RECRUITMENT_JOB_OPENING)
 
 	opening.reload()

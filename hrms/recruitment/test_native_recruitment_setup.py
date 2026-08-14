@@ -73,6 +73,22 @@ class TestNativeRecruitmentSetup(TestCase):
 		self.assertEqual(opening.publish, 0)
 		self.assertEqual(opening.job_application_route, setup.RECRUITMENT_WEB_FORM_ROUTE)
 
+	def test_existing_job_opening_preserves_human_lifecycle_state(self):
+		opening = _Document(setup.RECRUITMENT_JOB_OPENING)
+		opening.status = "Closed"
+		opening.publish = 1
+
+		with (
+			patch.object(setup.frappe.db, "exists", return_value=True),
+			patch.object(setup.frappe, "get_doc", return_value=opening),
+		):
+			setup.ensure_native_recruitment_job_opening()
+
+		self.assertEqual(opening.status, "Closed")
+		self.assertEqual(opening.publish, 1)
+		self.assertEqual(opening.job_application_route, setup.RECRUITMENT_WEB_FORM_ROUTE)
+		self.assertTrue(opening.saved)
+
 	def test_pop_mailbox_appends_natively_without_auto_reply(self):
 		account = _Document("Recruitment")
 		account.use_imap = 0
