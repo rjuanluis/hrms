@@ -19,6 +19,7 @@ from frappe.rate_limiter import rate_limit
 from frappe.utils import now_datetime
 
 from hrms.recruitment.web_form_intake import (
+	PRIVACY_NOTICE_VERSION,
 	RECRUITMENT_WEB_FORM_ROUTE,
 	WEB_SOURCE,
 	authoritative_recruitment_web_form_context,
@@ -35,8 +36,7 @@ MAX_DOCX_ENTRIES = 1000
 PDF_VALIDATION_TIMEOUT_SECONDS = 7
 ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx", ".heic", ".heif", ".jpeg", ".jpg", ".png"}
 PDF_NAME_ESCAPE = re.compile(rb"#([0-9a-fA-F]{2})")
-PRIVACY_NOTICE_VERSION = "AYP-RH-2026-07-17-v3"
-CONSENT_WEB_FORM_ROUTE = "empleos/solicitud"
+CONSENT_WEB_FORM_ROUTE = RECRUITMENT_WEB_FORM_ROUTE
 
 
 class CandidateCVSecurityError(frappe.ValidationError):

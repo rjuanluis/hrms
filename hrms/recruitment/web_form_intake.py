@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
+
 import frappe
 
 RECRUITMENT_WEB_FORM_ROUTE = "empleos/solicitud"
 WEB_SOURCE = "Sitio Web"
 DEFAULT_JOB_OPENING = "HR-OPN-2026-0001"
+PRIVACY_NOTICE_VERSION = "AYP-RH-2026-07-17-v3"
 _CONTEXT_FLAG = "ayp_authoritative_recruitment_web_form"
 
 
@@ -71,6 +74,35 @@ def _authoritative_form(web_form_name: str):
 	return form
 
 
+def _authoritative_payload(data: str | dict, *, job_opening: str) -> str:
+	"""Replace every governed Web Form value before Frappe validates Links."""
+
+	try:
+		payload = json.loads(data) if isinstance(data, str) else dict(data)
+	except (TypeError, ValueError) as exc:
+		raise frappe.ValidationError(frappe._("Los datos del formulario de empleos no son válidos.")) from exc
+	if not isinstance(payload, dict):
+		raise frappe.ValidationError(frappe._("Los datos del formulario de empleos deben ser un objeto."))
+	if str(payload.get("name") or "").strip():
+		frappe.throw(frappe._("El formulario oficial de empleos solo permite solicitudes nuevas."))
+	if payload.get("custom_data_processing_consent") not in (1, True, "1"):
+		frappe.throw(frappe._("Debes aceptar el aviso de privacidad para enviar la solicitud."))
+	payload.update(
+		{
+			"source": WEB_SOURCE,
+			"status": "Open",
+			"job_title": job_opening,
+			"custom_data_processing_consent": 1,
+			"custom_privacy_notice_version": PRIVACY_NOTICE_VERSION,
+			"custom_consent_capture_method": "Web Form",
+			"custom_consent_evidence_id": "",
+			"custom_consent_recorded_on": None,
+			"custom_consent_form_route": RECRUITMENT_WEB_FORM_ROUTE,
+		}
+	)
+	return json.dumps(payload)
+
+
 # Security-reviewed public boundary: exact form configuration + request-local provenance +
 # native Frappe validation; lookalike forms never receive authoritative context.
 @frappe.whitelist(  # nosemgrep: frappe-semgrep-rules.rules.security.guest-whitelisted-method
@@ -82,6 +114,8 @@ def accept(web_form: str, data: str | dict, web_form_request_key: str | None = N
 	form = _authoritative_form(str(web_form))
 	previous = authoritative_recruitment_web_form_context()
 	if form:
+		job_opening = str(frappe.conf.get("ayp_recruitment_job_opening") or DEFAULT_JOB_OPENING).strip()
+		data = _authoritative_payload(data, job_opening=job_opening)
 		setattr(
 			frappe.flags,
 			_CONTEXT_FLAG,
@@ -89,9 +123,7 @@ def accept(web_form: str, data: str | dict, web_form_request_key: str | None = N
 				name=form.name,
 				route=form.route,
 				source=WEB_SOURCE,
-				job_opening=str(
-					frappe.conf.get("ayp_recruitment_job_opening") or DEFAULT_JOB_OPENING
-				).strip(),
+				job_opening=job_opening,
 			),
 		)
 	try:

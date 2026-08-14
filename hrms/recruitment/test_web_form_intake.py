@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from unittest.mock import patch
 
@@ -33,11 +34,48 @@ class TestRecruitmentWebFormIntake(unittest.TestCase):
 			patch.object(web_form_intake.frappe, "get_all", return_value=[form]),
 			patch.object(web_form_intake, "_frappe_web_form_accept", side_effect=original_accept),
 		):
-			result = web_form_intake.accept(form.name, "{}")
+			result = web_form_intake.accept(
+				form.name,
+				json.dumps(
+					{
+						"job_title": "CLIENT-CONTROLLED",
+						"custom_data_processing_consent": 1,
+						"custom_privacy_notice_version": "CLIENT-CONTROLLED",
+					}
+				),
+			)
 		self.assertEqual(result.name, "HR-APP-1")
+		delegated = json.loads(result.data)
+		self.assertEqual(delegated["job_title"], "HR-OPN-2026-0001")
+		self.assertEqual(delegated["source"], "Sitio Web")
+		self.assertEqual(delegated["status"], "Open")
+		self.assertEqual(delegated["custom_privacy_notice_version"], web_form_intake.PRIVACY_NOTICE_VERSION)
 		self.assertEqual(observed[0].route, "empleos/solicitud")
 		self.assertEqual(observed[0].source, "Sitio Web")
 		self.assertIsNone(web_form_intake.authoritative_recruitment_web_form_context())
+
+	def test_official_form_normalizes_dict_payload_and_requires_real_consent(self):
+		form = frappe._dict(
+			name="AYP Recruitment Application",
+			route="empleos/solicitud",
+			doc_type="Job Applicant",
+			published=1,
+			login_required=0,
+			anonymous=1,
+			allow_edit=0,
+			allow_delete=0,
+		)
+		with (
+			patch.object(web_form_intake.frappe, "get_all", return_value=[form]),
+			patch.object(web_form_intake, "_frappe_web_form_accept", side_effect=lambda **kwargs: kwargs),
+		):
+			result = web_form_intake.accept(
+				form.name,
+				{"job_title": "forged", "custom_data_processing_consent": True},
+			)
+			with self.assertRaises(frappe.ValidationError):
+				web_form_intake.accept(form.name, {"custom_data_processing_consent": 0})
+		self.assertEqual(json.loads(result["data"])["job_title"], "HR-OPN-2026-0001")
 
 	def test_lookalike_form_never_receives_authoritative_context(self):
 		observed = []
