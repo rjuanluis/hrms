@@ -26,6 +26,7 @@ from hrms.security.candidate_cv import (
 	_verified_candidate_cv_sha256,
 	guard_candidate_cv_upload,
 	mark_scanned_candidate_cv_file,
+	scan_stored_candidate_cv,
 	scan_bytes_with_clamd,
 	validate_cv_file,
 )
@@ -373,6 +374,36 @@ class TestCandidateCVSecurity(unittest.TestCase):
 			_mark_file_clean(file_doc, sha256="a" * 64)
 		self.assertEqual(file_doc.values["custom_cv_sha256"], "a" * 64)
 		self.assertEqual(file_doc.values["custom_av_scan_status"], "Clean")
+
+	def test_inbound_private_cv_is_scanned_from_exact_bytes_and_marked_clean(self):
+		content = make_pdf()
+		file_doc = SimpleNamespace(
+			file_name="cv.pdf",
+			file_url="/private/files/cv.pdf",
+			file_size=len(content),
+			is_private=1,
+			db_set=lambda values, update_modified=False: setattr(file_doc, "values", values),
+		)
+		with (
+			patch("hrms.security.candidate_cv.read_stored_candidate_cv_bytes", return_value=content),
+			patch("hrms.security.candidate_cv._scan_candidate_cv") as scan,
+			patch("hrms.security.candidate_cv._file_has_column", return_value=True),
+		):
+			sha256 = scan_stored_candidate_cv(file_doc)
+		self.assertEqual(sha256, hashlib.sha256(content).hexdigest())
+		scan.assert_called_once_with(content)
+		self.assertEqual(file_doc.values["custom_av_scan_status"], "Clean")
+		self.assertEqual(file_doc.values["custom_cv_sha256"], sha256)
+
+	def test_inbound_public_cv_is_rejected_before_scan(self):
+		file_doc = SimpleNamespace(
+			file_name="cv.pdf",
+			file_url="/files/cv.pdf",
+			file_size=100,
+			is_private=0,
+		)
+		with self.assertRaisesRegex(CandidateCVSecurityError, "archivo privado"):
+			scan_stored_candidate_cv(file_doc)
 
 	def test_verified_hash_revalidates_pdf_content(self):
 		content = make_pdf()

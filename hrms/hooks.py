@@ -234,6 +234,9 @@ doc_events = {
 			"hrms.recruitment.candidate_document_service.enqueue_candidate_document",
 		],
 	},
+	"Communication": {
+		"on_update": "hrms.recruitment.email_intake.enqueue_recruitment_email_intake",
+	},
 	"Interview": {
 		"validate": "hrms.recruitment.interview_governance.validate_interview",
 		"before_submit": "hrms.recruitment.interview_governance.validate_ayp_interview_submission",

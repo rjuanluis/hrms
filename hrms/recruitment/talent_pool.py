@@ -18,6 +18,7 @@ from hrms.recruitment.matching import (
 
 PROFILE_DOCTYPE = "AYP Candidate Profile"
 STATUS_ACTIVE = "Activo"
+STATUS_CURRENT_VACANCY_ONLY = "Solo vacante actual"
 LOCK_TIMEOUT_SECONDS = 10
 GLOBAL_CANDIDATE_LOCK = "ayp-candidate-pool-global"
 MAX_PROFILE_REDIRECTS = 20
@@ -170,7 +171,20 @@ def _set_if_supported(doc, fieldname: str, value) -> None:
 		doc.set(fieldname, value)
 
 
+def initial_talent_pool_status(source: str | None) -> str:
+	return STATUS_CURRENT_VACANCY_ONLY if source == "Email Recursos Humanos" else STATUS_ACTIVE
+
+
+def should_activate_talent_pool_profile(profile_status: str, source: str | None, privacy_version: str | None) -> bool:
+	return bool(
+		profile_status == STATUS_CURRENT_VACANCY_ONLY
+		and privacy_version
+		and source != "Email Recursos Humanos"
+	)
+
+
 def _create_candidate_profile(doc, *, email: str, phone: str, cv_sha256: str, dedupe_status: str) -> str:
+	talent_pool_status = initial_talent_pool_status(doc.get("source"))
 	profile = frappe.get_doc(
 		{
 			"doctype": PROFILE_DOCTYPE,
@@ -181,7 +195,7 @@ def _create_candidate_profile(doc, *, email: str, phone: str, cv_sha256: str, de
 			"normalized_phone": phone,
 			"latest_cv_sha256": cv_sha256,
 			"privacy_notice_version": doc.get("custom_privacy_notice_version") or "",
-			"talent_pool_status": STATUS_ACTIVE,
+			"talent_pool_status": talent_pool_status,
 			"dedupe_status": dedupe_status,
 		}
 	)
@@ -345,6 +359,14 @@ def sync_candidate_profile(doc, method=None) -> None:
 		changed = True
 	if profile.latest_application != doc.name:
 		profile.latest_application = doc.name
+		changed = True
+	if should_activate_talent_pool_profile(
+		profile.talent_pool_status,
+		doc.get("source"),
+		doc.get("custom_privacy_notice_version"),
+	):
+		profile.talent_pool_status = STATUS_ACTIVE
+		profile.privacy_notice_version = doc.get("custom_privacy_notice_version")
 		changed = True
 	application_count = frappe.db.count("Job Applicant", {"custom_candidate_profile": profile_name})
 	if profile.application_count != application_count:

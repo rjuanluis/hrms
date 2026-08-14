@@ -90,7 +90,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Estado en Talent Pool",
-   "options": "Activo\nPrioritario\nSin interés\nEliminación solicitada\nDispuesto\nFusionado",
+   "options": "Solo vacante actual\nActivo\nPrioritario\nSin interés\nEliminación solicitada\nDispuesto\nFusionado",
    "read_only": 1,
    "reqd": 1
   },

@@ -202,6 +202,7 @@ jobs:
           frappe.connect()
           try:
               assert frappe.db.exists("Company", "ARO Y PEDAL SRL")
+              assert frappe.db.exists("Job Applicant Source", "Email Recursos Humanos")
 
               published_forms = frappe.get_all(
                   "Web Form",
@@ -223,6 +224,11 @@ jobs:
               assert notification.enabled == 1
               assert notification.document_type == "Job Applicant"
               assert notification.event == "New"
+              assert notification.condition_type == "Python"
+              assert notification.condition == (
+                  "doc.email_id and doc.get('custom_data_processing_consent') "
+                  "and doc.source != 'Email Recursos Humanos'"
+              )
               assert len(notification.recipients) == 1
               assert notification.recipients[0].receiver_by_document_field == "email_id"
 

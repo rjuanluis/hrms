@@ -230,6 +230,25 @@ def _mark_file_clean(file_doc, *, sha256: str = "") -> None:
 	file_doc.db_set(values, update_modified=False)
 
 
+def scan_stored_candidate_cv(file_doc) -> str:
+	"""Validate and scan one already-private stored CV, returning its SHA-256.
+
+	Inbound email attachments do not pass through the public upload preflight,
+	so the email intake calls this before moving the File to a Job Applicant.
+	"""
+
+	if not file_doc.is_private or not str(file_doc.file_url or "").startswith("/private/files/"):
+		raise CandidateCVSecurityError(_("El CV recibido debe permanecer como archivo privado."))
+	content = read_stored_candidate_cv_bytes(file_doc)
+	validate_cv_file(file_doc.file_name, content)
+	_scan_candidate_cv(content)
+	sha256 = hashlib.sha256(content).hexdigest()
+	if file_doc.file_size != len(content):
+		raise CandidateCVSecurityError(_("No se pudo verificar la integridad del CV recibido."))
+	_mark_file_clean(file_doc, sha256=sha256)
+	return sha256
+
+
 def guard_candidate_cv_upload() -> None:
 	if not _is_upload_endpoint():
 		return
