@@ -63,9 +63,7 @@ class TestEmailIntakeDomain(unittest.TestCase):
 
 	def test_same_vacancy_application_returns_none_without_match(self):
 		self.assertIsNone(
-			same_vacancy_application(
-				[], email="ana@example.com", cv_sha256="abc", applicant_name="Ana Pérez"
-			)
+			same_vacancy_application([], email="ana@example.com", cv_sha256="abc", applicant_name="Ana Pérez")
 		)
 
 	def test_same_vacancy_application_fails_closed_on_conflict(self):

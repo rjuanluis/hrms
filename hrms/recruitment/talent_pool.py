@@ -175,7 +175,9 @@ def initial_talent_pool_status(source: str | None) -> str:
 	return STATUS_CURRENT_VACANCY_ONLY if source == "Email Recursos Humanos" else STATUS_ACTIVE
 
 
-def should_activate_talent_pool_profile(profile_status: str, source: str | None, privacy_version: str | None) -> bool:
+def should_activate_talent_pool_profile(
+	profile_status: str, source: str | None, privacy_version: str | None
+) -> bool:
 	return bool(
 		profile_status == STATUS_CURRENT_VACANCY_ONLY
 		and privacy_version

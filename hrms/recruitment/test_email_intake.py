@@ -57,13 +57,17 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 
 		return (
 			patch.object(email_intake, "_is_recruitment_email", return_value=True),
-			patch.object(email_intake, "_candidate_files", return_value=[{"name": file_doc.name, "file_name": file_doc.file_name}]),
+			patch.object(
+				email_intake,
+				"_candidate_files",
+				return_value=[{"name": file_doc.name, "file_name": file_doc.file_name}],
+			),
 			patch.object(email_intake, "scan_stored_candidate_cv", return_value="a" * 64),
 			patch.object(email_intake, "acquire_candidate_identity_lock"),
 			patch.object(email_intake.frappe, "get_doc", side_effect=get_doc),
 			patch.object(email_intake.frappe.db, "sql", return_value=[]),
 			patch.object(email_intake.frappe.db, "exists", return_value=True),
-	)
+		)
 
 	def test_worker_has_no_internal_commit(self):
 		source = inspect.getsource(email_intake.process_recruitment_email)
@@ -163,7 +167,6 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 		self.assertEqual(result["status"], "duplicate_message")
 		link.assert_called_once_with(communication, applicant.name)
 
-
 	def test_updated_cv_preserves_original_source_and_replaces_attachment(self):
 		communication = self._communication()
 		file_doc = self._file()
@@ -194,7 +197,6 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 		detach.assert_called_once_with(file_doc)
 		applicant.save.assert_called_once_with(ignore_permissions=True)
 		assert_link.assert_called_once_with(file_doc.name, applicant.name)
-
 
 
 if __name__ == "__main__":

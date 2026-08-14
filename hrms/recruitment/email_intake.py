@@ -42,9 +42,7 @@ def _is_recruitment_email(doc) -> bool:
 def enqueue_recruitment_email_intake(doc, method=None) -> None:
 	"""Queue one native inbound Communication after Frappe has saved attachments."""
 
-	if not _is_recruitment_email(doc) or (
-		doc.reference_doctype == "Job Applicant" and doc.reference_name
-	):
+	if not _is_recruitment_email(doc) or (doc.reference_doctype == "Job Applicant" and doc.reference_name):
 		return
 	callback_key = f"ayp-email-intake:{doc.name}"
 	registered = getattr(frappe.local, "ayp_email_intake_callbacks", set())

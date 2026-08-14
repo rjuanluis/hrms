@@ -26,8 +26,8 @@ from hrms.security.candidate_cv import (
 	_verified_candidate_cv_sha256,
 	guard_candidate_cv_upload,
 	mark_scanned_candidate_cv_file,
-	scan_stored_candidate_cv,
 	scan_bytes_with_clamd,
+	scan_stored_candidate_cv,
 	validate_cv_file,
 )
 
