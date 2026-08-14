@@ -15,6 +15,9 @@ from hrms.recruitment.talent_pool import backfill_candidate_profiles
 
 SITE = os.environ.get("AYP_SITE_NAME", "hr.aroypedal.com")
 COMPANY = "ARO Y PEDAL SRL"
+RECRUITMENT_JOB_OPENING = "HR-OPN-2026-0001"
+RECRUITMENT_JOB_TITLE = "Asesor Venta Online"
+RECRUITMENT_MAILBOX = "empleos@aroypedal.com"
 TAX_ID = "101-57005-9"
 ADMIN_EMAIL = "juanluis@aroypedal.com"
 LEAVE_PERIOD_START = "2026-01-01"
@@ -385,6 +388,7 @@ def ensure_recruitment_web_form() -> tuple[str, list[str]]:
 			"module": "HR",
 			"published": 1,
 			"login_required": 0,
+			"anonymous": 1,
 			"allow_edit": 0,
 			"allow_delete": 0,
 			"allow_multiple": 0,
@@ -522,6 +526,63 @@ def ensure_recruitment_web_form() -> tuple[str, list[str]]:
 	return web_form.name, retired
 
 
+def ensure_native_recruitment_job_opening() -> str:
+	"""Provision the internal vacancy using the standard HRMS DocTypes."""
+
+	if not frappe.db.exists("Designation", RECRUITMENT_JOB_TITLE):
+		frappe.get_doc({"doctype": "Designation", "designation_name": RECRUITMENT_JOB_TITLE}).insert(
+			ignore_permissions=True
+		)
+
+	values = {
+		"job_title": RECRUITMENT_JOB_TITLE,
+		"designation": RECRUITMENT_JOB_TITLE,
+		"company": COMPANY,
+		"status": "Open",
+		"publish": 0,
+		"job_application_route": RECRUITMENT_WEB_FORM_ROUTE,
+	}
+	if frappe.db.exists("Job Opening", RECRUITMENT_JOB_OPENING):
+		opening = frappe.get_doc("Job Opening", RECRUITMENT_JOB_OPENING)
+		opening.update(values)
+		opening.save(ignore_permissions=True)
+	else:
+		opening = frappe.get_doc({"doctype": "Job Opening", **values})
+		opening.insert(ignore_permissions=True, set_name=RECRUITMENT_JOB_OPENING)
+
+	opening.reload()
+	if any(opening.get(fieldname) != value for fieldname, value in values.items()):
+		raise RuntimeError(f"Job Opening {RECRUITMENT_JOB_OPENING} did not persist as configured")
+	return opening.name
+
+
+def configure_native_recruitment_mailbox() -> list[str]:
+	"""Use Frappe's native Email Account → Job Applicant integration."""
+
+	account_names = frappe.get_all(
+		"Email Account",
+		filters={"email_id": RECRUITMENT_MAILBOX},
+		pluck="name",
+	)
+	for account_name in account_names:
+		account = frappe.get_doc("Email Account", account_name)
+		account.enable_auto_reply = 0
+		if account.use_imap:
+			inbox_folders = [
+				folder
+				for folder in account.imap_folder
+				if (folder.folder_name or "").strip().casefold() == "inbox"
+			]
+			if not inbox_folders:
+				raise RuntimeError(f"Email Account {account.name} has no configured IMAP Inbox folder")
+			for folder in inbox_folders:
+				folder.append_to = "Job Applicant"
+		else:
+			account.append_to = "Job Applicant"
+		account.save(ignore_permissions=True)
+	return account_names
+
+
 def enable_restricted_guest_cv_uploads() -> None:
 	frappe.db.set_single_value("System Settings", "allow_guests_to_upload_files", 1)
 	frappe.db.set_single_value("System Settings", "allowed_doctypes_for_guest_uploads", "Job Applicant")
@@ -569,6 +630,8 @@ def main() -> None:
 		ensure_recruitment_security_fields()
 		candidate_profiles_backfilled = backfill_candidate_profiles()
 		recruitment_web_form, retired_recruitment_web_forms = ensure_recruitment_web_form()
+		recruitment_job_opening = ensure_native_recruitment_job_opening()
+		recruitment_email_accounts = configure_native_recruitment_mailbox()
 		enable_restricted_guest_cv_uploads()
 		set_default_language("es")
 		frappe.db.set_single_value("System Settings", "language", "es")
@@ -586,6 +649,8 @@ def main() -> None:
 				"departments": departments,
 				"leave_period": leave_period,
 				"recruitment_web_form": recruitment_web_form,
+				"recruitment_job_opening": recruitment_job_opening,
+				"recruitment_email_accounts": recruitment_email_accounts,
 				"retired_recruitment_web_forms": retired_recruitment_web_forms,
 				"candidate_profiles_backfilled": candidate_profiles_backfilled,
 				"guest_upload_doctypes": ["Job Applicant"],
