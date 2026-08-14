@@ -1,17 +1,18 @@
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import frappe
 from frappe.tests.utils import IntegrationTestCase
 from frappe.utils import add_to_date, now_datetime
-from unittest.mock import patch
 
+from hrms.recruitment import email_intake
 from hrms.recruitment.email_intake import (
 	APPLICANT_SOURCE,
 	INTAKE_PENDING,
 	INTAKE_STATUS_FIELD,
 	disable_existing_recruitment_mailbox_auto_reply,
 )
-from hrms.recruitment import email_intake
 from hrms.recruitment.talent_pool import STATUS_ACTIVE, STATUS_CURRENT_VACANCY_ONLY
 from hrms.security.candidate_cv import PRIVACY_NOTICE_VERSION
 

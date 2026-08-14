@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import frappe
 
+from hrms.patches.v16_0 import add_ayp_recruitment_email_intake as email_intake_patch
 from hrms.recruitment import email_intake
 from hrms.recruitment.talent_pool import (
 	STATUS_ACTIVE,
@@ -191,6 +192,29 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 		self.assertFalse(frappe.safe_eval(condition, eval_locals={"doc": email_doc}))
 		email_doc.custom_data_processing_consent = 0
 		self.assertFalse(frappe.safe_eval(condition, eval_locals={"doc": email_doc}))
+
+	def test_notification_patch_uses_db_update_and_exact_readback(self):
+		expected = {
+			"enabled": 1,
+			"document_type": "Job Applicant",
+			"event": "New",
+			"condition_type": "Python",
+			"condition": email_intake_patch.NOTIFICATION_CONDITION,
+		}
+		with (
+			patch.object(email_intake_patch.frappe.db, "exists", return_value=True),
+			patch.object(email_intake_patch.frappe.db, "set_value") as set_value,
+			patch.object(email_intake_patch.frappe.db, "get_value", return_value=expected),
+			patch.object(email_intake_patch, "clear_notification_cache") as clear_cache,
+		):
+			email_intake_patch._sync_application_received_notification()
+		set_value.assert_called_once_with(
+			"Notification",
+			email_intake_patch.NOTIFICATION_NAME,
+			expected,
+			update_modified=False,
+		)
+		clear_cache.assert_called_once_with()
 
 	def test_valid_later_web_notice_can_activate_profile(self):
 		self.assertTrue(

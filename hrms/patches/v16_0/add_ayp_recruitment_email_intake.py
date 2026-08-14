@@ -13,8 +13,7 @@ from hrms.recruitment.email_intake import (
 
 NOTIFICATION_NAME = "AYP Candidate Application Received"
 NOTIFICATION_CONDITION = (
-	"doc.email_id and doc.get('custom_data_processing_consent') "
-	"and doc.source != 'Email Recursos Humanos'"
+	"doc.email_id and doc.get('custom_data_processing_consent') " "and doc.source != 'Email Recursos Humanos'"
 )
 
 RECRUITMENT_EMAIL_INTAKE_FIELDS = {
@@ -84,21 +83,6 @@ RECRUITMENT_EMAIL_INTAKE_FIELDS = {
 def _sync_application_received_notification() -> None:
 	if not frappe.db.exists("Notification", NOTIFICATION_NAME):
 		frappe.throw(f"No existe la Notification estándar requerida: {NOTIFICATION_NAME}")
-	notification = frappe.get_doc("Notification", NOTIFICATION_NAME)
-	notification.enabled = 1
-	notification.document_type = "Job Applicant"
-	notification.event = "New"
-	notification.condition_type = "Python"
-	notification.condition = NOTIFICATION_CONDITION
-	notification.save(ignore_permissions=True)
-	clear_notification_cache()
-
-	stored = frappe.db.get_value(
-		"Notification",
-		NOTIFICATION_NAME,
-		["enabled", "document_type", "event", "condition_type", "condition"],
-		as_dict=True,
-	)
 	expected = {
 		"enabled": 1,
 		"document_type": "Job Applicant",
@@ -106,6 +90,18 @@ def _sync_application_received_notification() -> None:
 		"condition_type": "Python",
 		"condition": NOTIFICATION_CONDITION,
 	}
+	# Standard Notifications cannot be saved outside developer mode. A direct,
+	# idempotent DB update is the migration path; invalidate the runtime cache
+	# before the exact post-migrate readback.
+	frappe.db.set_value("Notification", NOTIFICATION_NAME, expected, update_modified=False)
+	clear_notification_cache()
+
+	stored = frappe.db.get_value(
+		"Notification",
+		NOTIFICATION_NAME,
+		list(expected),
+		as_dict=True,
+	)
 	if not stored or any(stored.get(field) != value for field, value in expected.items()):
 		raise RuntimeError("La Notification de solicitudes no quedó sincronizada de forma segura.")
 
