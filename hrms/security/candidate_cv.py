@@ -17,7 +17,12 @@ import frappe
 from frappe import _
 from frappe.rate_limiter import rate_limit
 from frappe.utils import now_datetime
-from frappe.utils.file_manager import get_file
+
+from hrms.security.pdf_cv_validator import (
+	SELF_TEST_LIMIT_SETUP_FAILED,
+	SELF_TEST_PARSER_IMPORT_FAILED,
+	SELF_TEST_PARSER_PRELOADED,
+)
 
 MAX_CV_BYTES = 5 * 1024 * 1024
 MAX_DOCX_UNCOMPRESSED_BYTES = 20 * 1024 * 1024
@@ -26,6 +31,7 @@ PDF_VALIDATION_TIMEOUT_SECONDS = 7
 ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx", ".heic", ".heif", ".jpeg", ".jpg", ".png"}
 PDF_NAME_ESCAPE = re.compile(rb"#([0-9a-fA-F]{2})")
 PRIVACY_NOTICE_VERSION = "AYP-RH-2026-07-17-v3"
+CONSENT_WEB_FORM_ROUTE = "empleos/solicitud"
 
 
 class CandidateCVSecurityError(frappe.ValidationError):
@@ -63,11 +69,15 @@ def _persist_file_cv_sha256(file_name: str, sha256: str) -> None:
 
 
 def read_stored_candidate_cv_bytes(file_doc) -> bytes:
-	"""Read exact stored candidate-CV bytes without File.get_content() text coercion."""
-	_, content = get_file(file_doc.file_url)
-	if not isinstance(content, bytes):
-		raise CandidateCVSecurityError(_("No se pudo leer el CV como contenido binario seguro."))
-	return content
+	"""Read exact stored bytes from the validated File path without coercion."""
+	try:
+		# nosemgrep: frappe-security-file-traversal -- exact server-side File record, never a request path
+		with open(file_doc.get_full_path(), "rb") as stored_file:
+			return stored_file.read(MAX_CV_BYTES + 1)
+	except OSError as exc:
+		raise CandidateCVInfrastructureError(
+			_("El almacenamiento del CV no está disponible temporalmente.")
+		) from exc
 
 
 def _is_candidate_cv_upload() -> bool:
@@ -107,9 +117,13 @@ def _validate_pdf(content: bytes) -> None:
 			env={"PATH": os.environ.get("PATH", "")},
 		)
 	except (OSError, subprocess.SubprocessError) as exc:
-		raise CandidateCVSecurityError(
-			_("El PDF está dañado o no supera la validación estructural.")
-		) from exc
+		raise CandidateCVInfrastructureError(_("El validador PDF no está disponible temporalmente.")) from exc
+	if completed.returncode < 0 or completed.returncode in {
+		SELF_TEST_LIMIT_SETUP_FAILED,
+		SELF_TEST_PARSER_PRELOADED,
+		SELF_TEST_PARSER_IMPORT_FAILED,
+	}:
+		raise CandidateCVInfrastructureError(_("El validador PDF no está disponible temporalmente."))
 	if completed.returncode != 0:
 		raise CandidateCVSecurityError(_("El PDF está dañado, protegido o contiene contenido activo."))
 
@@ -333,14 +347,17 @@ def _verified_candidate_cv_sha256(file_record) -> str:
 
 def _candidate_file_record(doc, fields):
 	exact_name = getattr(frappe.local, "ayp_candidate_cv_file_name", None)
+	if not exact_name and frappe.db.has_column("Job Applicant", "custom_candidate_cv_file"):
+		exact_name = doc.get("custom_candidate_cv_file")
 	if exact_name:
 		return frappe.db.get_value("File", exact_name, fields, as_dict=True)
-	return frappe.db.get_value("File", {"file_url": doc.resume_attachment}, fields, as_dict=True)
+	matches = frappe.get_all("File", filters={"file_url": doc.resume_attachment}, fields=fields, limit=2)
+	if len(matches) != 1:
+		raise CandidateCVSecurityError(_("No se pudo resolver de forma única el archivo del CV."))
+	return matches[0]
 
 
 def _is_recruitment_candidate_file(file_record) -> bool:
-	if Path(str(file_record.file_name or "")).suffix.casefold() not in {".pdf", ".docx"}:
-		return False
 	if file_record.attached_to_doctype == "Communication" and file_record.attached_to_name:
 		email_account = frappe.db.get_value("Communication", file_record.attached_to_name, "email_account")
 		email_id = frappe.db.get_value("Email Account", email_account, "email_id") if email_account else None
@@ -354,6 +371,29 @@ def _is_recruitment_candidate_file(file_record) -> bool:
 	return False
 
 
+def _file_url_quarantine_records(file_url: str) -> list:
+	return frappe.get_all(
+		"File",
+		filters={"file_url": file_url},
+		fields=[
+			"name",
+			"file_name",
+			"file_url",
+			"attached_to_doctype",
+			"attached_to_name",
+			"custom_av_scan_status",
+		],
+	)
+
+
+def _file_url_is_quarantined(file_url: str, *, fallback=None) -> bool:
+	records = _file_url_quarantine_records(file_url) if file_url else ([fallback] if fallback else [])
+	return any(
+		record and _is_recruitment_candidate_file(record) and record.get("custom_av_scan_status") != "Clean"
+		for record in records
+	)
+
+
 def guard_candidate_cv_download() -> None:
 	"""Deny direct/API download of recruitment CVs until the exact File is Clean."""
 
@@ -365,24 +405,9 @@ def guard_candidate_cv_download() -> None:
 	)
 	if not file_url.startswith("/private/files/"):
 		return
-	filters = {"file_url": file_url}
-	if frappe.form_dict.get("fid"):
-		filters["name"] = str(frappe.form_dict.fid)
-	files = frappe.get_all(
-		"File",
-		filters=filters,
-		fields=[
-			"name",
-			"file_name",
-			"attached_to_doctype",
-			"attached_to_name",
-			"custom_av_scan_status",
-		],
-	)
-	if any(
-		_is_recruitment_candidate_file(file_record) and file_record.custom_av_scan_status != "Clean"
-		for file_record in files
-	):
+	# `fid` is client-controlled and aliases can share one physical file_url.
+	# Quarantine follows the bytes/path and examines every File row on it.
+	if _file_url_is_quarantined(file_url):
 		frappe.throw(
 			_("This candidate CV is quarantined until its security scan completes."), frappe.PermissionError
 		)
@@ -391,8 +416,11 @@ def guard_candidate_cv_download() -> None:
 def has_candidate_cv_file_permission(doc, ptype=None, user=None, debug=False) -> bool:
 	"""Deny File reads through non-download APIs while a recruitment CV is quarantined."""
 
-	if ptype in {"read", "select", "print", "email"} and _is_recruitment_candidate_file(doc):
-		return doc.get("custom_av_scan_status") == "Clean"
+	if ptype in {"read", "select", "print", "email"}:
+		if _is_recruitment_candidate_file(doc) and doc.get("custom_av_scan_status") != "Clean":
+			return False
+		if _file_url_is_quarantined(str(doc.get("file_url") or ""), fallback=doc):
+			return False
 	return True
 
 
@@ -401,6 +429,30 @@ def validate_job_applicant_cv(doc, method=None) -> None:
 		raise CandidateCVSecurityError(_("Debes aceptar el aviso de privacidad para enviar la solicitud."))
 	if frappe.session.user == "Guest":
 		doc.set("custom_privacy_notice_version", PRIVACY_NOTICE_VERSION)
+		if doc.get("custom_data_processing_consent"):
+			doc.set("custom_consent_capture_method", "Web Form")
+			doc.set("custom_consent_evidence_id", frappe.generate_hash(length=32))
+			doc.set("custom_consent_recorded_on", now_datetime())
+			doc.set("custom_consent_form_route", CONSENT_WEB_FORM_ROUTE)
+	elif doc.is_new():
+		# Internal imports cannot self-declare authoritative Web consent.
+		for fieldname in (
+			"custom_consent_capture_method",
+			"custom_consent_evidence_id",
+			"custom_consent_recorded_on",
+			"custom_consent_form_route",
+		):
+			doc.set(fieldname, "")
+	elif any(
+		doc.has_value_changed(fieldname)
+		for fieldname in (
+			"custom_consent_capture_method",
+			"custom_consent_evidence_id",
+			"custom_consent_recorded_on",
+			"custom_consent_form_route",
+		)
+	):
+		raise CandidateCVSecurityError(_("La evidencia de consentimiento Web es inmutable."))
 
 	if not doc.resume_attachment:
 		if frappe.db.has_column("Job Applicant", "custom_cv_sha256"):
@@ -457,6 +509,8 @@ def validate_job_applicant_cv(doc, method=None) -> None:
 			_("El CV debe cargarse como archivo privado y pasar el control antivirus.")
 		)
 	doc.set("custom_cv_sha256", _verified_candidate_cv_sha256(file_record))
+	if frappe.db.has_column("Job Applicant", "custom_candidate_cv_file"):
+		doc.set("custom_candidate_cv_file", file_record.name)
 
 
 def attach_job_applicant_cv(doc, method=None) -> None:

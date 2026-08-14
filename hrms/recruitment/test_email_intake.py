@@ -6,7 +6,7 @@ import unittest
 from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import frappe
 
@@ -42,6 +42,11 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 	def _communication(self):
 		return FakeDocument(
 			name="COMM-TEST-1",
+			sent_or_received="Received",
+			communication_medium="Email",
+			email_account="RECRUITMENT",
+			has_attachment=1,
+			email_status="",
 			sender="Demo Candidate <demo@example.com>",
 			sender_full_name="Demo Candidate",
 			reference_doctype="",
@@ -94,6 +99,7 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 		callbacks = []
 		rollback_callbacks = []
 		with (
+			patch.object(email_intake, "_is_recruitment_mailbox_message", return_value=True),
 			patch.object(email_intake, "_is_recruitment_email", return_value=True),
 			patch.object(email_intake, "_has_intake_fields", return_value=True),
 			patch.object(email_intake.frappe.db, "after_commit", FakeCallbackManager(callbacks)),
@@ -145,8 +151,28 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 		self.assertEqual(values["custom_ayp_email_intake_claim"], "")
 		enqueue.assert_called_once_with(row.name)
 
+	def test_recovery_enqueue_failure_does_not_abort_later_rows(self):
+		callbacks = []
+		rows = [SimpleNamespace(name="COMM-1"), SimpleNamespace(name="COMM-2")]
+		with (
+			patch.object(email_intake, "_has_intake_fields", return_value=True),
+			patch.object(email_intake.frappe.db, "sql", return_value=rows),
+			patch.object(email_intake.frappe.db, "set_value"),
+			patch.object(email_intake.frappe.db, "after_commit", FakeCallbackManager(callbacks)),
+			patch.object(
+				email_intake,
+				"_enqueue_pending_intake",
+				side_effect=[RuntimeError("redis down"), True],
+			) as enqueue,
+			patch.object(email_intake.frappe, "logger") as logger,
+		):
+			self.assertEqual(email_intake.recover_stale_recruitment_email_intakes(), 2)
+			callbacks[0]()
+		self.assertEqual([record.args[0] for record in enqueue.call_args_list], ["COMM-1", "COMM-2"])
+		logger.return_value.error.assert_called_once()
+
 	def test_recruitment_email_account_forces_all_automatic_mail_off(self):
-		folder = FakeDocument(append_to="Job Applicant")
+		folder = FakeDocument(folder_name="INBOX", append_to="Job Applicant")
 		account = FakeDocument(
 			email_id="empleos@aroypedal.com",
 			enable_auto_reply=1,
@@ -158,6 +184,8 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 		email_intake.enforce_recruitment_email_account_safety(account)
 		self.assertEqual(account.enable_auto_reply, 0)
 		self.assertEqual(account.notify_if_unreplied, 0)
+		self.assertEqual(account.enable_outgoing, 0)
+		self.assertEqual(account.default_outgoing, 0)
 		self.assertEqual(account.send_notification_to, "")
 		self.assertEqual(account.append_to, "Communication")
 		self.assertEqual(folder.append_to, "Communication")
@@ -165,6 +193,11 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 		email_intake.enforce_recruitment_email_account_safety(other)
 		self.assertEqual(other.enable_auto_reply, 1)
 		self.assertEqual(other.notify_if_unreplied, 1)
+		unsafe = FakeDocument(
+			email_id="empleos@aroypedal.com", imap_folder=[FakeDocument(folder_name="Junk")]
+		)
+		with self.assertRaises(frappe.ValidationError):
+			email_intake.enforce_recruitment_email_account_safety(unsafe)
 
 	def test_spam_and_trash_are_not_recruitment_intakes(self):
 		for email_status in ("Spam", "Trash"):
@@ -174,9 +207,23 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 			communication.email_account = "RECRUITMENT"
 			communication.has_attachment = 1
 			communication.email_status = email_status
-			with patch.object(email_intake.frappe.db, "get_value") as get_value:
+			with patch.object(
+				email_intake.frappe.db, "get_value", return_value="empleos@aroypedal.com"
+			) as get_value:
 				self.assertFalse(email_intake._is_recruitment_email(communication))
-			get_value.assert_not_called()
+			get_value.assert_called_once_with("Email Account", "RECRUITMENT", "email_id")
+
+	def test_mailbox_guard_removes_thread_reference_without_attachment(self):
+		communication = self._communication()
+		communication.has_attachment = 0
+		communication.custom_ayp_email_intake_status = ""
+		communication.reference_doctype = "Job Applicant"
+		communication.reference_name = "HR-APP-THREAD"
+		with patch.object(email_intake.frappe.db, "get_value", return_value="empleos@aroypedal.com"):
+			email_intake.enqueue_recruitment_email_intake(communication)
+		self.assertIsNone(communication.reference_doctype)
+		self.assertIsNone(communication.reference_name)
+		self.assertEqual(communication.custom_ayp_email_intake_status, "")
 
 	def test_candidate_file_query_filters_before_limiting_to_two(self):
 		with patch.object(email_intake.frappe.db, "sql", return_value=[]) as sql:
@@ -221,6 +268,11 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 		web_doc = frappe._dict(
 			email_id="demo@example.com",
 			custom_data_processing_consent=1,
+			custom_privacy_notice_version="AYP-RH-2026-07-17-v3",
+			custom_consent_capture_method="Web Form",
+			custom_consent_evidence_id="evidence-1",
+			custom_consent_recorded_on="2026-08-14 01:00:00",
+			custom_consent_form_route="empleos/solicitud",
 			source="Sitio Web",
 		)
 		email_doc = frappe._dict(
@@ -261,8 +313,12 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 			should_activate_talent_pool_profile(
 				STATUS_CURRENT_VACANCY_ONLY,
 				"Sitio Web",
-				"ayp-candidates-v1",
+				"AYP-RH-2026-07-17-v3",
 				1,
+				"Web Form",
+				"evidence-1",
+				"2026-08-14 01:00:00",
+				"empleos/solicitud",
 			)
 		)
 		self.assertFalse(
@@ -271,17 +327,37 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 				"Email Recursos Humanos",
 				"",
 				0,
+				"",
+				"",
+				None,
+				"",
 			)
 		)
 		self.assertFalse(
 			should_activate_talent_pool_profile(
 				STATUS_CURRENT_VACANCY_ONLY,
 				"Importación interna",
-				"ayp-candidates-v1",
-				0,
+				"AYP-RH-2026-07-17-v3",
+				1,
+				"Internal Import",
+				"forged-evidence",
+				"2026-08-14 01:00:00",
+				"empleos/solicitud",
 			)
 		)
-		self.assertEqual(initial_talent_pool_status("Sitio Web"), STATUS_ACTIVE)
+		self.assertEqual(
+			initial_talent_pool_status(
+				"Sitio Web",
+				"AYP-RH-2026-07-17-v3",
+				1,
+				"Web Form",
+				"evidence-1",
+				"2026-08-14 01:00:00",
+				"empleos/solicitud",
+			),
+			STATUS_ACTIVE,
+		)
+		self.assertEqual(initial_talent_pool_status("Sitio Web"), STATUS_CURRENT_VACANCY_ONLY)
 
 	def test_profile_application_save_runs_inside_governance_context(self):
 		observed = []
@@ -295,8 +371,10 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 		self.assertEqual(observed, [(True, {"ignore_permissions": True})])
 		self.assertEqual(email_intake.frappe.flags.get("ayp_candidate_profile_governance_update"), previous)
 
-	def test_duplicate_message_links_email_and_keeps_private_evidence(self):
+	def test_sender_controlled_duplicate_never_auto_links(self):
 		communication = self._communication()
+		communication.reference_doctype = "Job Applicant"
+		communication.reference_name = "HR-APP-UNTRUSTED"
 		file_doc = self._file()
 		applicant = FakeDocument(
 			name="HR-APP-1",
@@ -311,13 +389,54 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 				patch.object(email_intake, "same_vacancy_application", return_value=applicant.name)
 			)
 			stack.enter_context(
-				patch.object(email_intake.frappe, "get_doc", side_effect=[communication, file_doc, applicant])
+				patch.object(email_intake.frappe, "get_doc", side_effect=[communication, file_doc])
 			)
 			link = stack.enter_context(patch.object(email_intake, "_link_communication"))
-			result = email_intake.process_recruitment_email(communication.name)
-		self.assertEqual(result["status"], "duplicate_message")
-		self.assertEqual(communication.custom_ayp_email_intake_status, email_intake.INTAKE_COMPLETED)
-		link.assert_called_once_with(communication, applicant.name)
+			with self.assertRaises(email_intake.EmailIntakeReviewRequired):
+				email_intake.process_recruitment_email(communication.name)
+		link.assert_not_called()
+		self.assertIsNone(communication.reference_doctype)
+		self.assertIsNone(communication.reference_name)
+
+	def test_human_review_commits_clean_scan_evidence_without_linking(self):
+		with (
+			patch.object(
+				email_intake,
+				"process_recruitment_email",
+				side_effect=email_intake.EmailIntakeReviewRequired("review"),
+			),
+			patch.object(email_intake.frappe.db, "rollback") as rollback,
+			patch.object(email_intake.frappe.db, "set_value") as set_value,
+			patch.object(email_intake.frappe.db, "commit") as commit,
+		):
+			result = email_intake.process_recruitment_email_safely("COMM-TEST-1")
+		self.assertEqual(result["status"], "review_required")
+		rollback.assert_not_called()
+		self.assertEqual(
+			set_value.call_args.args[2][email_intake.INTAKE_STATUS_FIELD], email_intake.INTAKE_BLOCKED
+		)
+		commit.assert_called_once()
+
+	def test_authorized_reviewer_can_reject_clean_conflict_durably(self):
+		communication = self._communication()
+		communication.custom_ayp_email_intake_status = email_intake.INTAKE_BLOCKED
+		communication.custom_ayp_email_intake_error_code = "EmailIntakeReviewRequired"
+		file_doc = self._file()
+		file_doc.custom_av_scan_status = "Clean"
+		file_doc.custom_cv_sha256 = "a" * 64
+		with (
+			patch.object(email_intake.frappe, "only_for"),
+			patch.object(email_intake.frappe.db, "sql"),
+			patch.object(
+				email_intake,
+				"_candidate_files",
+				return_value=[{"name": file_doc.name, "file_name": file_doc.file_name}],
+			),
+			patch.object(email_intake.frappe, "get_doc", side_effect=[communication, file_doc]),
+		):
+			result = email_intake.resolve_recruitment_email_review(communication.name, "reject")
+		self.assertEqual(result["status"], "rejected")
+		self.assertEqual(communication.custom_ayp_email_intake_error_code, "ReviewRejected")
 
 	def test_email_identity_alone_cannot_replace_existing_cv(self):
 		communication = self._communication()
@@ -387,6 +506,8 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 			patch.object(email_intake.frappe.db, "exists", return_value=True),
 			patch.object(email_intake.frappe.db, "sql"),
 			patch.object(email_intake.frappe.db, "get_value", return_value=completed),
+			patch.object(email_intake.frappe, "get_doc", return_value=FakeDocument(**completed)),
+			patch.object(email_intake, "_verified_completed_applicant", return_value="HR-APP-1"),
 			patch.object(email_intake.frappe.db, "set_value") as set_value,
 			patch.object(email_intake.frappe.db, "commit") as commit,
 			patch.object(email_intake.frappe, "log_error"),
@@ -395,6 +516,39 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 		self.assertEqual(result, {"status": "already_processed", "applicant": "HR-APP-1"})
 		set_value.assert_not_called()
 		commit.assert_not_called()
+
+	def test_completed_readback_requires_exact_clean_file_and_sha(self):
+		sha = "a" * 64
+		communication = FakeDocument(
+			name="COMM-COMPLETE",
+			reference_doctype="Job Applicant",
+			reference_name="HR-APP-1",
+			custom_ayp_email_intake_applicant="HR-APP-1",
+			custom_ayp_email_intake_file="FILE-1",
+			custom_ayp_email_intake_cv_sha256=sha,
+		)
+		applicant = FakeDocument(
+			name="HR-APP-1",
+			resume_attachment="/private/files/cv.pdf",
+			custom_cv_sha256=sha,
+			custom_candidate_cv_file="FILE-1",
+		)
+		file_record = FakeDocument(
+			name="FILE-1",
+			file_url="/private/files/cv.pdf",
+			attached_to_doctype="Job Applicant",
+			attached_to_name="HR-APP-1",
+			custom_av_scan_status="Clean",
+			custom_cv_sha256=sha,
+		)
+		with patch.object(email_intake.frappe.db, "get_value", side_effect=[applicant, file_record]):
+			self.assertEqual(email_intake._verified_completed_applicant(communication), "HR-APP-1")
+		file_record.custom_av_scan_status = "Pending"
+		with (
+			patch.object(email_intake.frappe.db, "get_value", side_effect=[applicant, file_record]),
+			self.assertRaises(email_intake.EmailIntakeDomainError),
+		):
+			email_intake._verified_completed_applicant(communication)
 
 
 if __name__ == "__main__":

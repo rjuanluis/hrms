@@ -14,7 +14,13 @@ from hrms.recruitment.email_intake import (
 
 NOTIFICATION_NAME = "AYP Candidate Application Received"
 NOTIFICATION_CONDITION = (
-	"doc.email_id and doc.get('custom_data_processing_consent') " "and doc.source != 'Email Recursos Humanos'"
+	"doc.email_id and doc.source == 'Sitio Web' "
+	"and doc.get('custom_data_processing_consent') "
+	"and doc.get('custom_privacy_notice_version') == 'AYP-RH-2026-07-17-v3' "
+	"and doc.get('custom_consent_capture_method') == 'Web Form' "
+	"and doc.get('custom_consent_evidence_id') "
+	"and doc.get('custom_consent_recorded_on') "
+	"and doc.get('custom_consent_form_route') == 'empleos/solicitud'"
 )
 
 RECRUITMENT_EMAIL_INTAKE_FIELDS = {
@@ -76,6 +82,74 @@ RECRUITMENT_EMAIL_INTAKE_FIELDS = {
 			"options": "Job Applicant",
 			"read_only": 1,
 			"insert_after": "custom_ayp_email_intake_error_code",
+		},
+		{
+			"fieldname": "custom_ayp_email_intake_file",
+			"label": "Archivo canónico del intake",
+			"fieldtype": "Link",
+			"options": "File",
+			"read_only": 1,
+			"hidden": 1,
+			"no_copy": 1,
+			"insert_after": "custom_ayp_email_intake_applicant",
+		},
+		{
+			"fieldname": "custom_ayp_email_intake_cv_sha256",
+			"label": "SHA-256 del CV del intake",
+			"fieldtype": "Data",
+			"read_only": 1,
+			"hidden": 1,
+			"no_copy": 1,
+			"insert_after": "custom_ayp_email_intake_file",
+		},
+	],
+	"Job Applicant": [
+		{
+			"fieldname": "custom_consent_capture_method",
+			"label": "Método de captura del consentimiento",
+			"fieldtype": "Data",
+			"read_only": 1,
+			"hidden": 1,
+			"no_copy": 1,
+			"insert_after": "custom_privacy_notice_version",
+		},
+		{
+			"fieldname": "custom_consent_evidence_id",
+			"label": "ID de evidencia del consentimiento",
+			"fieldtype": "Data",
+			"read_only": 1,
+			"hidden": 1,
+			"no_copy": 1,
+			"unique": 1,
+			"insert_after": "custom_consent_capture_method",
+		},
+		{
+			"fieldname": "custom_consent_recorded_on",
+			"label": "Fecha de evidencia del consentimiento",
+			"fieldtype": "Datetime",
+			"read_only": 1,
+			"hidden": 1,
+			"no_copy": 1,
+			"insert_after": "custom_consent_evidence_id",
+		},
+		{
+			"fieldname": "custom_consent_form_route",
+			"label": "Ruta de captura del consentimiento",
+			"fieldtype": "Data",
+			"read_only": 1,
+			"hidden": 1,
+			"no_copy": 1,
+			"insert_after": "custom_consent_recorded_on",
+		},
+		{
+			"fieldname": "custom_candidate_cv_file",
+			"label": "Archivo canónico del CV",
+			"fieldtype": "Link",
+			"options": "File",
+			"read_only": 1,
+			"hidden": 1,
+			"no_copy": 1,
+			"insert_after": "custom_consent_capture_method",
 		},
 	],
 }

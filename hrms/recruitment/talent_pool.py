@@ -16,6 +16,7 @@ from hrms.recruitment.matching import (
 	normalize_phone,
 	requires_name_compatibility,
 )
+from hrms.security.candidate_cv import PRIVACY_NOTICE_VERSION
 
 PROFILE_DOCTYPE = "AYP Candidate Profile"
 STATUS_ACTIVE = "Activo"
@@ -23,6 +24,9 @@ STATUS_CURRENT_VACANCY_ONLY = "Solo vacante actual"
 LOCK_TIMEOUT_SECONDS = 10
 GLOBAL_CANDIDATE_LOCK = "ayp-candidate-pool-global"
 MAX_PROFILE_REDIRECTS = 20
+EMAIL_SOURCE = "Email Recursos Humanos"
+WEB_SOURCE = "Sitio Web"
+WEB_CONSENT_CAPTURE = "Web Form"
 
 
 def _release_candidate_locks(lock_names: tuple[str, ...]) -> None:
@@ -172,8 +176,26 @@ def _set_if_supported(doc, fieldname: str, value) -> None:
 		doc.set(fieldname, value)
 
 
-def initial_talent_pool_status(source: str | None) -> str:
-	return STATUS_CURRENT_VACANCY_ONLY if source == "Email Recursos Humanos" else STATUS_ACTIVE
+def initial_talent_pool_status(
+	source: str | None,
+	privacy_version: str | None = None,
+	data_processing_consent: bool | int | None = None,
+	consent_capture_method: str | None = None,
+	consent_evidence_id: str | None = None,
+	consent_recorded_on=None,
+	consent_form_route: str | None = None,
+) -> str:
+	return (
+		STATUS_ACTIVE
+		if source == WEB_SOURCE
+		and privacy_version == PRIVACY_NOTICE_VERSION
+		and bool(data_processing_consent)
+		and consent_capture_method == WEB_CONSENT_CAPTURE
+		and bool(consent_evidence_id)
+		and bool(consent_recorded_on)
+		and consent_form_route == "empleos/solicitud"
+		else STATUS_CURRENT_VACANCY_ONLY
+	)
 
 
 def should_activate_talent_pool_profile(
@@ -181,12 +203,20 @@ def should_activate_talent_pool_profile(
 	source: str | None,
 	privacy_version: str | None,
 	data_processing_consent: bool | int | None,
+	consent_capture_method: str | None,
+	consent_evidence_id: str | None,
+	consent_recorded_on,
+	consent_form_route: str | None,
 ) -> bool:
 	return bool(
 		profile_status == STATUS_CURRENT_VACANCY_ONLY
 		and data_processing_consent
-		and privacy_version
-		and source != "Email Recursos Humanos"
+		and privacy_version == PRIVACY_NOTICE_VERSION
+		and source == WEB_SOURCE
+		and consent_capture_method == WEB_CONSENT_CAPTURE
+		and consent_evidence_id
+		and consent_recorded_on
+		and consent_form_route == "empleos/solicitud"
 	)
 
 
@@ -198,7 +228,15 @@ def _save_profile_from_application(profile) -> None:
 
 
 def _create_candidate_profile(doc, *, email: str, phone: str, cv_sha256: str, dedupe_status: str) -> str:
-	talent_pool_status = initial_talent_pool_status(doc.get("source"))
+	talent_pool_status = initial_talent_pool_status(
+		doc.get("source"),
+		doc.get("custom_privacy_notice_version"),
+		doc.get("custom_data_processing_consent"),
+		doc.get("custom_consent_capture_method"),
+		doc.get("custom_consent_evidence_id"),
+		doc.get("custom_consent_recorded_on"),
+		doc.get("custom_consent_form_route"),
+	)
 	profile = frappe.get_doc(
 		{
 			"doctype": PROFILE_DOCTYPE,
@@ -275,6 +313,10 @@ def link_job_applicant_profile(doc, method=None) -> None:
 		"cv": _cv_profile_matches(cv_sha256),
 	}
 	profile_name, dedupe_status = choose_profile_match(matches)
+	if doc.get("source") == EMAIL_SOURCE and any(matches.values()):
+		# Sender headers and attachment bytes are controlled by one SMTP
+		# message; they cannot authorize linking to an existing person.
+		profile_name, dedupe_status = None, DEDUPE_REVIEW
 	matching_signals = [signal for signal, names in matches.items() if profile_name and profile_name in names]
 	if profile_name and requires_name_compatibility(matching_signals):
 		profile_row = _profile_name_for_update(profile_name)
@@ -379,6 +421,10 @@ def sync_candidate_profile(doc, method=None) -> None:
 		doc.get("source"),
 		doc.get("custom_privacy_notice_version"),
 		doc.get("custom_data_processing_consent"),
+		doc.get("custom_consent_capture_method"),
+		doc.get("custom_consent_evidence_id"),
+		doc.get("custom_consent_recorded_on"),
+		doc.get("custom_consent_form_route"),
 	):
 		profile.talent_pool_status = STATUS_ACTIVE
 		profile.privacy_notice_version = doc.get("custom_privacy_notice_version")

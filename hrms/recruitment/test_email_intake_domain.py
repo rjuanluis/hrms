@@ -45,7 +45,7 @@ class TestEmailIntakeDomain(unittest.TestCase):
 				]
 			)
 
-	def test_same_vacancy_application_reuses_one_exact_row(self):
+	def test_same_vacancy_exact_email_and_sha_still_require_review(self):
 		rows = [
 			{
 				"name": "APP-1",
@@ -54,12 +54,10 @@ class TestEmailIntakeDomain(unittest.TestCase):
 				"custom_cv_sha256": "abc",
 			}
 		]
-		self.assertEqual(
+		with self.assertRaisesRegex(EmailIntakeDomainError, "identidad requiere revisión manual"):
 			same_vacancy_application(
 				rows, email="ana@example.com", cv_sha256="abc", applicant_name="Ana Pérez"
-			),
-			"APP-1",
-		)
+			)
 
 	def test_same_vacancy_application_returns_none_without_match(self):
 		self.assertIsNone(

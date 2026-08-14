@@ -13,6 +13,7 @@ SELF_TEST_MEMORY_LIMIT_ENFORCED = 86
 SELF_TEST_LIMIT_SETUP_FAILED = 87
 SELF_TEST_PARSER_PRELOADED = 88
 SELF_TEST_PARSER_IMPORT_FAILED = 89
+VALIDATION_REJECTED = 2
 
 # These are intentionally loaded only after the child process has installed
 # its hard limits. Importing pypdf before RLIMIT_AS leaves parser import and
@@ -231,7 +232,7 @@ def main() -> int:
 	try:
 		_load_parser()
 	except Exception:
-		return SELF_TEST_PARSER_IMPORT_FAILED if self_test else 2
+		return SELF_TEST_PARSER_IMPORT_FAILED
 	# The parent validator passes a minimal environment containing only PATH,
 	# so uploaded bytes cannot activate this test-only confinement probe.
 	# Importing pypdf before the verified limit, failing to import it, or failing
@@ -249,7 +250,7 @@ def main() -> int:
 	try:
 		validate_pdf_bytes(content)
 	except Exception:
-		return 2
+		return VALIDATION_REJECTED
 	return 0
 
 

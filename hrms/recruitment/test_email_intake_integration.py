@@ -34,7 +34,7 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 				frappe.get_doc({"doctype": "Job Applicant Source", "source_name": source}).insert()
 
 	def _applicant(self, *, email: str, source: str, consent: int, privacy_version: str):
-		return frappe.get_doc(
+		doc = frappe.get_doc(
 			{
 				"doctype": "Job Applicant",
 				"status": "Open",
@@ -45,7 +45,15 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 				"custom_data_processing_consent": consent,
 				"custom_privacy_notice_version": privacy_version,
 			}
-		).insert(ignore_permissions=True)
+		)
+		if source != WEB_SOURCE:
+			return doc.insert(ignore_permissions=True)
+		previous_user = frappe.session.user
+		try:
+			frappe.set_user("Guest")
+			return doc.insert(ignore_permissions=True)
+		finally:
+			frappe.set_user(previous_user)
 
 	def _outbound_counts(self, applicant_name: str) -> tuple[int, int]:
 		queue_count = frappe.db.count(
@@ -80,6 +88,8 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 		).insert(ignore_permissions=True)
 		self.assertEqual(account.enable_auto_reply, 0)
 		self.assertEqual(account.notify_if_unreplied, 0)
+		self.assertEqual(account.enable_outgoing, 0)
+		self.assertEqual(account.default_outgoing, 0)
 		self.assertEqual(account.send_notification_to, "")
 		self.assertEqual(account.append_to, "Communication")
 		self.assertTrue(all(folder.append_to == "Communication" for folder in account.imap_folder))
@@ -89,6 +99,8 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 			{
 				"enable_auto_reply": 1,
 				"notify_if_unreplied": 1,
+				"enable_outgoing": 1,
+				"default_outgoing": 1,
 				"send_notification_to": "owner@example.com",
 				"append_to": "Job Applicant",
 				"enable_incoming": 1,
@@ -104,9 +116,16 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 			frappe.db.get_value(
 				"Email Account",
 				account.name,
-				("enable_auto_reply", "notify_if_unreplied", "send_notification_to", "append_to"),
+				(
+					"enable_auto_reply",
+					"notify_if_unreplied",
+					"enable_outgoing",
+					"default_outgoing",
+					"send_notification_to",
+					"append_to",
+				),
 			),
-			(0, 0, "", "Communication"),
+			(0, 0, 0, 0, "", "Communication"),
 		)
 		self.assertEqual(
 			frappe.get_all(
@@ -185,6 +204,74 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 				frappe.db.delete("Communication", {"name": communication_name})
 			frappe.db.delete("Email Account", {"name": account_name})
 			# Clean records committed by this post-commit boundary test.
+			frappe.db.commit()  # nosemgrep
+
+	def test_email_account_receive_suppresses_thread_reply_without_attachment(self):
+		account_name = f"_Test Recruitment Thread {frappe.generate_hash(length=8)}"
+		message_id = f"ayp-thread-{frappe.generate_hash(length=12)}@example.com"
+		created = []
+		try:
+			applicant = self._applicant(
+				email=f"thread-{frappe.generate_hash(length=8)}@example.com",
+				source=APPLICANT_SOURCE,
+				consent=0,
+				privacy_version="",
+			)
+			created.append(("Job Applicant", applicant.name))
+			parent = frappe.get_doc(
+				{
+					"doctype": "Communication",
+					"communication_type": "Communication",
+					"communication_medium": "Email",
+					"sent_or_received": "Sent",
+					"subject": "Thread parent",
+					"content": "Parent",
+					"sender": "hr@example.com",
+					"recipients": applicant.email_id,
+					"message_id": message_id,
+					"reference_doctype": "Job Applicant",
+					"reference_name": applicant.name,
+				}
+			).insert(ignore_permissions=True)
+			created.append(("Communication", parent.name))
+			account = frappe.get_doc(
+				{
+					"doctype": "Email Account",
+					"email_account_name": account_name,
+					"email_id": "empleos@aroypedal.com",
+					"enable_incoming": 0,
+					"enable_outgoing": 0,
+					"default_outgoing": 0,
+					"append_to": "Job Applicant",
+				}
+			).insert(ignore_permissions=True)
+			created.append(("Email Account", account.name))
+			message = EmailMessage()
+			message["From"] = "_Test Candidate <candidate@example.com>"
+			message["To"] = "empleos@aroypedal.com"
+			message["Subject"] = "Re: Thread parent"
+			message["Message-ID"] = f"<child-{frappe.generate_hash(length=12)}@example.com>"
+			message["In-Reply-To"] = f"<{message_id}>"
+			message.set_content("Follow-up without attachment")
+			mail = InboundMail(message.as_bytes(), account)
+			queue_before = frappe.db.count("Email Queue")
+			with (
+				patch.object(account, "get_inbound_mails", return_value=[mail]),
+				patch.object(frappe, "sendmail") as sendmail,
+				patch.object(email_intake, "_enqueue_pending_intake", return_value=True),
+			):
+				account.receive()
+				sendmail.assert_not_called()
+			child = frappe.get_doc("Communication", {"message_id": mail.message_id})
+			created.append(("Communication", child.name))
+			self.assertFalse(child.reference_doctype)
+			self.assertFalse(child.reference_name)
+			self.assertEqual(frappe.db.count("Email Queue"), queue_before)
+			self.assertEqual(account.enable_outgoing, 0)
+			self.assertEqual(account.default_outgoing, 0)
+		finally:
+			for doctype, name in reversed(created):
+				frappe.db.delete(doctype, {"name": name})
 			frappe.db.commit()  # nosemgrep
 
 	def test_native_inbound_recruitment_mail_creates_no_outbound_email(self):

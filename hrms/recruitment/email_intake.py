@@ -8,6 +8,7 @@ from frappe.utils import add_to_date, now_datetime
 
 from hrms.recruitment.email_intake_domain import (
 	EmailIntakeDomainError,
+	EmailIntakeReviewRequired,
 	same_vacancy_application,
 	select_candidate_cv,
 	sender_identity,
@@ -30,6 +31,7 @@ INTAKE_COMPLETED = "Completado"
 INTAKE_BLOCKED = "Bloqueado"
 INTAKE_STATUS_FIELD = "custom_ayp_email_intake_status"
 INTAKE_STALE_MINUTES = 15
+ALLOWED_RECRUITMENT_IMAP_FOLDERS = frozenset({"inbox"})
 
 
 def _configured_mailbox() -> str:
@@ -40,17 +42,19 @@ def _configured_job_opening() -> str:
 	return str(frappe.conf.get("ayp_recruitment_job_opening") or DEFAULT_JOB_OPENING).strip()
 
 
-def _is_recruitment_email(doc) -> bool:
-	if (
-		doc.sent_or_received != "Received"
-		or doc.communication_medium != "Email"
-		or not doc.email_account
-		or not doc.has_attachment
-		or str(doc.get("email_status") or "").casefold() in {"spam", "trash"}
-	):
+def _is_recruitment_mailbox_message(doc) -> bool:
+	if doc.sent_or_received != "Received" or doc.communication_medium != "Email" or not doc.email_account:
 		return False
 	email_id = frappe.db.get_value("Email Account", doc.email_account, "email_id")
 	return str(email_id or "").strip().casefold() == _configured_mailbox()
+
+
+def _is_recruitment_email(doc) -> bool:
+	return bool(
+		_is_recruitment_mailbox_message(doc)
+		and doc.has_attachment
+		and str(doc.get("email_status") or "").casefold() not in {"spam", "trash"}
+	)
 
 
 def _has_intake_fields() -> bool:
@@ -63,9 +67,14 @@ def enforce_recruitment_email_account_safety(doc, method=None) -> None:
 	if str(doc.email_id or "").strip().casefold() == _configured_mailbox():
 		doc.enable_auto_reply = 0
 		doc.notify_if_unreplied = 0
+		doc.enable_outgoing = 0
+		doc.default_outgoing = 0
 		doc.send_notification_to = ""
 		doc.append_to = "Communication"
 		for folder in doc.get("imap_folder") or []:
+			folder_name = str(folder.get("folder_name") or "").strip().casefold()
+			if folder_name not in ALLOWED_RECRUITMENT_IMAP_FOLDERS:
+				frappe.throw(frappe._("La cuenta de reclutamiento solo puede sincronizar INBOX."))
 			folder.append_to = "Communication"
 
 
@@ -84,18 +93,24 @@ def disable_existing_recruitment_mailbox_auto_reply() -> list[str]:
 			{
 				"enable_auto_reply": 0,
 				"notify_if_unreplied": 0,
+				"enable_outgoing": 0,
+				"default_outgoing": 0,
 				"send_notification_to": "",
 				"append_to": "Communication",
 			},
 			update_modified=False,
 		)
-		for folder_name in frappe.get_all(
+		folders = frappe.get_all(
 			"IMAP Folder",
 			filters={"parenttype": "Email Account", "parent": account_name, "parentfield": "imap_folder"},
-			pluck="name",
-		):
+			fields=["name", "folder_name"],
+		)
+		for folder in folders:
+			if str(folder.folder_name or "").strip().casefold() not in ALLOWED_RECRUITMENT_IMAP_FOLDERS:
+				frappe.db.delete("IMAP Folder", folder.name)
+				continue
 			frappe.db.set_value(
-				"IMAP Folder", folder_name, "append_to", "Communication", update_modified=False
+				"IMAP Folder", folder.name, "append_to", "Communication", update_modified=False
 			)
 	unsafe = [account_name for account_name in accounts if _unsafe_recruitment_email_account(account_name)]
 	if unsafe:
@@ -107,19 +122,44 @@ def _unsafe_recruitment_email_account(account_name: str) -> bool:
 	settings = frappe.db.get_value(
 		"Email Account",
 		account_name,
-		("enable_auto_reply", "notify_if_unreplied", "send_notification_to", "append_to"),
+		(
+			"enable_auto_reply",
+			"notify_if_unreplied",
+			"enable_outgoing",
+			"default_outgoing",
+			"send_notification_to",
+			"append_to",
+		),
 	)
 	if not settings:
 		return True
-	enable_auto_reply, notify_if_unreplied, send_notification_to, append_to = settings
-	if enable_auto_reply or notify_if_unreplied or send_notification_to or append_to != "Communication":
+	(
+		enable_auto_reply,
+		notify_if_unreplied,
+		enable_outgoing,
+		default_outgoing,
+		send_notification_to,
+		append_to,
+	) = settings
+	if (
+		enable_auto_reply
+		or notify_if_unreplied
+		or enable_outgoing
+		or default_outgoing
+		or send_notification_to
+		or append_to != "Communication"
+	):
 		return True
-	folder_routes = frappe.get_all(
+	folders = frappe.get_all(
 		"IMAP Folder",
 		filters={"parenttype": "Email Account", "parent": account_name, "parentfield": "imap_folder"},
-		pluck="append_to",
+		fields=["folder_name", "append_to"],
 	)
-	return any(route != "Communication" for route in folder_routes)
+	return any(
+		folder.append_to != "Communication"
+		or str(folder.folder_name or "").strip().casefold() not in ALLOWED_RECRUITMENT_IMAP_FOLDERS
+		for folder in folders
+	)
 
 
 def _enqueue_pending_intake(communication_name: str) -> bool:
@@ -144,10 +184,8 @@ def _enqueue_pending_intake(communication_name: str) -> bool:
 def enqueue_recruitment_email_intake(doc, method=None) -> None:
 	"""Persist enqueue intent with the email; after-commit enqueue is only an accelerator."""
 
-	if not _is_recruitment_email(doc):
+	if not _is_recruitment_mailbox_message(doc):
 		return
-	if not _has_intake_fields():
-		frappe.throw(frappe._("Durable recruitment intake state is not installed; run migrate."))
 	if doc.get(INTAKE_STATUS_FIELD) in (INTAKE_COMPLETED, INTAKE_BLOCKED):
 		return
 	if doc.reference_doctype or doc.reference_name:
@@ -155,6 +193,10 @@ def enqueue_recruitment_email_intake(doc, method=None) -> None:
 		# Communication retains a parent/reference. Recruitment mail must remain
 		# standalone until the governed worker links it after a clean CV scan.
 		doc.db_set({"reference_doctype": None, "reference_name": None}, update_modified=False)
+	if not _is_recruitment_email(doc):
+		return
+	if not _has_intake_fields():
+		frappe.throw(frappe._("Durable recruitment intake state is not installed; run migrate."))
 	doc.db_set(
 		{
 			INTAKE_STATUS_FIELD: INTAKE_PENDING,
@@ -279,6 +321,61 @@ def _complete_intake(communication, *, claim: str, applicant_name: str) -> None:
 	)
 
 
+def _verified_completed_applicant(communication) -> str:
+	applicant_name = str(communication.get("custom_ayp_email_intake_applicant") or "")
+	file_name = str(communication.get("custom_ayp_email_intake_file") or "")
+	expected_sha = str(communication.get("custom_ayp_email_intake_cv_sha256") or "")
+	if (
+		not applicant_name
+		or not file_name
+		or len(expected_sha) != 64
+		or communication.reference_doctype != "Job Applicant"
+		or communication.reference_name != applicant_name
+	):
+		raise EmailIntakeDomainError("El estado Completed no tiene evidencia durable completa.")
+	applicant = frappe.db.get_value(
+		"Job Applicant",
+		applicant_name,
+		["name", "resume_attachment", "custom_cv_sha256", "custom_candidate_cv_file"],
+		as_dict=True,
+	)
+	file_record = frappe.db.get_value(
+		"File",
+		file_name,
+		[
+			"name",
+			"file_url",
+			"attached_to_doctype",
+			"attached_to_name",
+			"custom_av_scan_status",
+			"custom_cv_sha256",
+		],
+		as_dict=True,
+	)
+	file_link_is_exact = file_record and (
+		(
+			file_record.attached_to_doctype == "Job Applicant"
+			and file_record.attached_to_name == applicant_name
+			and applicant
+			and applicant.custom_candidate_cv_file == file_name
+			and applicant.resume_attachment == file_record.file_url
+		)
+		or (
+			file_record.attached_to_doctype == "Communication"
+			and file_record.attached_to_name == communication.name
+		)
+	)
+	if (
+		not applicant
+		or not file_record
+		or not file_link_is_exact
+		or file_record.custom_av_scan_status != "Clean"
+		or file_record.custom_cv_sha256 != expected_sha
+	):
+		raise EmailIntakeDomainError("El estado Completed no supera el readback de CV limpio.")
+	return applicant_name
+
+
 def _assert_candidate_file_link(file_name: str, applicant_name: str) -> None:
 	link = frappe.db.get_value(
 		"File",
@@ -302,6 +399,10 @@ def _new_applicant_data(*, applicant_name: str, email: str, job_opening: str, re
 		"resume_attachment": resume_attachment,
 		"custom_data_processing_consent": 0,
 		"custom_privacy_notice_version": "",
+		"custom_consent_capture_method": "",
+		"custom_consent_evidence_id": "",
+		"custom_consent_recorded_on": None,
+		"custom_consent_form_route": "",
 	}
 
 
@@ -317,14 +418,12 @@ def process_recruitment_email(communication_name: str) -> dict:
 	if claim is None:
 		return {
 			"status": "already_processed",
-			"applicant": communication.get("custom_ayp_email_intake_applicant")
-			or communication.reference_name,
+			"applicant": _verified_completed_applicant(communication),
 		}
 	if not _is_recruitment_email(communication):
 		raise EmailIntakeDomainError("El correo Pendiente ya no corresponde al buzón de reclutamiento.")
-	if communication.reference_doctype == "Job Applicant" and communication.reference_name:
-		_complete_intake(communication, claim=claim, applicant_name=communication.reference_name)
-		return {"status": "already_processed", "applicant": communication.reference_name}
+	if communication.reference_doctype or communication.reference_name:
+		communication.db_set({"reference_doctype": None, "reference_name": None}, update_modified=False)
 
 	job_opening = _configured_job_opening()
 	if not frappe.db.exists("Job Opening", {"name": job_opening, "status": "Open"}):
@@ -334,6 +433,13 @@ def process_recruitment_email(communication_name: str) -> dict:
 	file_row = select_candidate_cv(_candidate_files(communication.name))
 	file_doc = frappe.get_doc("File", file_row["name"], for_update=True)
 	cv_sha256 = scan_stored_candidate_cv(file_doc)
+	communication.db_set(
+		{
+			"custom_ayp_email_intake_file": file_doc.name,
+			"custom_ayp_email_intake_cv_sha256": cv_sha256,
+		},
+		update_modified=False,
+	)
 
 	# Serialize same-person/same-vacancy lookup with the canonical profile linker.
 	acquire_candidate_identity_lock()
@@ -345,32 +451,19 @@ def process_recruitment_email(communication_name: str) -> dict:
 	)
 
 	if existing_name:
-		applicant = frappe.get_doc("Job Applicant", existing_name, for_update=True)
-		if (applicant.custom_cv_sha256 or "") == cv_sha256:
-			_link_communication(communication, applicant.name)
-			_complete_intake(communication, claim=claim, applicant_name=applicant.name)
-			return {
-				"status": "duplicate_message",
-				"applicant": applicant.name,
-				"communication": communication.name,
-				"cv_sha256": cv_sha256,
-			}
-		raise EmailIntakeDomainError(
-			"El cambio de CV requiere revisión manual antes de reemplazar evidencia existente."
-		)
-	else:
-		_detach_for_candidate(file_doc)
-		with candidate_cv_file_identity(file_doc.name):
-			applicant = frappe.get_doc(
-				_new_applicant_data(
-					applicant_name=applicant_name,
-					email=email,
-					job_opening=job_opening,
-					resume_attachment=file_doc.file_url,
-				)
-			).insert(ignore_permissions=True)
-		_assert_candidate_file_link(file_doc.name, applicant.name)
-		status = "created"
+		raise EmailIntakeReviewRequired("La identidad del remitente requiere revisión manual.")
+	_detach_for_candidate(file_doc)
+	with candidate_cv_file_identity(file_doc.name):
+		applicant = frappe.get_doc(
+			_new_applicant_data(
+				applicant_name=applicant_name,
+				email=email,
+				job_opening=job_opening,
+				resume_attachment=file_doc.file_url,
+			)
+		).insert(ignore_permissions=True)
+	_assert_candidate_file_link(file_doc.name, applicant.name)
+	status = "created"
 
 	_link_communication(communication, applicant.name)
 	_complete_intake(communication, claim=claim, applicant_name=applicant.name)
@@ -390,6 +483,22 @@ def process_recruitment_email_safely(communication_name: str) -> dict:
 	except CandidateCVInfrastructureError:
 		frappe.db.rollback()
 		raise
+	except EmailIntakeReviewRequired as exc:
+		# Security validation already marked the exact File Clean. Preserve that
+		# evidence and a terminal human-review state in the same transaction.
+		frappe.db.set_value(
+			"Communication",
+			communication_name,
+			{
+				INTAKE_STATUS_FIELD: INTAKE_BLOCKED,
+				"custom_ayp_email_intake_started_on": None,
+				"custom_ayp_email_intake_claim": "",
+				"custom_ayp_email_intake_error_code": type(exc).__name__,
+			},
+			update_modified=False,
+		)
+		frappe.db.commit()  # nosemgrep
+		return {"status": "review_required", "communication": communication_name}
 	except (CandidateCVSecurityError, EmailIntakeDomainError) as exc:
 		frappe.db.rollback()
 		fingerprint = hashlib.sha256(communication_name.encode()).hexdigest()[:12]
@@ -410,16 +519,11 @@ def process_recruitment_email_safely(communication_name: str) -> dict:
 				],
 				as_dict=True,
 			)
-			if state and (
-				state.get(INTAKE_STATUS_FIELD) == INTAKE_COMPLETED
-				or state.get("custom_ayp_email_intake_applicant")
-				or state.get("custom_ayp_email_intake_completed_on")
-				or (state.get("reference_doctype") == "Job Applicant" and state.get("reference_name"))
-			):
+			if state and state.get(INTAKE_STATUS_FIELD) == INTAKE_COMPLETED:
+				completed = frappe.get_doc("Communication", communication_name)
 				return {
 					"status": "already_processed",
-					"applicant": state.get("custom_ayp_email_intake_applicant")
-					or state.get("reference_name"),
+					"applicant": _verified_completed_applicant(completed),
 				}
 			if state and state.get(INTAKE_STATUS_FIELD) == INTAKE_PENDING:
 				frappe.db.set_value(
@@ -440,6 +544,80 @@ def process_recruitment_email_safely(communication_name: str) -> dict:
 			message=frappe.get_traceback(),
 		)
 		raise
+
+
+@frappe.whitelist(methods=["POST"])
+def resolve_recruitment_email_review(
+	communication_name: str, action: str, applicant_name: str | None = None
+) -> dict:
+	"""Resolve an identity conflict without editing intake state in the database."""
+
+	frappe.only_for(("HR Manager", "System Manager"))
+	if action not in {"create_new", "link_existing", "reject"}:
+		frappe.throw(frappe._("Acción de revisión no permitida."))
+	frappe.db.sql(
+		"SELECT name FROM `tabCommunication` WHERE name = %s FOR UPDATE",
+		(communication_name,),
+	)
+	communication = frappe.get_doc("Communication", communication_name)
+	if (
+		communication.get(INTAKE_STATUS_FIELD) != INTAKE_BLOCKED
+		or communication.get("custom_ayp_email_intake_error_code") != "EmailIntakeReviewRequired"
+	):
+		frappe.throw(frappe._("La Communication no tiene una revisión de identidad pendiente."))
+	file_row = select_candidate_cv(_candidate_files(communication.name))
+	file_doc = frappe.get_doc("File", file_row["name"], for_update=True)
+	if file_doc.get("custom_av_scan_status") != "Clean" or not file_doc.get("custom_cv_sha256"):
+		frappe.throw(frappe._("El CV no tiene evidencia antivirus Clean verificable."))
+
+	if action == "reject":
+		communication.db_set(
+			{
+				"custom_ayp_email_intake_error_code": "ReviewRejected",
+				"custom_ayp_email_intake_completed_on": now_datetime(),
+			},
+			update_modified=False,
+		)
+		return {"status": "rejected", "communication": communication.name}
+
+	if action == "link_existing":
+		if not applicant_name or not frappe.db.exists("Job Applicant", applicant_name):
+			frappe.throw(frappe._("La solicitud seleccionada no existe."))
+		resolved_applicant = str(applicant_name)
+	else:
+		email, resolved_name = sender_identity(communication.sender, communication.sender_full_name)
+		_detach_for_candidate(file_doc)
+		with candidate_cv_file_identity(file_doc.name):
+			resolved_applicant = (
+				frappe.get_doc(
+					_new_applicant_data(
+						applicant_name=resolved_name,
+						email=email,
+						job_opening=_configured_job_opening(),
+						resume_attachment=file_doc.file_url,
+					)
+				)
+				.insert(ignore_permissions=True)
+				.name
+			)
+		_assert_candidate_file_link(file_doc.name, resolved_applicant)
+
+	claim = uuid.uuid4().hex
+	communication.db_set(
+		{
+			INTAKE_STATUS_FIELD: INTAKE_PROCESSING,
+			"custom_ayp_email_intake_claim": claim,
+			"custom_ayp_email_intake_started_on": now_datetime(),
+		},
+		update_modified=False,
+	)
+	_link_communication(communication, resolved_applicant)
+	_complete_intake(communication, claim=claim, applicant_name=resolved_applicant)
+	return {
+		"status": "created" if action == "create_new" else "linked",
+		"communication": communication.name,
+		"applicant": resolved_applicant,
+	}
 
 
 def recover_stale_recruitment_email_intakes(communication_name: str | None = None) -> int:
@@ -477,10 +655,11 @@ def recover_stale_recruitment_email_intakes(communication_name: str | None = Non
 		),
 		as_dict=True,
 	)
-	for row in rows:
+	row_names = [row.name for row in rows]
+	for row_name in row_names:
 		frappe.db.set_value(
 			"Communication",
-			row.name,
+			row_name,
 			{
 				INTAKE_STATUS_FIELD: INTAKE_PENDING,
 				"custom_ayp_email_intake_queued_on": now_datetime(),
@@ -490,5 +669,16 @@ def recover_stale_recruitment_email_intakes(communication_name: str | None = Non
 			},
 			update_modified=False,
 		)
-		frappe.db.after_commit.add(lambda name=row.name: _enqueue_pending_intake(name))
-	return len(rows)
+
+	def enqueue_recovered_batch():
+		for row_name in row_names:
+			try:
+				_enqueue_pending_intake(row_name)
+			except Exception:
+				frappe.logger("email_intake").error(
+					"Recovered recruitment intake enqueue failed; row remains durable Pending."
+				)
+
+	if row_names:
+		frappe.db.after_commit.add(enqueue_recovered_batch)
+	return len(row_names)

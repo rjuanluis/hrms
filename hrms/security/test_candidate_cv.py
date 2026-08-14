@@ -6,6 +6,7 @@ import os
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 import zipfile
@@ -24,6 +25,7 @@ from hrms.security.candidate_cv import (
 	CandidateCVSecurityError,
 	_candidate_file_record,
 	_decode_pdf_name,
+	_is_recruitment_candidate_file,
 	_mark_file_clean,
 	_scan_candidate_cv,
 	_verified_candidate_cv_sha256,
@@ -32,6 +34,7 @@ from hrms.security.candidate_cv import (
 	guard_candidate_cv_upload,
 	has_candidate_cv_file_permission,
 	mark_scanned_candidate_cv_file,
+	read_stored_candidate_cv_bytes,
 	scan_bytes_with_clamd,
 	scan_stored_candidate_cv,
 	validate_cv_file,
@@ -160,6 +163,15 @@ def make_pdf_with_compressed_action_object() -> bytes:
 
 
 class TestCandidateCVSecurity(unittest.TestCase):
+	def test_ascii_pdf_is_read_as_exact_binary_from_real_disk(self):
+		content = make_pdf().replace(b"%\xe2\xe3\xcf\xd3", b"%1234")
+		validate_cv_file("cv.pdf", content)
+		with tempfile.NamedTemporaryFile() as stored:
+			stored.write(content)
+			stored.flush()
+			file_doc = SimpleNamespace(get_full_path=lambda: stored.name)
+			self.assertEqual(read_stored_candidate_cv_bytes(file_doc), content)
+
 	def setUp(self):
 		frappe.local.form_dict = frappe._dict()
 		frappe.local.session = frappe._dict(user="Guest")
@@ -250,7 +262,7 @@ class TestCandidateCVSecurity(unittest.TestCase):
 
 	def test_pdf_subprocess_failure_is_fail_closed(self):
 		with patch("hrms.security.candidate_cv.subprocess.run", side_effect=TimeoutError("bounded")):
-			with self.assertRaises(CandidateCVSecurityError):
+			with self.assertRaises(CandidateCVInfrastructureError):
 				validate_cv_file("cv.pdf", make_pdf())
 
 	def test_pdf_parser_child_enforces_memory_ceiling(self):
@@ -393,7 +405,7 @@ class TestCandidateCVSecurity(unittest.TestCase):
 
 	def test_recruitment_cv_download_is_quarantined_until_clean(self):
 		frappe.local.request = SimpleNamespace(path="/private/files/cv.pdf")
-		frappe.local.form_dict = frappe._dict()
+		frappe.local.form_dict = frappe._dict(fid="FILE-CLEAN-ALIAS")
 		pending = frappe._dict(
 			name="FILE-PENDING",
 			file_name="cv.pdf",
@@ -402,11 +414,12 @@ class TestCandidateCVSecurity(unittest.TestCase):
 			custom_av_scan_status="",
 		)
 		with (
-			patch("hrms.security.candidate_cv.frappe.get_all", return_value=[pending]),
+			patch("hrms.security.candidate_cv.frappe.get_all", return_value=[pending]) as get_all,
 			patch("hrms.security.candidate_cv._is_recruitment_candidate_file", return_value=True),
 		):
 			with self.assertRaises(frappe.PermissionError):
 				guard_candidate_cv_download()
+		self.assertEqual(get_all.call_args.kwargs["filters"], {"file_url": "/private/files/cv.pdf"})
 		pending.custom_av_scan_status = "Clean"
 		with (
 			patch("hrms.security.candidate_cv.frappe.get_all", return_value=[pending]),
@@ -415,11 +428,52 @@ class TestCandidateCVSecurity(unittest.TestCase):
 			guard_candidate_cv_download()
 
 	def test_recruitment_cv_file_permission_denies_non_download_read_until_clean(self):
-		pending = frappe._dict(custom_av_scan_status="")
-		with patch("hrms.security.candidate_cv._is_recruitment_candidate_file", return_value=True):
+		pending = frappe._dict(file_url="/private/files/cv.pdf", custom_av_scan_status="")
+		with (
+			patch("hrms.security.candidate_cv._is_recruitment_candidate_file", return_value=True),
+			patch("hrms.security.candidate_cv._file_url_quarantine_records", return_value=[pending]),
+		):
 			self.assertFalse(has_candidate_cv_file_permission(pending, ptype="read"))
 			pending.custom_av_scan_status = "Clean"
 			self.assertTrue(has_candidate_cv_file_permission(pending, ptype="read"))
+
+	def test_clean_alias_cannot_read_bytes_shared_with_pending_recruitment_file(self):
+		alias = frappe._dict(
+			name="FILE-ALIAS",
+			file_name="copy.pdf",
+			file_url="/private/files/shared.pdf",
+			attached_to_doctype="",
+			attached_to_name="",
+			custom_av_scan_status="Clean",
+		)
+		pending = frappe._dict(
+			name="FILE-PENDING",
+			file_name="cv.pdf",
+			file_url="/private/files/shared.pdf",
+			attached_to_doctype="Communication",
+			attached_to_name="COMM-1",
+			custom_av_scan_status="",
+		)
+		with (
+			patch("hrms.security.candidate_cv._file_url_quarantine_records", return_value=[alias, pending]),
+			patch(
+				"hrms.security.candidate_cv._is_recruitment_candidate_file",
+				side_effect=lambda record: record.name == "FILE-PENDING",
+			),
+		):
+			self.assertFalse(has_candidate_cv_file_permission(alias, ptype="read"))
+
+	def test_non_cv_attachment_from_recruitment_mailbox_is_quarantined(self):
+		record = frappe._dict(
+			file_name="payload.exe",
+			attached_to_doctype="Communication",
+			attached_to_name="COMM-1",
+		)
+		with patch(
+			"hrms.security.candidate_cv.frappe.db.get_value",
+			side_effect=["RECRUITMENT", "empleos@aroypedal.com"],
+		):
+			self.assertTrue(_is_recruitment_candidate_file(record))
 
 	def test_clean_file_persists_preflight_sha256_when_field_exists(self):
 		file_doc = SimpleNamespace(
@@ -474,7 +528,7 @@ class TestCandidateCVSecurity(unittest.TestCase):
 		)
 		with (
 			patch("frappe.get_doc", return_value=SimpleNamespace(file_url="/private/files/cv.pdf")),
-			patch("hrms.security.candidate_cv.get_file", return_value=("cv.pdf", content)),
+			patch("hrms.security.candidate_cv.read_stored_candidate_cv_bytes", return_value=content),
 			patch("hrms.security.candidate_cv._persist_file_cv_sha256") as persist_sha256,
 		):
 			sha256 = _verified_candidate_cv_sha256(file_record)
@@ -491,7 +545,7 @@ class TestCandidateCVSecurity(unittest.TestCase):
 		)
 		with (
 			patch("frappe.get_doc", return_value=SimpleNamespace(file_url="/private/files/cv.pdf")),
-			patch("hrms.security.candidate_cv.get_file", return_value=("cv.pdf", content)),
+			patch("hrms.security.candidate_cv.read_stored_candidate_cv_bytes", return_value=content),
 		):
 			with self.assertRaises(CandidateCVSecurityError):
 				_verified_candidate_cv_sha256(file_record)
@@ -508,7 +562,7 @@ class TestCandidateCVSecurity(unittest.TestCase):
 		frappe.local.candidate_cv_preflight = {"sha256": sha256, "size": len(content)}
 		with (
 			patch("hrms.security.candidate_cv._file_has_column", return_value=True),
-			patch("hrms.security.candidate_cv.get_file", return_value=("cv.pdf", content)),
+			patch("hrms.security.candidate_cv.read_stored_candidate_cv_bytes", return_value=content),
 			patch("hrms.security.candidate_cv.now_datetime", return_value="2026-08-12 20:00:00"),
 		):
 			mark_scanned_candidate_cv_file(file_doc)

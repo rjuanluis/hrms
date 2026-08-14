@@ -10,6 +10,10 @@ class EmailIntakeDomainError(ValueError):
 	pass
 
 
+class EmailIntakeReviewRequired(EmailIntakeDomainError):
+	"""A clean message that requires an explicit human identity decision."""
+
+
 def sender_identity(sender: str | None, sender_full_name: str | None = None) -> tuple[str, str]:
 	"""Return a normalized sender email and a conservative display name."""
 
@@ -44,7 +48,7 @@ def select_candidate_cv(file_rows: list[dict]) -> dict:
 def same_vacancy_application(
 	rows: list[dict], *, email: str, cv_sha256: str, applicant_name: str
 ) -> str | None:
-	"""Reuse one exact application only when all matching signals resolve to it."""
+	"""Never infer authorship from sender-controlled email/CV signals."""
 
 	matched = {}
 	for row in rows:
@@ -61,12 +65,9 @@ def same_vacancy_application(
 	if not matched:
 		return None
 	if len(matched) != 1:
-		raise EmailIntakeDomainError(
+		raise EmailIntakeReviewRequired(
 			"Las señales del candidato coinciden con varias solicitudes de la misma vacante."
 		)
-	name, (row, signals) = matched.popitem()
-	if len(signals) == 1:
-		raise EmailIntakeDomainError(
-			"Una sola señal coincide con otra solicitud; el posible cambio requiere revisión manual."
-		)
-	return name
+	raise EmailIntakeReviewRequired(
+		"El remitente coincide con otra solicitud; la identidad requiere revisión manual."
+	)

@@ -1,7 +1,7 @@
 {
  "attach_print": 0,
  "channel": "Email",
- "condition": "doc.email_id and doc.get('custom_data_processing_consent') and doc.source != 'Email Recursos Humanos'",
+ "condition": "doc.email_id and doc.source == 'Sitio Web' and doc.get('custom_data_processing_consent') and doc.get('custom_privacy_notice_version') == 'AYP-RH-2026-07-17-v3' and doc.get('custom_consent_capture_method') == 'Web Form' and doc.get('custom_consent_evidence_id') and doc.get('custom_consent_recorded_on') and doc.get('custom_consent_form_route') == 'empleos/solicitud'",
  "condition_type": "Python",
  "creation": "2026-07-17 20:30:00.000000",
  "days_in_advance": 0,
