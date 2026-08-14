@@ -73,7 +73,7 @@ def _authoritative_form(web_form_name: str):
 
 # Security-reviewed public boundary: exact form configuration + request-local provenance +
 # native Frappe validation; lookalike forms never receive authoritative context.
-@frappe.whitelist(  # nosemgrep: tmp.frappe-semgrep-rules.rules.security.guest-whitelisted-method
+@frappe.whitelist(  # nosemgrep: frappe-semgrep-rules.rules.security.guest-whitelisted-method
 	methods=["POST", "PUT"], allow_guest=True
 )
 def accept(web_form: str, data: str | dict, web_form_request_key: str | None = None):

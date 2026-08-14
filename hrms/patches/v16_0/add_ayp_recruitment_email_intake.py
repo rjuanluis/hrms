@@ -26,8 +26,76 @@ NOTIFICATION_CONDITION = (
 	"and doc.get('custom_consent_recorded_on') "
 	"and doc.get('custom_consent_form_route') == 'empleos/solicitud'"
 )
+NOTIFICATION_PARENT_FIELDS = (
+	"attach_files",
+	"attach_print",
+	"channel",
+	"condition",
+	"condition_type",
+	"date_changed",
+	"days_in_advance",
+	"datetime_changed",
+	"datetime_last_run",
+	"docstatus",
+	"document_type",
+	"enabled",
+	"event",
+	"filters",
+	"from_attach_field",
+	"is_standard",
+	"message",
+	"message_type",
+	"method",
+	"minutes_offset",
+	"module",
+	"notification_message",
+	"notification_title",
+	"notification_type",
+	"print_format",
+	"property_value",
+	"send_system_notification",
+	"send_to_all_assignees",
+	"sender",
+	"sender_email",
+	"set_property_after_alert",
+	"slack_webhook_url",
+	"subject",
+	"value_changed",
+)
 
 RECRUITMENT_EMAIL_INTAKE_FIELDS = {
+	"File": [
+		{
+			"fieldname": "custom_av_scan_status",
+			"label": "Antivirus Scan Status",
+			"fieldtype": "Select",
+			"options": "\nClean\nRejected",
+			"read_only": 1,
+			"insert_after": "file_size",
+		},
+		{
+			"fieldname": "custom_av_scan_engine",
+			"label": "Antivirus Engine",
+			"fieldtype": "Data",
+			"read_only": 1,
+			"insert_after": "custom_av_scan_status",
+		},
+		{
+			"fieldname": "custom_av_scanned_on",
+			"label": "Antivirus Scanned On",
+			"fieldtype": "Datetime",
+			"read_only": 1,
+			"insert_after": "custom_av_scan_engine",
+		},
+		{
+			"fieldname": "custom_cv_sha256",
+			"label": "Candidate CV SHA-256",
+			"fieldtype": "Data",
+			"read_only": 1,
+			"hidden": 1,
+			"insert_after": "custom_av_scanned_on",
+		},
+	],
 	"Communication": [
 		{
 			"fieldname": "custom_ayp_email_intake_status",
@@ -109,6 +177,22 @@ RECRUITMENT_EMAIL_INTAKE_FIELDS = {
 	],
 	"Job Applicant": [
 		{
+			"fieldname": "custom_data_processing_consent",
+			"label": "Consentimiento para tratamiento de datos",
+			"fieldtype": "Check",
+			"default": "0",
+			"insert_after": "upper_range",
+		},
+		{
+			"fieldname": "custom_privacy_notice_version",
+			"label": "Versión del aviso de privacidad",
+			"fieldtype": "Data",
+			"default": "AYP-RH-2026-07-17-v3",
+			"read_only": 1,
+			"hidden": 1,
+			"insert_after": "custom_data_processing_consent",
+		},
+		{
 			"fieldname": "custom_consent_capture_method",
 			"label": "Método de captura del consentimiento",
 			"fieldtype": "Data",
@@ -170,23 +254,7 @@ def _sync_application_received_notification() -> None:
 	if not source_path.exists():
 		source_path = Path(__file__).with_name("ayp_candidate_application_received.json")
 	source = json.loads(source_path.read_text(encoding="utf-8"))
-	parent_fields = (
-		"attach_print",
-		"channel",
-		"condition",
-		"condition_type",
-		"docstatus",
-		"document_type",
-		"enabled",
-		"event",
-		"is_standard",
-		"message",
-		"module",
-		"send_system_notification",
-		"send_to_all_assignees",
-		"subject",
-	)
-	expected = {fieldname: source.get(fieldname) for fieldname in parent_fields}
+	expected = {fieldname: source.get(fieldname) for fieldname in NOTIFICATION_PARENT_FIELDS}
 	if expected["condition"] != NOTIFICATION_CONDITION:
 		raise RuntimeError("El JSON estándar y el contrato de Notification divergen.")
 	if not frappe.db.exists("Notification", NOTIFICATION_NAME):

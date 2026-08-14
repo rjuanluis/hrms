@@ -311,27 +311,15 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 		)
 		temporary_path = Path(__file__).with_name("ayp_candidate_application_received.json")
 		source = json.loads((standard_path if standard_path.exists() else temporary_path).read_text())
-		parent_fields = (
-			"attach_print",
-			"channel",
-			"condition",
-			"condition_type",
-			"docstatus",
-			"document_type",
-			"enabled",
-			"event",
-			"is_standard",
-			"message",
-			"module",
-			"send_system_notification",
-			"send_to_all_assignees",
-			"subject",
-		)
-		expected = {fieldname: source.get(fieldname) for fieldname in parent_fields}
+		expected = {
+			fieldname: source.get(fieldname) for fieldname in email_intake_patch.NOTIFICATION_PARENT_FIELDS
+		}
 		recipients = [
 			frappe._dict(
 				receiver_by_document_field=row.get("receiver_by_document_field") or "",
 				receiver_by_role=row.get("receiver_by_role") or "",
+				cc=row.get("cc") or "",
+				bcc=row.get("bcc") or "",
 				condition=row.get("condition") or "",
 			)
 			for row in source["recipients"]
@@ -356,7 +344,41 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 		)
 		clear_cache.assert_called_once_with()
 		self.assertEqual(expected["channel"], "Email")
-		self.assertEqual(source["recipients"], [{"receiver_by_document_field": "email_id"}])
+		self.assertEqual(expected["attach_files"], "")
+		self.assertIsNone(expected["from_attach_field"])
+		self.assertIsNone(expected["sender"])
+		self.assertIsNone(expected["sender_email"])
+		self.assertIsNone(expected["set_property_after_alert"])
+		self.assertIsNone(expected["property_value"])
+		self.assertIsNone(expected["print_format"])
+		self.assertEqual(expected["message_type"], "HTML")
+		self.assertEqual(source["recipients"][0]["receiver_by_document_field"], "email_id")
+		self.assertFalse(source["recipients"][0]["cc"])
+		self.assertFalse(source["recipients"][0]["bcc"])
+
+	def test_install_patch_owns_required_security_schema(self):
+		fields = email_intake_patch.RECRUITMENT_EMAIL_INTAKE_FIELDS
+		file_fields = {row["fieldname"] for row in fields["File"]}
+		applicant_fields = {row["fieldname"] for row in fields["Job Applicant"]}
+		self.assertTrue(
+			{
+				"custom_av_scan_status",
+				"custom_av_scan_engine",
+				"custom_av_scanned_on",
+				"custom_cv_sha256",
+			}.issubset(file_fields)
+		)
+		self.assertTrue(
+			{
+				"custom_data_processing_consent",
+				"custom_privacy_notice_version",
+				"custom_consent_capture_method",
+				"custom_consent_evidence_id",
+				"custom_consent_recorded_on",
+				"custom_consent_form_route",
+				"custom_candidate_cv_file",
+			}.issubset(applicant_fields)
+		)
 
 	def test_valid_later_web_notice_can_activate_profile(self):
 		self.assertTrue(

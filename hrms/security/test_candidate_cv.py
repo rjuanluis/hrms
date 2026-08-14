@@ -193,6 +193,12 @@ class TestCandidateCVSecurity(unittest.TestCase):
 		doc.resume_attachment = ""
 		return doc
 
+	def _db_stub(self):
+		return SimpleNamespace(
+			has_column=Mock(return_value=False),
+			get_value=Mock(return_value=None),
+		)
+
 	def test_guest_direct_insert_cannot_claim_web_provenance(self):
 		values = {"custom_data_processing_consent": 1}
 		doc = self._consent_doc(values, None)
@@ -216,7 +222,7 @@ class TestCandidateCVSecurity(unittest.TestCase):
 			source="Sitio Web",
 			job_opening="HR-OPN-2026-0001",
 		)
-		db = SimpleNamespace(has_column=Mock(return_value=False))
+		db = self._db_stub()
 		with patch("hrms.security.candidate_cv.frappe.db", db):
 			validate_job_applicant_cv(doc)
 		self.assertEqual(values["source"], "Sitio Web")
@@ -263,7 +269,7 @@ class TestCandidateCVSecurity(unittest.TestCase):
 			"custom_consent_form_route": "empleos/solicitud",
 		}
 		doc = self._consent_doc(values, None)
-		db = SimpleNamespace(has_column=Mock(return_value=False))
+		db = self._db_stub()
 		with patch("hrms.security.candidate_cv.frappe.db", db):
 			validate_job_applicant_cv(doc)
 		self.assertEqual(values["source"], "")
@@ -285,7 +291,7 @@ class TestCandidateCVSecurity(unittest.TestCase):
 		values = {"custom_data_processing_consent": 0, **dict.fromkeys(fields, "")}
 		before_values = dict.fromkeys(fields, None)
 		doc = self._consent_doc(values, SimpleNamespace(get=before_values.get))
-		db = SimpleNamespace(has_column=Mock(return_value=False))
+		db = self._db_stub()
 		with patch("hrms.security.candidate_cv.frappe.db", db):
 			validate_job_applicant_cv(doc)
 
