@@ -13,6 +13,7 @@ from frappe.translate import set_default_language
 
 from hrms.recruitment.email_intake import APPLICANT_SOURCE, disable_existing_recruitment_mailbox_auto_reply
 from hrms.recruitment.talent_pool import backfill_candidate_profiles
+from hrms.recruitment.web_form_intake import ensure_web_applicant_source
 
 SITE = os.environ.get("AYP_SITE_NAME", "hr.aroypedal.com")
 COMPANY = "ARO Y PEDAL SRL"
@@ -400,6 +401,7 @@ def ensure_recruitment_web_form() -> tuple[str, list[str]]:
 			"module": "HR",
 			"published": 1,
 			"login_required": 0,
+			"anonymous": 1,
 			"allow_edit": 0,
 			"allow_delete": 0,
 			"allow_multiple": 0,
@@ -546,7 +548,8 @@ def main() -> None:
 	os.chdir(SITES_DIR)
 	frappe.init(site=SITE)
 	frappe.connect()
-	frappe.set_user("Administrator")
+	# Standalone install/configuration entrypoint: all mutations require the site administrator.
+	frappe.set_user("Administrator")  # nosemgrep: tmp.frappe-semgrep-rules.rules.security.frappe-setuser
 	try:
 		if not frappe.is_setup_complete():
 			result = setup_complete(
@@ -583,6 +586,7 @@ def main() -> None:
 		leave_period = ensure_active_leave_period()
 		ensure_recruitment_security_fields()
 		recruitment_email_source = ensure_recruitment_email_source()
+		recruitment_web_source = ensure_web_applicant_source()
 		recruitment_email_accounts = disable_existing_recruitment_mailbox_auto_reply()
 		candidate_profiles_backfilled = backfill_candidate_profiles()
 		recruitment_web_form, retired_recruitment_web_forms = ensure_recruitment_web_form()
@@ -591,7 +595,8 @@ def main() -> None:
 		frappe.db.set_single_value("System Settings", "language", "es")
 		frappe.db.set_value("User", ADMIN_EMAIL, "language", "es", update_modified=False)
 		frappe.db.set_value("User", ADMIN_EMAIL, "time_zone", "America/Santo_Domingo", update_modified=False)
-		frappe.db.commit()
+		# Standalone process boundary: persist the complete idempotent configuration transaction.
+		frappe.db.commit()  # nosemgrep: semgrep.Dont-commit,tmp.frappe-semgrep-rules.rules.frappe-manual-commit
 		print(
 			{
 				"status": "configured",
@@ -604,6 +609,7 @@ def main() -> None:
 				"leave_period": leave_period,
 				"recruitment_web_form": recruitment_web_form,
 				"recruitment_email_source": recruitment_email_source,
+				"recruitment_web_source": recruitment_web_source,
 				"recruitment_email_accounts_auto_reply_disabled": recruitment_email_accounts,
 				"retired_recruitment_web_forms": retired_recruitment_web_forms,
 				"candidate_profiles_backfilled": candidate_profiles_backfilled,

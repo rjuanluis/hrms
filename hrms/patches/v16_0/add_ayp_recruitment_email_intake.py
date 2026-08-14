@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import frappe
 from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
 from frappe.email.doctype.notification.notification import clear_notification_cache
@@ -11,6 +14,7 @@ from hrms.recruitment.email_intake import (
 	INTAKE_PROCESSING,
 	disable_existing_recruitment_mailbox_auto_reply,
 )
+from hrms.recruitment.web_form_intake import ensure_web_applicant_source
 
 NOTIFICATION_NAME = "AYP Candidate Application Received"
 NOTIFICATION_CONDITION = (
@@ -156,19 +160,91 @@ RECRUITMENT_EMAIL_INTAKE_FIELDS = {
 
 
 def _sync_application_received_notification() -> None:
+	source_path = (
+		Path(__file__).resolve().parents[2]
+		/ "hr"
+		/ "notification"
+		/ "ayp_candidate_application_received"
+		/ "ayp_candidate_application_received.json"
+	)
+	if not source_path.exists():
+		source_path = Path(__file__).with_name("ayp_candidate_application_received.json")
+	source = json.loads(source_path.read_text(encoding="utf-8"))
+	parent_fields = (
+		"attach_print",
+		"channel",
+		"condition",
+		"condition_type",
+		"docstatus",
+		"document_type",
+		"enabled",
+		"event",
+		"is_standard",
+		"message",
+		"module",
+		"send_system_notification",
+		"send_to_all_assignees",
+		"subject",
+	)
+	expected = {fieldname: source.get(fieldname) for fieldname in parent_fields}
+	if expected["condition"] != NOTIFICATION_CONDITION:
+		raise RuntimeError("El JSON estándar y el contrato de Notification divergen.")
 	if not frappe.db.exists("Notification", NOTIFICATION_NAME):
-		frappe.throw(frappe._("Required standard Notification does not exist: {0}").format(NOTIFICATION_NAME))
-	expected = {
-		"enabled": 1,
-		"document_type": "Job Applicant",
-		"event": "New",
-		"condition_type": "Python",
-		"condition": NOTIFICATION_CONDITION,
-	}
-	# Standard Notifications cannot be saved outside developer mode. A direct,
-	# idempotent DB update is the migration path; invalidate the runtime cache
-	# before the exact post-migrate readback.
+		frappe.get_doc({"doctype": "Notification", "name": NOTIFICATION_NAME, **expected}).db_insert()
+
+	# Standard Notifications cannot be saved outside developer mode. Direct,
+	# idempotent DB writes are the migration path for this versioned artifact.
 	frappe.db.set_value("Notification", NOTIFICATION_NAME, expected, update_modified=False)
+
+	expected_recipients = [
+		{
+			"receiver_by_document_field": str(row.get("receiver_by_document_field") or ""),
+			"receiver_by_role": str(row.get("receiver_by_role") or ""),
+			"cc": str(row.get("cc") or ""),
+			"bcc": str(row.get("bcc") or ""),
+			"condition": str(row.get("condition") or ""),
+		}
+		for row in source.get("recipients", [])
+	]
+	recipient_fields = list(expected_recipients[0]) if expected_recipients else ["name"]
+	stored_recipients = frappe.get_all(
+		"Notification Recipient",
+		filters={
+			"parent": NOTIFICATION_NAME,
+			"parenttype": "Notification",
+			"parentfield": "recipients",
+		},
+		fields=recipient_fields,
+		order_by="idx asc",
+	)
+	normalized_recipients = (
+		[
+			{fieldname: str(row.get(fieldname) or "") for fieldname in expected_recipients[0]}
+			for row in stored_recipients
+		]
+		if expected_recipients
+		else []
+	)
+	if normalized_recipients != expected_recipients:
+		frappe.db.delete(
+			"Notification Recipient",
+			{
+				"parent": NOTIFICATION_NAME,
+				"parenttype": "Notification",
+				"parentfield": "recipients",
+			},
+		)
+		for idx, recipient in enumerate(expected_recipients, start=1):
+			frappe.get_doc(
+				{
+					"doctype": "Notification Recipient",
+					"parent": NOTIFICATION_NAME,
+					"parenttype": "Notification",
+					"parentfield": "recipients",
+					"idx": idx,
+					**recipient,
+				}
+			).db_insert()
 	clear_notification_cache()
 
 	stored = frappe.db.get_value(
@@ -179,10 +255,31 @@ def _sync_application_received_notification() -> None:
 	)
 	if not stored or any(stored.get(field) != value for field, value in expected.items()):
 		raise RuntimeError("La Notification de solicitudes no quedó sincronizada de forma segura.")
+	readback_recipients = frappe.get_all(
+		"Notification Recipient",
+		filters={
+			"parent": NOTIFICATION_NAME,
+			"parenttype": "Notification",
+			"parentfield": "recipients",
+		},
+		fields=recipient_fields,
+		order_by="idx asc",
+	)
+	readback_recipients = (
+		[
+			{fieldname: str(row.get(fieldname) or "") for fieldname in expected_recipients[0]}
+			for row in readback_recipients
+		]
+		if expected_recipients
+		else []
+	)
+	if readback_recipients != expected_recipients:
+		raise RuntimeError("Los destinatarios de la Notification no quedaron sincronizados.")
 
 
 def execute():
 	create_custom_fields(RECRUITMENT_EMAIL_INTAKE_FIELDS, update=True)
+	ensure_web_applicant_source()
 	_sync_application_received_notification()
 	disable_existing_recruitment_mailbox_auto_reply()
 	frappe.db.add_index(

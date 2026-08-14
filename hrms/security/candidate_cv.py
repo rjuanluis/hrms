@@ -18,6 +18,11 @@ from frappe import _
 from frappe.rate_limiter import rate_limit
 from frappe.utils import now_datetime
 
+from hrms.recruitment.web_form_intake import (
+	RECRUITMENT_WEB_FORM_ROUTE,
+	WEB_SOURCE,
+	authoritative_recruitment_web_form_context,
+)
 from hrms.security.pdf_cv_validator import (
 	SELF_TEST_LIMIT_SETUP_FAILED,
 	SELF_TEST_PARSER_IMPORT_FAILED,
@@ -425,7 +430,10 @@ def has_candidate_cv_file_permission(doc, ptype=None, user=None, debug=False) ->
 
 
 def validate_job_applicant_cv(doc, method=None) -> None:
-	consent_evidence_fields = (
+	consent_bundle_fields = (
+		"source",
+		"custom_data_processing_consent",
+		"custom_privacy_notice_version",
 		"custom_consent_capture_method",
 		"custom_consent_evidence_id",
 		"custom_consent_recorded_on",
@@ -434,9 +442,26 @@ def validate_job_applicant_cv(doc, method=None) -> None:
 	before_save = doc.get_doc_before_save() if hasattr(doc, "get_doc_before_save") else None
 	previous_values = before_save if before_save is not None else {}
 	is_new = before_save is None
-	if frappe.session.user == "Guest" and not doc.get("custom_data_processing_consent"):
-		raise CandidateCVSecurityError(_("Debes aceptar el aviso de privacidad para enviar la solicitud."))
-	if frappe.session.user == "Guest" and is_new:
+	web_context = authoritative_recruitment_web_form_context()
+	is_authoritative_web_insert = bool(
+		is_new
+		and frappe.session.user == "Guest"
+		and web_context
+		and web_context.get("route") == RECRUITMENT_WEB_FORM_ROUTE
+		and web_context.get("source") == WEB_SOURCE
+		and web_context.get("job_opening")
+	)
+	if frappe.session.user == "Guest" and is_new and not is_authoritative_web_insert:
+		raise CandidateCVSecurityError(_("Envía la solicitud mediante el formulario oficial de empleos."))
+	if is_authoritative_web_insert:
+		if not doc.get("custom_data_processing_consent"):
+			raise CandidateCVSecurityError(
+				_("Debes aceptar el aviso de privacidad para enviar la solicitud.")
+			)
+		doc.set("source", WEB_SOURCE)
+		doc.set("status", "Open")
+		doc.set("job_title", web_context.get("job_opening"))
+		doc.set("custom_data_processing_consent", 1)
 		doc.set("custom_privacy_notice_version", PRIVACY_NOTICE_VERSION)
 		doc.set("custom_consent_capture_method", "Web Form")
 		doc.set("custom_consent_evidence_id", frappe.generate_hash(length=32))
@@ -444,13 +469,34 @@ def validate_job_applicant_cv(doc, method=None) -> None:
 		doc.set("custom_consent_form_route", CONSENT_WEB_FORM_ROUTE)
 	elif is_new:
 		# Internal imports cannot self-declare authoritative Web consent.
-		for fieldname in consent_evidence_fields:
-			doc.set(fieldname, "")
-	elif any(
-		str(doc.get(fieldname) or "") != str(previous_values.get(fieldname) or "")
-		for fieldname in consent_evidence_fields
-	):
-		raise CandidateCVSecurityError(_("La evidencia de consentimiento Web es inmutable."))
+		if doc.get("source") == WEB_SOURCE:
+			doc.set("source", "")
+		doc.set("custom_data_processing_consent", 0)
+		doc.set("custom_privacy_notice_version", "")
+		doc.set("custom_consent_capture_method", "")
+		doc.set("custom_consent_evidence_id", "")
+		doc.set("custom_consent_recorded_on", None)
+		doc.set("custom_consent_form_route", "")
+	else:
+
+		def normalized(fieldname, values):
+			value = values.get(fieldname)
+			return int(bool(value)) if fieldname == "custom_data_processing_consent" else str(value or "")
+
+		before_claims_web_consent = any(
+			normalized(fieldname, previous_values) for fieldname in consent_bundle_fields[1:]
+		) or (normalized("source", previous_values) == WEB_SOURCE)
+		current_claims_web_consent = any(
+			normalized(fieldname, doc) for fieldname in consent_bundle_fields[1:]
+		) or (normalized("source", doc) == WEB_SOURCE)
+		bundle_changed = any(
+			normalized(fieldname, doc) != normalized(fieldname, previous_values)
+			for fieldname in consent_bundle_fields
+		)
+		if bundle_changed and (before_claims_web_consent or current_claims_web_consent):
+			raise CandidateCVSecurityError(
+				_("La evidencia de consentimiento Web solo puede cambiar mediante una operación gobernada.")
+			)
 
 	if not doc.resume_attachment:
 		if frappe.db.has_column("Job Applicant", "custom_cv_sha256"):
@@ -515,12 +561,13 @@ def attach_job_applicant_cv(doc, method=None) -> None:
 	if not doc.resume_attachment:
 		return
 
-	exact_name = getattr(frappe.local, "ayp_candidate_cv_file_name", None)
-	file_name = exact_name or frappe.db.get_value("File", {"file_url": doc.resume_attachment}, "name")
-	if file_name:
+	file_record = _candidate_file_record(doc, ["name", "file_url"])
+	if not file_record or file_record.file_url != doc.resume_attachment:
+		raise CandidateCVSecurityError(_("No se pudo confirmar el archivo exacto del CV."))
+	if file_record.name:
 		frappe.db.set_value(
 			"File",
-			file_name,
+			file_record.name,
 			{
 				"attached_to_doctype": "Job Applicant",
 				"attached_to_name": doc.name,

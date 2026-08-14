@@ -233,7 +233,7 @@ def enqueue_recruitment_email_intake(doc, method=None) -> None:
 	frappe.db.after_commit.add(enqueue_after_commit)
 
 
-def _candidate_files(communication_name: str) -> list[dict]:
+def _candidate_files(communication_name: str, *, for_update: bool = False) -> list[dict]:
 	return frappe.db.sql(
 		"""
 		SELECT name, file_name, file_url, file_size, creation
@@ -244,10 +244,46 @@ def _candidate_files(communication_name: str) -> list[dict]:
 			AND (LOWER(file_name) LIKE %s OR LOWER(file_name) LIKE %s)
 		ORDER BY creation, name
 		LIMIT 2
-		""",
+		"""
+		+ (" FOR UPDATE" if for_update else ""),
 		(communication_name, "%.pdf", "%.docx"),
 		as_dict=True,
 	)
+
+
+def _locked_candidate_file(communication_name: str):
+	selected = select_candidate_cv(_candidate_files(communication_name, for_update=True))
+	file_doc = frappe.get_doc("File", selected["name"])
+	if (
+		file_doc.attached_to_doctype != "Communication"
+		or file_doc.attached_to_name != communication_name
+		or not file_doc.is_private
+		or not str(file_doc.file_url or "").startswith("/private/files/")
+		or file_doc.file_name != selected["file_name"]
+		or file_doc.file_url != selected["file_url"]
+		or file_doc.file_size != selected["file_size"]
+	):
+		raise EmailIntakeDomainError("El File seleccionado cambió durante el lock del intake.")
+	return file_doc
+
+
+def _locked_durable_intake_file(communication):
+	file_name = str(communication.get("custom_ayp_email_intake_file") or "")
+	expected_sha = str(communication.get("custom_ayp_email_intake_cv_sha256") or "")
+	if not file_name or len(expected_sha) != 64:
+		frappe.throw(frappe._("La revisión no tiene evidencia durable de File y SHA."))
+	frappe.db.sql("SELECT name FROM `tabFile` WHERE name = %s FOR UPDATE", (file_name,))
+	file_doc = frappe.get_doc("File", file_name)
+	if (
+		file_doc.attached_to_doctype != "Communication"
+		or file_doc.attached_to_name != communication.name
+		or not file_doc.is_private
+		or not str(file_doc.file_url or "").startswith("/private/files/")
+		or file_doc.get("custom_av_scan_status") != "Clean"
+		or file_doc.get("custom_cv_sha256") != expected_sha
+	):
+		frappe.throw(frappe._("El CV ya no coincide con la evidencia limpia del intake."))
+	return file_doc
 
 
 def _matching_applications(job_opening: str, email: str, cv_sha256: str) -> list[dict]:
@@ -319,6 +355,8 @@ def _complete_intake(communication, *, claim: str, applicant_name: str) -> None:
 		},
 		update_modified=False,
 	)
+	if _verified_completed_applicant(communication) != applicant_name:
+		raise EmailIntakeDomainError("El readback terminal no coincide con la solicitud creada.")
 
 
 def _verified_completed_applicant(communication) -> str:
@@ -347,22 +385,24 @@ def _verified_completed_applicant(communication) -> str:
 			"file_url",
 			"attached_to_doctype",
 			"attached_to_name",
+			"attached_to_field",
+			"is_private",
 			"custom_av_scan_status",
 			"custom_cv_sha256",
 		],
 		as_dict=True,
 	)
-	file_link_is_exact = file_record and (
-		(
+	file_link_is_exact = (
+		file_record
+		and applicant
+		and (
 			file_record.attached_to_doctype == "Job Applicant"
 			and file_record.attached_to_name == applicant_name
-			and applicant
+			and file_record.attached_to_field == "resume_attachment"
+			and file_record.is_private
 			and applicant.custom_candidate_cv_file == file_name
 			and applicant.resume_attachment == file_record.file_url
-		)
-		or (
-			file_record.attached_to_doctype == "Communication"
-			and file_record.attached_to_name == communication.name
+			and applicant.custom_cv_sha256 == expected_sha
 		)
 	)
 	if (
@@ -430,8 +470,7 @@ def process_recruitment_email(communication_name: str) -> dict:
 		raise EmailIntakeDomainError("La vacante configurada no existe o no está abierta.")
 
 	email, applicant_name = sender_identity(communication.sender, communication.sender_full_name)
-	file_row = select_candidate_cv(_candidate_files(communication.name))
-	file_doc = frappe.get_doc("File", file_row["name"], for_update=True)
+	file_doc = _locked_candidate_file(communication.name)
 	cv_sha256 = scan_stored_candidate_cv(file_doc)
 	communication.db_set(
 		{
@@ -546,62 +585,126 @@ def process_recruitment_email_safely(communication_name: str) -> dict:
 		raise
 
 
+def _record_email_intake_review_event(
+	communication, *, applicant, action: str, reason: str, file_name: str
+) -> None:
+	frappe.get_doc(
+		{
+			"doctype": "AYP Candidate Review Event",
+			"batch_id": f"email-intake:{communication.name}",
+			"applicant": applicant.name,
+			"candidate_profile": applicant.get("custom_candidate_profile") or "",
+			"job_opening": applicant.job_title or "",
+			"action": "Email Intake Resolution",
+			"previous_status": "Identity Review Required",
+			"new_status": action,
+			"reason": reason,
+			"actor": frappe.session.user,
+			"occurred_on": now_datetime(),
+		}
+	).insert(ignore_permissions=True)
+	communication.add_comment(
+		"Info",
+		f"Email intake review: {action}; File {file_name}; Job Opening {applicant.job_title}; {reason}",
+	)
+
+
 @frappe.whitelist(methods=["POST"])
 def resolve_recruitment_email_review(
-	communication_name: str, action: str, applicant_name: str | None = None
+	communication_name: str,
+	action: str,
+	applicant_name: str | None = None,
+	reason: str | None = None,
 ) -> dict:
-	"""Resolve an identity conflict without editing intake state in the database."""
+	"""Resolve one locked identity conflict through a permission-checked, auditable path."""
 
 	frappe.only_for(("HR Manager", "System Manager"))
 	if action not in {"create_new", "link_existing", "reject"}:
 		frappe.throw(frappe._("Acción de revisión no permitida."))
+	reason = str(reason or "").strip()
+	if len(reason) < 10 or len(reason) > 500:
+		frappe.throw(frappe._("Documenta un motivo de revisión entre 10 y 500 caracteres."))
 	frappe.db.sql(
 		"SELECT name FROM `tabCommunication` WHERE name = %s FOR UPDATE",
 		(communication_name,),
 	)
 	communication = frappe.get_doc("Communication", communication_name)
+	communication.check_permission("write")
+	if not _is_recruitment_mailbox_message(communication):
+		frappe.throw(frappe._("La Communication no pertenece al buzón gobernado de reclutamiento."))
 	if (
 		communication.get(INTAKE_STATUS_FIELD) != INTAKE_BLOCKED
 		or communication.get("custom_ayp_email_intake_error_code") != "EmailIntakeReviewRequired"
 	):
 		frappe.throw(frappe._("La Communication no tiene una revisión de identidad pendiente."))
-	file_row = select_candidate_cv(_candidate_files(communication.name))
-	file_doc = frappe.get_doc("File", file_row["name"], for_update=True)
-	if file_doc.get("custom_av_scan_status") != "Clean" or not file_doc.get("custom_cv_sha256"):
-		frappe.throw(frappe._("El CV no tiene evidencia antivirus Clean verificable."))
+	job_opening = _configured_job_opening()
+	if not frappe.db.exists("Job Opening", {"name": job_opening, "status": "Open"}):
+		frappe.throw(frappe._("La vacante configurada no existe o no está abierta."))
+	file_doc = _locked_durable_intake_file(communication)
+	acquire_candidate_identity_lock()
 
 	if action == "reject":
 		communication.db_set(
 			{
 				"custom_ayp_email_intake_error_code": "ReviewRejected",
 				"custom_ayp_email_intake_completed_on": now_datetime(),
+				"custom_ayp_email_intake_claim": "",
 			},
 			update_modified=False,
+		)
+		communication.add_comment(
+			"Info",
+			f"Email intake review: Rejected; File {file_doc.name}; Job Opening {job_opening}; {reason}",
 		)
 		return {"status": "rejected", "communication": communication.name}
 
 	if action == "link_existing":
 		if not applicant_name or not frappe.db.exists("Job Applicant", applicant_name):
 			frappe.throw(frappe._("La solicitud seleccionada no existe."))
-		resolved_applicant = str(applicant_name)
-	else:
-		email, resolved_name = sender_identity(communication.sender, communication.sender_full_name)
-		_detach_for_candidate(file_doc)
-		with candidate_cv_file_identity(file_doc.name):
-			resolved_applicant = (
-				frappe.get_doc(
-					_new_applicant_data(
-						applicant_name=resolved_name,
-						email=email,
-						job_opening=_configured_job_opening(),
-						resume_attachment=file_doc.file_url,
-					)
-				)
-				.insert(ignore_permissions=True)
-				.name
-			)
-		_assert_candidate_file_link(file_doc.name, resolved_applicant)
+		applicant = frappe.get_doc("Job Applicant", applicant_name)
+		applicant.check_permission("write")
+		if applicant.job_title != job_opening:
+			frappe.throw(frappe._("La solicitud seleccionada no pertenece a la vacante del intake."))
+		resolved_applicant = applicant.name
+		_link_communication(communication, resolved_applicant)
+		communication.db_set(
+			{
+				INTAKE_STATUS_FIELD: INTAKE_BLOCKED,
+				"custom_ayp_email_intake_error_code": "ReviewLinked",
+				"custom_ayp_email_intake_completed_on": now_datetime(),
+				"custom_ayp_email_intake_claim": "",
+				"custom_ayp_email_intake_applicant": resolved_applicant,
+			},
+			update_modified=False,
+		)
+		_record_email_intake_review_event(
+			communication,
+			applicant=applicant,
+			action="Linked without CV replacement",
+			reason=reason,
+			file_name=file_doc.name,
+		)
+		return {
+			"status": "linked_for_review",
+			"communication": communication.name,
+			"applicant": resolved_applicant,
+		}
 
+	if not frappe.has_permission("Job Applicant", ptype="create"):
+		frappe.throw(frappe._("No tienes permiso para crear una solicitud."), frappe.PermissionError)
+	email, resolved_name = sender_identity(communication.sender, communication.sender_full_name)
+	_detach_for_candidate(file_doc)
+	with candidate_cv_file_identity(file_doc.name):
+		applicant = frappe.get_doc(
+			_new_applicant_data(
+				applicant_name=resolved_name,
+				email=email,
+				job_opening=job_opening,
+				resume_attachment=file_doc.file_url,
+			)
+		).insert(ignore_permissions=True)
+	resolved_applicant = applicant.name
+	_assert_candidate_file_link(file_doc.name, resolved_applicant)
 	claim = uuid.uuid4().hex
 	communication.db_set(
 		{
@@ -613,8 +716,15 @@ def resolve_recruitment_email_review(
 	)
 	_link_communication(communication, resolved_applicant)
 	_complete_intake(communication, claim=claim, applicant_name=resolved_applicant)
+	_record_email_intake_review_event(
+		communication,
+		applicant=applicant,
+		action="Created new application",
+		reason=reason,
+		file_name=file_doc.name,
+	)
 	return {
-		"status": "created" if action == "create_new" else "linked",
+		"status": "created",
 		"communication": communication.name,
 		"applicant": resolved_applicant,
 	}

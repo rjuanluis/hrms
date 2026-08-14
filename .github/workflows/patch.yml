@@ -196,7 +196,9 @@ jobs:
             --skip-before-tests
 
           ./env/bin/python - <<'PY'
+          import json
           import os
+          from pathlib import Path
 
           import frappe
 
@@ -208,41 +210,65 @@ jobs:
           try:
               assert frappe.db.exists("Company", "ARO Y PEDAL SRL")
               assert frappe.db.exists("Job Applicant Source", "Email Recursos Humanos")
+              assert frappe.db.exists("Job Applicant Source", "Sitio Web")
 
               for fieldname in (
                   "custom_ayp_email_intake_status",
                   "custom_ayp_email_intake_claim",
                   "custom_ayp_email_intake_applicant",
+                  "custom_ayp_email_intake_file",
+                  "custom_ayp_email_intake_cv_sha256",
               ):
                   assert frappe.get_meta("Communication").has_field(fieldname), fieldname
 
               published_forms = frappe.get_all(
                   "Web Form",
                   filters={"doc_type": "Job Applicant", "published": 1},
-                  fields=["name", "route"],
+                  fields=["name", "route", "doc_type", "anonymous", "login_required", "allow_edit", "allow_delete"],
               )
               assert len(published_forms) == 1, published_forms
               assert published_forms[0]["route"] == "empleos/solicitud", published_forms
+              assert published_forms[0]["doc_type"] == "Job Applicant", published_forms
+              assert published_forms[0]["anonymous"] == 1, published_forms
+              assert published_forms[0]["login_required"] == 0, published_forms
+              assert published_forms[0]["allow_edit"] == 0, published_forms
+              assert published_forms[0]["allow_delete"] == 0, published_forms
 
               for doctype, fieldname in (
                   ("File", "custom_av_scan_status"),
                   ("File", "custom_cv_sha256"),
                   ("Job Applicant", "custom_candidate_profile"),
+                  ("Job Applicant", "custom_candidate_cv_file"),
                   ("Job Applicant", "custom_data_processing_consent"),
+                  ("Job Applicant", "custom_privacy_notice_version"),
+                  ("Job Applicant", "custom_consent_capture_method"),
+                  ("Job Applicant", "custom_consent_evidence_id"),
+                  ("Job Applicant", "custom_consent_recorded_on"),
+                  ("Job Applicant", "custom_consent_form_route"),
               ):
                   assert frappe.get_meta(doctype).has_field(fieldname), (doctype, fieldname)
 
               notification = frappe.get_doc("Notification", "AYP Candidate Application Received")
+              notification_source = json.loads(
+                  (
+                      Path(os.environ["GITHUB_WORKSPACE"])
+                      / "hrms/hr/notification/ayp_candidate_application_received/ayp_candidate_application_received.json"
+                  ).read_text()
+              )
               assert notification.enabled == 1
               assert notification.document_type == "Job Applicant"
               assert notification.event == "New"
               assert notification.condition_type == "Python"
-              assert notification.condition == (
-                  "doc.email_id and doc.get('custom_data_processing_consent') "
-                  "and doc.source != 'Email Recursos Humanos'"
-              )
+              assert notification.condition == notification_source["condition"]
+              assert notification.channel == notification_source["channel"]
+              assert notification.subject == notification_source["subject"]
+              assert notification.message == notification_source["message"]
               assert len(notification.recipients) == 1
               assert notification.recipients[0].receiver_by_document_field == "email_id"
+              assert not notification.recipients[0].receiver_by_role
+              assert not notification.recipients[0].cc
+              assert not notification.recipients[0].bcc
+              assert not notification.recipients[0].condition
 
               unsafe_auto_reply = frappe.get_all(
                   "Email Account",

@@ -342,7 +342,9 @@ global_search_doctypes = {
 	],
 }
 
-# override_whitelisted_methods = {}
+override_whitelisted_methods = {
+	"frappe.website.doctype.web_form.web_form.accept": "hrms.recruitment.web_form_intake.accept",
+}
 #
 # each overriding function accepts a `data` argument;
 # generated from the base implementation of the doctype dashboard,

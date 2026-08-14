@@ -63,6 +63,9 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 			file_url="/private/files/cv.pdf",
 			file_size=100,
 			is_private=1,
+			attached_to_doctype="Communication",
+			attached_to_name="COMM-TEST-1",
+			attached_to_field="",
 		)
 
 	def _base_patches(self, communication, file_doc):
@@ -75,11 +78,7 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 
 		return (
 			patch.object(email_intake, "_is_recruitment_email", return_value=True),
-			patch.object(
-				email_intake,
-				"_candidate_files",
-				return_value=[{"name": file_doc.name, "file_name": file_doc.file_name}],
-			),
+			patch.object(email_intake, "_locked_candidate_file", return_value=file_doc),
 			patch.object(email_intake, "scan_stored_candidate_cv", return_value="a" * 64),
 			patch.object(email_intake, "acquire_candidate_identity_lock"),
 			patch.object(email_intake.frappe, "get_doc", side_effect=get_doc),
@@ -233,6 +232,22 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 		self.assertIn("LIMIT 2", query)
 		self.assertEqual(parameters, ("COMM-TEST-1", "%.pdf", "%.docx"))
 
+	def test_locked_candidate_file_revalidates_attachment_identity(self):
+		file_doc = self._file()
+		file_doc.attached_to_name = "COMM-OTHER"
+		selected = {
+			"name": file_doc.name,
+			"file_name": file_doc.file_name,
+			"file_url": file_doc.file_url,
+			"file_size": file_doc.file_size,
+		}
+		with (
+			patch.object(email_intake, "_candidate_files", return_value=[selected]),
+			patch.object(email_intake.frappe, "get_doc", return_value=file_doc),
+			self.assertRaisesRegex(email_intake.EmailIntakeDomainError, "cambió durante el lock"),
+		):
+			email_intake._locked_candidate_file("COMM-TEST-1")
+
 	def test_email_profile_is_limited_to_current_vacancy(self):
 		self.assertEqual(
 			initial_talent_pool_status("Email Recursos Humanos"),
@@ -285,18 +300,51 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 		email_doc.custom_data_processing_consent = 0
 		self.assertFalse(frappe.safe_eval(condition, eval_locals={"doc": email_doc}))
 
-	def test_notification_patch_uses_db_update_and_exact_readback(self):
-		expected = {
-			"enabled": 1,
-			"document_type": "Job Applicant",
-			"event": "New",
-			"condition_type": "Python",
-			"condition": email_intake_patch.NOTIFICATION_CONDITION,
-		}
+	def test_notification_patch_syncs_full_artifact_and_recipients(self):
+		standard_path = (
+			Path(__file__).resolve().parents[2]
+			/ "hrms"
+			/ "hr"
+			/ "notification"
+			/ "ayp_candidate_application_received"
+			/ "ayp_candidate_application_received.json"
+		)
+		temporary_path = Path(__file__).with_name("ayp_candidate_application_received.json")
+		source = json.loads((standard_path if standard_path.exists() else temporary_path).read_text())
+		parent_fields = (
+			"attach_print",
+			"channel",
+			"condition",
+			"condition_type",
+			"docstatus",
+			"document_type",
+			"enabled",
+			"event",
+			"is_standard",
+			"message",
+			"module",
+			"send_system_notification",
+			"send_to_all_assignees",
+			"subject",
+		)
+		expected = {fieldname: source.get(fieldname) for fieldname in parent_fields}
+		recipients = [
+			frappe._dict(
+				receiver_by_document_field=row.get("receiver_by_document_field") or "",
+				receiver_by_role=row.get("receiver_by_role") or "",
+				condition=row.get("condition") or "",
+			)
+			for row in source["recipients"]
+		]
 		with (
 			patch.object(email_intake_patch.frappe.db, "exists", return_value=True),
 			patch.object(email_intake_patch.frappe.db, "set_value") as set_value,
-			patch.object(email_intake_patch.frappe.db, "get_value", return_value=expected),
+			patch.object(email_intake_patch.frappe.db, "get_value", return_value=frappe._dict(expected)),
+			patch.object(
+				email_intake_patch.frappe,
+				"get_all",
+				side_effect=[recipients, recipients],
+			),
 			patch.object(email_intake_patch, "clear_notification_cache") as clear_cache,
 		):
 			email_intake_patch._sync_application_received_notification()
@@ -307,6 +355,8 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 			update_modified=False,
 		)
 		clear_cache.assert_called_once_with()
+		self.assertEqual(expected["channel"], "Email")
+		self.assertEqual(source["recipients"], [{"receiver_by_document_field": "email_id"}])
 
 	def test_valid_later_web_notice_can_activate_profile(self):
 		self.assertTrue(
@@ -424,19 +474,79 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 		file_doc = self._file()
 		file_doc.custom_av_scan_status = "Clean"
 		file_doc.custom_cv_sha256 = "a" * 64
+		communication.custom_ayp_email_intake_file = file_doc.name
+		communication.custom_ayp_email_intake_cv_sha256 = file_doc.custom_cv_sha256
+		communication.check_permission = MagicMock()
+		communication.add_comment = MagicMock()
 		with (
 			patch.object(email_intake.frappe, "only_for"),
 			patch.object(email_intake.frappe.db, "sql"),
-			patch.object(
-				email_intake,
-				"_candidate_files",
-				return_value=[{"name": file_doc.name, "file_name": file_doc.file_name}],
-			),
-			patch.object(email_intake.frappe, "get_doc", side_effect=[communication, file_doc]),
+			patch.object(email_intake, "_is_recruitment_mailbox_message", return_value=True),
+			patch.object(email_intake.frappe.db, "exists", return_value=True),
+			patch.object(email_intake, "_locked_durable_intake_file", return_value=file_doc),
+			patch.object(email_intake, "acquire_candidate_identity_lock"),
+			patch.object(email_intake.frappe, "get_doc", return_value=communication),
 		):
-			result = email_intake.resolve_recruitment_email_review(communication.name, "reject")
+			result = email_intake.resolve_recruitment_email_review(
+				communication.name, "reject", reason="No corresponde a la identidad revisada."
+			)
 		self.assertEqual(result["status"], "rejected")
 		self.assertEqual(communication.custom_ayp_email_intake_error_code, "ReviewRejected")
+		communication.check_permission.assert_called_once_with("write")
+		communication.add_comment.assert_called_once()
+
+	def test_manual_link_is_audited_and_never_claims_completed_cv_tuple(self):
+		communication = self._communication()
+		communication.custom_ayp_email_intake_status = email_intake.INTAKE_BLOCKED
+		communication.custom_ayp_email_intake_error_code = "EmailIntakeReviewRequired"
+		communication.custom_ayp_email_intake_file = "FILE-NEW"
+		communication.custom_ayp_email_intake_cv_sha256 = "a" * 64
+		communication.check_permission = MagicMock()
+		communication.add_comment = MagicMock()
+		file_doc = self._file()
+		file_doc.custom_av_scan_status = "Clean"
+		file_doc.custom_cv_sha256 = "a" * 64
+		applicant = FakeDocument(
+			name="HR-APP-1",
+			job_title="HR-OPN-2026-0001",
+			custom_candidate_profile="PROFILE-1",
+			check_permission=MagicMock(),
+		)
+		event = FakeDocument(insert=MagicMock(return_value=None))
+
+		def get_doc(doctype, name=None):
+			if doctype == "Communication":
+				return communication
+			if doctype == "Job Applicant":
+				return applicant
+			if isinstance(doctype, dict) and doctype.get("doctype") == "AYP Candidate Review Event":
+				event.payload = doctype
+				return event
+			raise AssertionError((doctype, name))
+
+		with (
+			patch.object(email_intake.frappe, "only_for"),
+			patch.object(email_intake.frappe.db, "sql"),
+			patch.object(email_intake, "_is_recruitment_mailbox_message", return_value=True),
+			patch.object(email_intake.frappe.db, "exists", return_value=True),
+			patch.object(email_intake, "_locked_durable_intake_file", return_value=file_doc),
+			patch.object(email_intake, "acquire_candidate_identity_lock"),
+			patch.object(email_intake.frappe, "get_doc", side_effect=get_doc),
+		):
+			result = email_intake.resolve_recruitment_email_review(
+				communication.name,
+				"link_existing",
+				applicant.name,
+				reason="Coincidencia validada manualmente para esta vacante.",
+			)
+		self.assertEqual(result["status"], "linked_for_review")
+		self.assertEqual(communication.custom_ayp_email_intake_status, email_intake.INTAKE_BLOCKED)
+		self.assertEqual(communication.custom_ayp_email_intake_error_code, "ReviewLinked")
+		self.assertEqual(file_doc.attached_to_doctype, "Communication")
+		self.assertEqual(file_doc.attached_to_name, communication.name)
+		applicant.check_permission.assert_called_once_with("write")
+		event.insert.assert_called_once_with(ignore_permissions=True)
+		self.assertEqual(event.payload["actor"], email_intake.frappe.session.user)
 
 	def test_email_identity_alone_cannot_replace_existing_cv(self):
 		communication = self._communication()
@@ -538,11 +648,20 @@ class TestRecruitmentEmailIntake(unittest.TestCase):
 			file_url="/private/files/cv.pdf",
 			attached_to_doctype="Job Applicant",
 			attached_to_name="HR-APP-1",
+			attached_to_field="resume_attachment",
+			is_private=1,
 			custom_av_scan_status="Clean",
 			custom_cv_sha256=sha,
 		)
 		with patch.object(email_intake.frappe.db, "get_value", side_effect=[applicant, file_record]):
 			self.assertEqual(email_intake._verified_completed_applicant(communication), "HR-APP-1")
+		applicant.custom_cv_sha256 = "b" * 64
+		with (
+			patch.object(email_intake.frappe.db, "get_value", side_effect=[applicant, file_record]),
+			self.assertRaises(email_intake.EmailIntakeDomainError),
+		):
+			email_intake._verified_completed_applicant(communication)
+		applicant.custom_cv_sha256 = sha
 		file_record.custom_av_scan_status = "Pending"
 		with (
 			patch.object(email_intake.frappe.db, "get_value", side_effect=[applicant, file_record]),

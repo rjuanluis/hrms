@@ -21,6 +21,7 @@ from pypdf.generic import DictionaryObject, IndirectObject, NameObject, TextStri
 import frappe
 
 from hrms.security.candidate_cv import (
+	PRIVACY_NOTICE_VERSION,
 	CandidateCVInfrastructureError,
 	CandidateCVSecurityError,
 	_candidate_file_record,
@@ -29,6 +30,7 @@ from hrms.security.candidate_cv import (
 	_mark_file_clean,
 	_scan_candidate_cv,
 	_verified_candidate_cv_sha256,
+	attach_job_applicant_cv,
 	candidate_cv_file_identity,
 	guard_candidate_cv_download,
 	guard_candidate_cv_upload,
@@ -181,6 +183,7 @@ class TestCandidateCVSecurity(unittest.TestCase):
 		frappe.local.form_dict = frappe._dict()
 		frappe.local.session = frappe._dict(user="Guest")
 		frappe.local.request = SimpleNamespace(path="/api/method/upload_file", method="POST", files={})
+		frappe.flags.pop("ayp_authoritative_recruitment_web_form", None)
 
 	def _consent_doc(self, values, before_save):
 		doc = Mock()
@@ -190,25 +193,86 @@ class TestCandidateCVSecurity(unittest.TestCase):
 		doc.resume_attachment = ""
 		return doc
 
+	def test_guest_direct_insert_cannot_claim_web_provenance(self):
+		values = {"custom_data_processing_consent": 1}
+		doc = self._consent_doc(values, None)
+		with self.assertRaisesRegex(CandidateCVSecurityError, "formulario oficial"):
+			validate_job_applicant_cv(doc)
+
+	def test_authoritative_web_form_context_seals_complete_consent_bundle(self):
+		values = {
+			"source": "",
+			"custom_data_processing_consent": 1,
+			"custom_privacy_notice_version": "client-controlled",
+			"custom_consent_capture_method": "client-controlled",
+			"custom_consent_evidence_id": "client-controlled",
+			"custom_consent_recorded_on": "client-controlled",
+			"custom_consent_form_route": "client-controlled",
+		}
+		doc = self._consent_doc(values, None)
+		frappe.flags.ayp_authoritative_recruitment_web_form = frappe._dict(
+			name="AYP Recruitment Application",
+			route="empleos/solicitud",
+			source="Sitio Web",
+			job_opening="HR-OPN-2026-0001",
+		)
+		db = SimpleNamespace(has_column=Mock(return_value=False))
+		with patch("hrms.security.candidate_cv.frappe.db", db):
+			validate_job_applicant_cv(doc)
+		self.assertEqual(values["source"], "Sitio Web")
+		self.assertEqual(values["status"], "Open")
+		self.assertEqual(values["job_title"], "HR-OPN-2026-0001")
+		self.assertEqual(values["custom_data_processing_consent"], 1)
+		self.assertEqual(values["custom_privacy_notice_version"], PRIVACY_NOTICE_VERSION)
+		self.assertEqual(values["custom_consent_capture_method"], "Web Form")
+		self.assertEqual(len(values["custom_consent_evidence_id"]), 32)
+		self.assertTrue(values["custom_consent_recorded_on"])
+		self.assertEqual(values["custom_consent_form_route"], "empleos/solicitud")
+
+	def test_existing_authoritative_bundle_rejects_source_consent_and_version_mutations(self):
+		before = {
+			"source": "Sitio Web",
+			"custom_data_processing_consent": 1,
+			"custom_privacy_notice_version": PRIVACY_NOTICE_VERSION,
+			"custom_consent_capture_method": "Web Form",
+			"custom_consent_evidence_id": "evidence-1",
+			"custom_consent_recorded_on": "2026-08-14 00:00:00",
+			"custom_consent_form_route": "empleos/solicitud",
+		}
+		for fieldname, changed in (
+			("source", "Email Recursos Humanos"),
+			("custom_data_processing_consent", 0),
+			("custom_privacy_notice_version", "older"),
+		):
+			with self.subTest(fieldname=fieldname):
+				values = dict(before)
+				values[fieldname] = changed
+				doc = self._consent_doc(values, SimpleNamespace(get=before.get))
+				with self.assertRaisesRegex(CandidateCVSecurityError, "operación gobernada"):
+					validate_job_applicant_cv(doc)
+
 	def test_internal_insert_clears_forged_web_consent_evidence(self):
 		frappe.local.session.user = "Administrator"
 		values = {
+			"source": "Sitio Web",
 			"custom_data_processing_consent": 1,
+			"custom_privacy_notice_version": PRIVACY_NOTICE_VERSION,
 			"custom_consent_capture_method": "Web Form",
 			"custom_consent_evidence_id": "forged",
 			"custom_consent_recorded_on": "2026-08-14 00:00:00",
 			"custom_consent_form_route": "empleos/solicitud",
 		}
 		doc = self._consent_doc(values, None)
-		with patch("hrms.security.candidate_cv.frappe.db.has_column", return_value=False):
+		db = SimpleNamespace(has_column=Mock(return_value=False))
+		with patch("hrms.security.candidate_cv.frappe.db", db):
 			validate_job_applicant_cv(doc)
-		for fieldname in (
-			"custom_consent_capture_method",
-			"custom_consent_evidence_id",
-			"custom_consent_recorded_on",
-			"custom_consent_form_route",
-		):
-			self.assertEqual(values[fieldname], "")
+		self.assertEqual(values["source"], "")
+		self.assertEqual(values["custom_data_processing_consent"], 0)
+		self.assertEqual(values["custom_privacy_notice_version"], "")
+		self.assertEqual(values["custom_consent_capture_method"], "")
+		self.assertEqual(values["custom_consent_evidence_id"], "")
+		self.assertIsNone(values["custom_consent_recorded_on"])
+		self.assertEqual(values["custom_consent_form_route"], "")
 
 	def test_empty_consent_evidence_normalizes_none_and_empty_on_existing_save(self):
 		frappe.local.session.user = "Administrator"
@@ -221,7 +285,8 @@ class TestCandidateCVSecurity(unittest.TestCase):
 		values = {"custom_data_processing_consent": 0, **dict.fromkeys(fields, "")}
 		before_values = dict.fromkeys(fields, None)
 		doc = self._consent_doc(values, SimpleNamespace(get=before_values.get))
-		with patch("hrms.security.candidate_cv.frappe.db.has_column", return_value=False):
+		db = SimpleNamespace(has_column=Mock(return_value=False))
+		with patch("hrms.security.candidate_cv.frappe.db", db):
 			validate_job_applicant_cv(doc)
 
 	def test_existing_web_consent_evidence_is_immutable(self):
@@ -463,6 +528,37 @@ class TestCandidateCVSecurity(unittest.TestCase):
 		):
 			self.assertEqual(_candidate_file_record(doc, ["name"]), {"name": "FILE-EXACT"})
 		db.get_value.assert_called_once_with("File", "FILE-EXACT", ["name"], as_dict=True)
+
+	def test_attach_hook_uses_persisted_exact_file_identity_not_url_reselection(self):
+		doc = SimpleNamespace(
+			name="HR-APP-1",
+			resume_attachment="/private/files/shared.pdf",
+			custom_candidate_cv_file="FILE-EXACT",
+			get=lambda fieldname, default=None: {
+				"custom_candidate_cv_file": "FILE-EXACT",
+			}.get(fieldname, default),
+		)
+		db = SimpleNamespace(
+			has_column=Mock(return_value=True),
+			get_value=Mock(
+				return_value=frappe._dict(name="FILE-EXACT", file_url="/private/files/shared.pdf")
+			),
+			set_value=Mock(),
+		)
+		frappe.local.ayp_candidate_cv_file_name = None
+		with patch("hrms.security.candidate_cv.frappe.db", db):
+			attach_job_applicant_cv(doc)
+		db.get_value.assert_called_once_with("File", "FILE-EXACT", ["name", "file_url"], as_dict=True)
+		db.set_value.assert_called_once_with(
+			"File",
+			"FILE-EXACT",
+			{
+				"attached_to_doctype": "Job Applicant",
+				"attached_to_name": "HR-APP-1",
+				"attached_to_field": "resume_attachment",
+			},
+			update_modified=False,
+		)
 
 	def test_recruitment_cv_download_is_quarantined_until_clean(self):
 		frappe.local.request = SimpleNamespace(path="/private/files/cv.pdf")

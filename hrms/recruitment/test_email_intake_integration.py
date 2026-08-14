@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from email.message import EmailMessage
 from io import BytesIO
 from unittest.mock import patch
@@ -12,7 +13,7 @@ from frappe.email.receive import InboundMail
 from frappe.tests import IntegrationTestCase
 from frappe.utils import add_to_date, now_datetime
 
-from hrms.recruitment import email_intake
+from hrms.recruitment import email_intake, web_form_intake
 from hrms.recruitment.email_intake import (
 	APPLICANT_SOURCE,
 	INTAKE_PENDING,
@@ -20,6 +21,7 @@ from hrms.recruitment.email_intake import (
 	disable_existing_recruitment_mailbox_auto_reply,
 )
 from hrms.recruitment.talent_pool import STATUS_ACTIVE, STATUS_CURRENT_VACANCY_ONLY
+from hrms.security import candidate_cv
 from hrms.security.candidate_cv import PRIVACY_NOTICE_VERSION
 
 WEB_SOURCE = "Sitio Web"
@@ -279,6 +281,8 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 	def test_native_inbound_recruitment_mail_creates_no_outbound_email(self):
 		account_name = f"_Test Recruitment Native {frappe.generate_hash(length=8)}"
 		communication_name = None
+		applicant_name = None
+		profile_name = None
 		try:
 			account = frappe.get_doc(
 				{
@@ -311,30 +315,53 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 			)
 			queue_before = frappe.db.count("Email Queue")
 			sent_before = frappe.db.count("Communication", {"sent_or_received": "Sent"})
+			mail = InboundMail(message.as_bytes(), account)
 			with (
+				patch.object(account, "get_inbound_mails", return_value=[mail]),
 				patch.object(email_intake, "_enqueue_pending_intake", return_value=True),
 				patch.object(frappe, "sendmail") as sendmail,
+				patch.object(candidate_cv, "scan_bytes_with_clamd", return_value="stream: OK"),
 			):
-				communication = InboundMail(message.as_bytes(), account).process()
+				account.receive()
+				communication = frappe.get_doc("Communication", {"message_id": mail.message_id})
 				communication_name = communication.name
 				frappe.db.commit()  # nosemgrep
 				communication.send_email(is_inbound_mail_communcation=True)
 				sendmail.assert_not_called()
-			self.assertFalse(communication.reference_doctype)
-			self.assertFalse(communication.reference_name)
-			self.assertEqual(communication.get(INTAKE_STATUS_FIELD), INTAKE_PENDING)
+				result = email_intake.process_recruitment_email(communication.name)
+				applicant_name = result["applicant"]
+				applicant = frappe.get_doc("Job Applicant", applicant_name)
+				profile_name = applicant.custom_candidate_profile
+				file_doc = frappe.get_doc("File", applicant.custom_candidate_cv_file)
+			self.assertEqual(result["status"], "created")
+			self.assertEqual(communication.reference_doctype, "Job Applicant")
+			self.assertEqual(communication.reference_name, applicant.name)
+			self.assertEqual(communication.get(INTAKE_STATUS_FIELD), email_intake.INTAKE_COMPLETED)
+			self.assertEqual(applicant.custom_cv_sha256, file_doc.custom_cv_sha256)
+			self.assertEqual(file_doc.custom_av_scan_status, "Clean")
+			self.assertEqual(file_doc.attached_to_doctype, "Job Applicant")
+			self.assertEqual(file_doc.attached_to_name, applicant.name)
+			self.assertEqual(file_doc.attached_to_field, "resume_attachment")
 			self.assertEqual(frappe.db.count("Email Queue"), queue_before)
 			self.assertEqual(
 				frappe.db.count("Communication", {"sent_or_received": "Sent"}),
 				sent_before,
 			)
 		finally:
+			if applicant_name:
+				frappe.db.delete(
+					"File", {"attached_to_doctype": "Job Applicant", "attached_to_name": applicant_name}
+				)
 			if communication_name:
 				frappe.db.delete(
 					"File",
 					{"attached_to_doctype": "Communication", "attached_to_name": communication_name},
 				)
 				frappe.db.delete("Communication", {"name": communication_name})
+			if applicant_name:
+				frappe.db.delete("Job Applicant", {"name": applicant_name})
+			if profile_name:
+				frappe.db.delete("AYP Candidate Profile", {"name": profile_name})
 			frappe.db.delete("Email Account", {"name": account_name})
 			frappe.db.commit()  # nosemgrep
 
@@ -355,6 +382,40 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 			STATUS_CURRENT_VACANCY_ONLY,
 		)
 
+		pdf = BytesIO()
+		writer = PdfWriter()
+		writer.add_blank_page(width=72, height=72)
+		writer.add_metadata({"/Subject": frappe.generate_hash(length=20)})
+		writer.write(pdf)
+		web_file = frappe.get_doc(
+			{
+				"doctype": "File",
+				"file_name": f"web-cv-{frappe.generate_hash(length=10)}.pdf",
+				"is_private": 1,
+				"content": pdf.getvalue(),
+			}
+		).insert(ignore_permissions=True)
+		with patch.object(candidate_cv, "scan_bytes_with_clamd", return_value="stream: OK"):
+			candidate_cv.scan_stored_candidate_cv(web_file)
+		web_form_name = frappe.db.get_value(
+			"Web Form", {"route": web_form_intake.RECRUITMENT_WEB_FORM_ROUTE}, "name"
+		)
+		self.assertTrue(web_form_name)
+		web_payload = {
+			"job_title": "CLIENT-CONTROLLED",
+			"applicant_name": "_Test Authoritative Web Candidate",
+			"email_id": email,
+			"phone_number": "8095550199",
+			"custom_years_sales_experience": "1 a 2 años",
+			"custom_retail_experience": "Sí",
+			"custom_schedule_availability": "Sí",
+			"custom_start_availability": "Inmediata",
+			"custom_bicycle_experience": "Me interesa aprender",
+			"cover_letter": "Prueba de integración del Web Form oficial.",
+			"resume_attachment": web_file.file_url,
+			"custom_data_processing_consent": 1,
+			"custom_privacy_notice_version": "CLIENT-CONTROLLED",
+		}
 		try:
 			with patch.dict(
 				frappe.conf,
@@ -367,15 +428,19 @@ class TestRecruitmentEmailIntakeIntegration(IntegrationTestCase):
 				# Fresh installs have no default outgoing Email Account. Exercise
 				# the official site-config fallback; sendmail only creates Email Queue.
 				frappe.local.outgoing_email_account = {}
-				web_application = self._applicant(
-					email=email,
-					source=WEB_SOURCE,
-					consent=1,
-					privacy_version=PRIVACY_NOTICE_VERSION,
-					as_guest=True,
+				web_application = web_form_intake.accept(
+					web_form=web_form_name,
+					data=json.dumps(web_payload),
 				)
 		finally:
 			frappe.local.outgoing_email_account = {}
+		self.assertEqual(web_application.source, WEB_SOURCE)
+		self.assertEqual(web_application.status, "Open")
+		self.assertEqual(web_application.job_title, email_intake._configured_job_opening())
+		self.assertEqual(web_application.custom_privacy_notice_version, PRIVACY_NOTICE_VERSION)
+		self.assertEqual(web_application.custom_consent_capture_method, "Web Form")
+		self.assertTrue(web_application.custom_consent_evidence_id)
+		self.assertEqual(web_application.custom_consent_form_route, "empleos/solicitud")
 		self.assertEqual(web_application.custom_candidate_profile, profile_name)
 		self.assertEqual(
 			frappe.db.get_value("AYP Candidate Profile", profile_name, "talent_pool_status"),
