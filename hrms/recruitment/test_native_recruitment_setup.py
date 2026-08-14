@@ -84,16 +84,30 @@ class TestNativeRecruitmentSetup(TestCase):
 
 	def test_existing_job_opening_preserves_human_lifecycle_state(self):
 		opening = _Document("HR-OPN-2026-0001")
+		opening.job_title = "Asesor(a) de Venta Online"
+		opening.designation = "Asesor/a de Ventas"
 		opening.status = "Closed"
 		opening.publish = 1
 
 		with (
-			patch.object(setup.frappe.db, "exists", return_value=True),
-			patch.object(setup.frappe.db, "get_value", return_value=opening.name),
+			patch.object(
+				setup.frappe.db,
+				"exists",
+				side_effect=lambda doctype, name: (
+					opening.name
+					if doctype == "Job Opening" and name == setup.RECRUITMENT_JOB_OPENING
+					else True
+				),
+			),
+			patch.object(setup.frappe.db, "get_value") as get_opening_name,
 			patch.object(setup.frappe, "get_doc", return_value=opening),
 		):
 			setup.ensure_native_recruitment_job_opening()
 
+		get_opening_name.assert_not_called()
+		self.assertEqual(opening.name, setup.RECRUITMENT_JOB_OPENING)
+		self.assertEqual(opening.job_title, setup.RECRUITMENT_JOB_TITLE)
+		self.assertEqual(opening.designation, setup.RECRUITMENT_JOB_TITLE)
 		self.assertEqual(opening.status, "Closed")
 		self.assertEqual(opening.publish, 1)
 		self.assertEqual(opening.job_application_route, setup.RECRUITMENT_WEB_FORM_ROUTE)

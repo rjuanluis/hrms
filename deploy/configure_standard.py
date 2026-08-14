@@ -15,6 +15,7 @@ from hrms.recruitment.talent_pool import backfill_candidate_profiles
 
 SITE = os.environ.get("AYP_SITE_NAME", "hr.aroypedal.com")
 COMPANY = "ARO Y PEDAL SRL"
+RECRUITMENT_JOB_OPENING = "HR-OPN-2026-0001"
 RECRUITMENT_JOB_TITLE = "Asesor Venta Online"
 RECRUITMENT_MAILBOX = "empleos@aroypedal.com"
 TAX_ID = "101-57005-9"
@@ -539,11 +540,13 @@ def ensure_native_recruitment_job_opening() -> str:
 		"company": COMPANY,
 		"job_application_route": RECRUITMENT_WEB_FORM_ROUTE,
 	}
-	opening_name = frappe.db.get_value(
-		"Job Opening",
-		{"job_title": RECRUITMENT_JOB_TITLE, "company": COMPANY},
-		"name",
-	)
+	opening_name = frappe.db.exists("Job Opening", RECRUITMENT_JOB_OPENING)
+	if not opening_name:
+		opening_name = frappe.db.get_value(
+			"Job Opening",
+			{"job_title": RECRUITMENT_JOB_TITLE, "company": COMPANY},
+			"name",
+		)
 	if opening_name:
 		opening = frappe.get_doc("Job Opening", opening_name)
 		opening.update(values)
