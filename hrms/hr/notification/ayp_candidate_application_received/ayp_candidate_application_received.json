@@ -1,7 +1,7 @@
 {
  "attach_print": 0,
  "channel": "Email",
- "condition": "doc.email_id and doc.get('custom_data_processing_consent')",
+ "condition": "doc.email_id and doc.source != 'Email Recursos Humanos' and doc.get('custom_data_processing_consent')",
  "creation": "2026-07-17 20:30:00.000000",
  "days_in_advance": 0,
  "docstatus": 0,

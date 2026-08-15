@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import importlib.util
+import json
 import sys
 import types
 import unittest
@@ -10,6 +11,13 @@ from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+RUNNER_PATH = ROOT / "deploy" / "ayp_ats_email_bridge.py"
+RUNNER_SPEC = importlib.util.spec_from_file_location("ayp_ats_email_runner_under_test", RUNNER_PATH)
+if RUNNER_SPEC is None or RUNNER_SPEC.loader is None:
+	raise ImportError(f"Could not load {RUNNER_PATH}")
+RUNNER_MODULE = importlib.util.module_from_spec(RUNNER_SPEC)
+sys.modules[RUNNER_SPEC.name] = RUNNER_MODULE
+RUNNER_SPEC.loader.exec_module(RUNNER_MODULE)
 MATCHING_PATH = ROOT / "hrms" / "recruitment" / "matching.py"
 MATCHING_SPEC = importlib.util.spec_from_file_location("email_bridge_matching_under_test", MATCHING_PATH)
 if MATCHING_SPEC is None or MATCHING_SPEC.loader is None:
@@ -49,13 +57,16 @@ class FakeDB:
 			"custom_ayp_email_subject",
 			"custom_ayp_email_current_vacancy_consent",
 			"custom_ayp_email_consent_notice_version",
+			"custom_ayp_email_consent_evidence_sha256",
 		}
 
 	def exists(self, doctype, name):
 		if doctype == "Job Applicant Source":
 			return name == EMAIL_RECRUITMENT_SOURCE
 		if doctype == "File":
-			return name.get("content_hash") in self.owner.existing_private_hashes and name.get("is_private") == 1
+			return (
+				name.get("content_hash") in self.owner.existing_private_hashes and name.get("is_private") == 1
+			)
 		return False
 
 	def get_value(self, doctype, filters, fieldname, as_dict=False):
@@ -203,8 +214,7 @@ def load_email_bridge(fake_frappe):
 
 
 def email_payload(content=b"synthetic cv"):
-	return {
-		"message_id": "<message-1@example.com>",
+	payload = {
 		"graph_message_id": "AAMk-fallback-id",
 		"received_on": "2026-08-15T13:14:15-04:00",
 		"subject": "Solicitud de empleo HR-OPN-2026-0001",
@@ -219,6 +229,20 @@ def email_payload(content=b"synthetic cv"):
 			}
 		],
 	}
+	evidence = {
+		"canonical_consent": (
+			"he leido el aviso de privacidad de aro y pedal y autorizo el tratamiento "
+			"de mis datos exclusivamente para esta vacante"
+		),
+		"format": "AYP-EMAIL-CONSENT-EVIDENCE-V1",
+		"graph_message_id": payload["graph_message_id"],
+		"mailbox": "empleos@aroypedal.com",
+		"notice_version": payload["consent_notice_version"],
+		"received_on": payload["received_on"],
+	}
+	canonical = json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+	payload["consent_evidence_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+	return payload
 
 
 class TestEmailBridge(unittest.TestCase):
@@ -241,6 +265,10 @@ class TestEmailBridge(unittest.TestCase):
 			applicant.custom_ayp_email_consent_notice_version,
 			self.bridge.EMAIL_CONSENT_NOTICE_VERSION,
 		)
+		self.assertEqual(
+			applicant.custom_ayp_email_consent_evidence_sha256,
+			email_payload()["consent_evidence_sha256"],
+		)
 		self.assertEqual(applicant.custom_privacy_notice_version, self.bridge.EMAIL_CONSENT_NOTICE_VERSION)
 		self.assertIsNone(applicant.custom_candidate_profile)
 		self.assertEqual(applicant.custom_ayp_email_subject, "Solicitud de empleo HR-OPN-2026-0001")
@@ -251,6 +279,28 @@ class TestEmailBridge(unittest.TestCase):
 		self.assertNotIn("notes", applicant)
 		self.assertFalse(self.bridge.frappe.flags.in_import)
 		self.assertFalse(self.bridge.frappe.flags.mute_emails)
+
+	def test_versioned_runner_payload_is_accepted_without_schema_translation(self):
+		message = {
+			"id": "GRAPH-IMMUTABLE-CONTRACT-ID",
+			"internetMessageId": "<sender-controlled@example.test>",
+			"receivedDateTime": "2026-08-15T17:14:15Z",
+			"subject": "Solicitud de empleo HR-OPN-2026-0001",
+			"sender": {"emailAddress": {"address": "ats-canary@aroypedal.com", "name": "Candidate Example"}},
+		}
+		attachment = {
+			"name": "candidate.pdf",
+			"contentBytes": base64.b64encode(b"synthetic cv").decode("ascii"),
+		}
+		candidate = RUNNER_MODULE._build_candidate(message, attachment)
+
+		result = self.bridge.ingest_email_payload(candidate.payload)
+
+		self.assertEqual(result["status"], "created")
+		self.assertEqual(
+			self.frappe.inserted_applicants[0].custom_ayp_email_consent_evidence_sha256,
+			candidate.payload["consent_evidence_sha256"],
+		)
 
 	def test_exact_duplicate_returns_existing_without_new_file_or_applicant(self):
 		first = self.bridge.ingest_email_payload(email_payload())
@@ -288,6 +338,13 @@ class TestEmailBridge(unittest.TestCase):
 		wrong_version["consent_notice_version"] = "untrusted-version"
 		with self.assertRaisesRegex(self.bridge.EmailBridgeError, "no está autorizada"):
 			self.bridge.ingest_email_payload(wrong_version)
+		self.assertEqual(self.frappe.saved_files, [])
+
+	def test_consent_evidence_digest_must_match_immutable_graph_message(self):
+		payload = email_payload()
+		payload["consent_evidence_sha256"] = "0" * 64
+		with self.assertRaisesRegex(self.bridge.EmailBridgeError, "evidencia del consentimiento"):
+			self.bridge.ingest_email_payload(payload)
 		self.assertEqual(self.frappe.saved_files, [])
 
 	def test_missing_authoritative_vacancy_fails_before_file_storage(self):

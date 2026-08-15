@@ -8,6 +8,7 @@ from frappe import _
 from hrms.recruitment.matching import (
 	DEDUPE_NEW,
 	DEDUPE_REVIEW,
+	EMAIL_RECRUITMENT_SOURCE,
 	candidate_lock_names,
 	choose_profile_match,
 	names_are_compatible,
@@ -178,6 +179,19 @@ def should_link_job_applicant_profile(doc) -> bool:
 	)
 
 
+def validate_email_future_consent(doc) -> None:
+	"""Reject manufactured future-opportunity consent for email applicants."""
+
+	consent_value = doc.get("custom_data_processing_consent")
+	if doc.get("source") == EMAIL_RECRUITMENT_SOURCE and consent_value in (True, 1, "1"):
+		frappe.throw(
+			_(
+				"Las solicitudes por correo requieren un flujo separado y auditable para futuras oportunidades."
+			),
+			frappe.ValidationError,
+		)
+
+
 def _create_candidate_profile(doc, *, email: str, phone: str, cv_sha256: str, dedupe_status: str) -> str:
 	profile = frappe.get_doc(
 		{
@@ -204,6 +218,7 @@ def link_job_applicant_profile(doc, method=None) -> None:
 	profile flagged for human review rather than risking an incorrect merge.
 	"""
 
+	validate_email_future_consent(doc)
 	if not _job_applicant_has_field(doc, "custom_candidate_profile"):
 		return
 

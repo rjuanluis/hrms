@@ -234,6 +234,19 @@ class TestCandidateReviewSecurityContract(unittest.TestCase):
 		self.assertIn("validate_ayp_interview_cancellation", hooks)
 		self.assertIn("validate_ayp_feedback_cancellation", hooks)
 
+	def test_application_received_notification_excludes_email_intake(self):
+		notification = json.loads(
+			(
+				ROOT
+				/ "hrms"
+				/ "hr"
+				/ "notification"
+				/ "ayp_candidate_application_received"
+				/ "ayp_candidate_application_received.json"
+			).read_text(encoding="utf-8")
+		)
+		self.assertIn("doc.source != 'Email Recursos Humanos'", notification["condition"])
+
 
 if __name__ == "__main__":
 	unittest.main()

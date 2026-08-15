@@ -69,6 +69,23 @@ class TestTalentPoolLifecycle(UnitTestCase):
 		self.assertFalse(applicant.custom_candidate_profile)
 		self.assertEqual(frappe.db.count("AYP Candidate Profile"), profile_count)
 
+	def test_email_applicant_with_manufactured_future_consent_is_rejected(self):
+		token = uuid4().hex
+		profile_count = frappe.db.count("AYP Candidate Profile")
+		with self.assertRaises(frappe.ValidationError):
+			frappe.get_doc(
+				{
+					"doctype": "Job Applicant",
+					"applicant_name": "Candidata con consentimiento fabricado",
+					"email_id": f"email-manufactured-{token}@example.com",
+					"status": "Open",
+					"source": EMAIL_RECRUITMENT_SOURCE,
+					"custom_data_processing_consent": 1,
+					"custom_ayp_governed": 1,
+				}
+			).insert(ignore_permissions=True)
+		self.assertEqual(frappe.db.count("AYP Candidate Profile"), profile_count)
+
 	def test_identity_change_keeps_profile_and_marks_review(self):
 		token = uuid4().hex
 		applicant = frappe.get_doc(

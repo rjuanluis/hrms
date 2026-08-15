@@ -119,9 +119,9 @@ class TestTalentPoolMatching(unittest.TestCase):
 			)
 		)
 
-	def test_web_form_and_consented_email_behavior_is_unchanged(self):
+	def test_web_form_behavior_is_unchanged_but_email_checkbox_cannot_enroll(self):
 		self.assertTrue(should_enroll_in_talent_pool(source=None, has_data_processing_consent=True))
-		self.assertTrue(
+		self.assertFalse(
 			should_enroll_in_talent_pool(
 				source=EMAIL_RECRUITMENT_SOURCE,
 				has_data_processing_consent=True,

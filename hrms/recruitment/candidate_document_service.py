@@ -7,6 +7,7 @@ from frappe import _
 from frappe.utils import now_datetime
 
 from hrms.recruitment.candidate_document_processing import DocumentProcessingError, extract_candidate_document
+from hrms.recruitment.matching import EMAIL_RECRUITMENT_SOURCE
 from hrms.security.candidate_cv import (
 	CandidateCVSecurityError,
 	read_stored_candidate_cv_bytes,
@@ -124,6 +125,8 @@ def _enqueue_candidate_document_job(applicant_name: str, expected_sha256: str) -
 
 
 def enqueue_candidate_document(doc, method=None) -> None:
+	if doc.get("source") == EMAIL_RECRUITMENT_SOURCE:
+		return
 	if not _has_processing_fields() or not doc.resume_attachment:
 		return
 	if doc.get("custom_cv_processing_status") != "Pendiente" or not doc.get("custom_cv_sha256"):

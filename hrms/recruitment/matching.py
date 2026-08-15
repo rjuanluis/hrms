@@ -12,9 +12,9 @@ EMAIL_RECRUITMENT_SOURCE = "Email Recursos Humanos"
 
 
 def should_enroll_in_talent_pool(*, source: str | None, has_data_processing_consent: bool) -> bool:
-	"""Keep unconsented email applications out of the reusable talent pool."""
+	"""Keep every email application out until a dedicated future-consent flow exists."""
 
-	return source != EMAIL_RECRUITMENT_SOURCE or has_data_processing_consent
+	return source != EMAIL_RECRUITMENT_SOURCE
 
 
 def candidate_lock_names(*, email: str, phone: str, cv_sha256: str) -> tuple[str, ...]:

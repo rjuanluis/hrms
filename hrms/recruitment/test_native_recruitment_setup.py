@@ -50,6 +50,7 @@ class TestNativeRecruitmentSetup(TestCase):
 			setup.ensure_recruitment_security_fields()
 
 		field_map = create_fields.call_args.args[0]
+		fields = {field["fieldname"]: field for field in field_map["Job Applicant"]}
 		email_fields = {
 			field["fieldname"]: field
 			for field in field_map["Job Applicant"]
@@ -63,6 +64,7 @@ class TestNativeRecruitmentSetup(TestCase):
 				"custom_ayp_email_subject",
 				"custom_ayp_email_current_vacancy_consent",
 				"custom_ayp_email_consent_notice_version",
+				"custom_ayp_email_consent_evidence_sha256",
 			},
 		)
 		for field in email_fields.values():
@@ -72,6 +74,11 @@ class TestNativeRecruitmentSetup(TestCase):
 		self.assertEqual(email_fields["custom_ayp_email_message_id"]["unique"], 1)
 		self.assertEqual(email_fields["custom_ayp_email_subject"]["length"], 140)
 		self.assertEqual(email_fields["custom_ayp_email_consent_notice_version"]["length"], 140)
+		self.assertEqual(email_fields["custom_ayp_email_consent_evidence_sha256"]["length"], 64)
+		self.assertEqual(
+			fields["custom_data_processing_consent"]["read_only_depends_on"],
+			"eval:doc.source=='Email Recursos Humanos'",
+		)
 
 	def test_email_recruitment_source_is_created_idempotently(self):
 		source = _Document()
@@ -90,7 +97,7 @@ class TestNativeRecruitmentSetup(TestCase):
 		)
 		self.assertEqual(exists.call_count, 2)
 
-	def test_internal_job_opening_uses_native_autonaming(self):
+	def test_internal_job_opening_is_created_with_exact_authoritative_name(self):
 		designation = _Document()
 		opening = _Document("HR-OPN-2026-0001")
 
@@ -107,17 +114,14 @@ class TestNativeRecruitmentSetup(TestCase):
 
 		with (
 			patch.object(setup.frappe.db, "exists", side_effect=exists),
-			patch.object(setup.frappe.db, "get_value", return_value=None) as get_opening_name,
+			patch.object(setup.frappe.db, "get_value") as get_opening_name,
 			patch.object(setup.frappe, "get_doc", side_effect=get_doc),
 		):
 			result = setup.ensure_native_recruitment_job_opening()
 
-		get_opening_name.assert_called_once_with(
-			"Job Opening",
-			{"job_title": setup.RECRUITMENT_JOB_TITLE, "company": setup.COMPANY},
-			"name",
-		)
+		get_opening_name.assert_not_called()
 		self.assertEqual(result, opening.name)
+		self.assertEqual(opening.name, setup.RECRUITMENT_JOB_OPENING)
 		self.assertTrue(opening.inserted)
 		self.assertIsNone(opening.insert_set_name)
 		self.assertEqual(opening.job_title, setup.RECRUITMENT_JOB_TITLE)
@@ -164,10 +168,9 @@ class TestNativeRecruitmentSetup(TestCase):
 		self.assertEqual(opening.job_application_route, setup.RECRUITMENT_WEB_FORM_ROUTE)
 		self.assertTrue(opening.saved)
 
-	def test_business_key_fallback_reconciles_existing_opening_without_insert(self):
-		opening = _Document("HR-OPN-2025-0009")
-		opening.status = "Closed"
-		opening.publish = 1
+	def test_legacy_business_key_opening_is_not_used_as_authoritative_vacancy(self):
+		legacy_opening = _Document("HR-OPN-2025-0009")
+		opening = _Document()
 
 		def exists(doctype, name):
 			if (doctype, name) == ("Designation", setup.RECRUITMENT_JOB_TITLE):
@@ -177,28 +180,25 @@ class TestNativeRecruitmentSetup(TestCase):
 			raise AssertionError(f"Unexpected exists call: {(doctype, name)}")
 
 		def get_doc(*args):
-			if args == ("Job Opening", opening.name):
+			if len(args) == 1 and args[0]["doctype"] == "Job Opening":
+				opening.update(args[0])
 				return opening
 			raise AssertionError(f"Unexpected get_doc call: {args}")
 
 		with (
 			patch.object(setup.frappe.db, "exists", side_effect=exists),
-			patch.object(setup.frappe.db, "get_value", return_value=opening.name) as get_opening_name,
+			patch.object(setup.frappe.db, "get_value", return_value=legacy_opening.name) as get_opening_name,
 			patch.object(setup.frappe, "get_doc", side_effect=get_doc) as load_opening,
 		):
 			result = setup.ensure_native_recruitment_job_opening()
 
-		get_opening_name.assert_called_once_with(
-			"Job Opening",
-			{"job_title": setup.RECRUITMENT_JOB_TITLE, "company": setup.COMPANY},
-			"name",
-		)
-		load_opening.assert_called_once_with("Job Opening", opening.name)
-		self.assertEqual(result, opening.name)
-		self.assertTrue(opening.saved)
-		self.assertFalse(opening.inserted)
-		self.assertEqual(opening.status, "Closed")
-		self.assertEqual(opening.publish, 1)
+		get_opening_name.assert_not_called()
+		load_opening.assert_called_once()
+		self.assertEqual(result, setup.RECRUITMENT_JOB_OPENING)
+		self.assertTrue(opening.inserted)
+		self.assertEqual(opening.name, setup.RECRUITMENT_JOB_OPENING)
+		self.assertEqual(opening.status, "Open")
+		self.assertEqual(opening.publish, 0)
 		self.assertEqual(opening.job_application_route, setup.RECRUITMENT_WEB_FORM_ROUTE)
 
 	def test_pop_mailbox_appends_natively_without_auto_reply(self):

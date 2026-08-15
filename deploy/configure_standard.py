@@ -321,6 +321,7 @@ def ensure_recruitment_security_fields() -> None:
 					"label": "Consentimiento para tratamiento de datos",
 					"fieldtype": "Check",
 					"default": "0",
+					"read_only_depends_on": "eval:doc.source=='Email Recursos Humanos'",
 					"insert_after": "upper_range",
 				},
 				{
@@ -421,6 +422,16 @@ def ensure_recruitment_security_fields() -> None:
 					"no_copy": 1,
 					"insert_after": "custom_ayp_email_current_vacancy_consent",
 				},
+				{
+					"fieldname": "custom_ayp_email_consent_evidence_sha256",
+					"label": "Huella de evidencia del consentimiento por correo",
+					"fieldtype": "Data",
+					"length": 64,
+					"read_only": 1,
+					"hidden": 1,
+					"no_copy": 1,
+					"insert_after": "custom_ayp_email_consent_notice_version",
+				},
 			],
 		},
 		update=True,
@@ -429,9 +440,9 @@ def ensure_recruitment_security_fields() -> None:
 
 def ensure_recruitment_email_source() -> str:
 	if not frappe.db.exists("Job Applicant Source", EMAIL_RECRUITMENT_SOURCE):
-		frappe.get_doc(
-			{"doctype": "Job Applicant Source", "source_name": EMAIL_RECRUITMENT_SOURCE}
-		).insert(ignore_permissions=True)
+		frappe.get_doc({"doctype": "Job Applicant Source", "source_name": EMAIL_RECRUITMENT_SOURCE}).insert(
+			ignore_permissions=True
+		)
 	return EMAIL_RECRUITMENT_SOURCE
 
 
@@ -599,12 +610,6 @@ def ensure_native_recruitment_job_opening() -> str:
 		"job_application_route": RECRUITMENT_WEB_FORM_ROUTE,
 	}
 	opening_name = frappe.db.exists("Job Opening", RECRUITMENT_JOB_OPENING)
-	if not opening_name:
-		opening_name = frappe.db.get_value(
-			"Job Opening",
-			{"job_title": RECRUITMENT_JOB_TITLE, "company": COMPANY},
-			"name",
-		)
 	if opening_name:
 		opening = frappe.get_doc("Job Opening", opening_name)
 		opening.update(values)
@@ -613,6 +618,7 @@ def ensure_native_recruitment_job_opening() -> str:
 		opening = frappe.get_doc(
 			{
 				"doctype": "Job Opening",
+				"name": RECRUITMENT_JOB_OPENING,
 				**values,
 				"status": "Open",
 				"publish": 0,
@@ -621,6 +627,8 @@ def ensure_native_recruitment_job_opening() -> str:
 		opening.insert(ignore_permissions=True)
 
 	opening.reload()
+	if opening.name != RECRUITMENT_JOB_OPENING:
+		raise RuntimeError(f"Expected exact Job Opening {RECRUITMENT_JOB_OPENING}; found {opening.name}")
 	if any(opening.get(fieldname) != value for fieldname, value in values.items()):
 		raise RuntimeError(f"Job Opening {opening.name} did not persist as configured")
 	return opening.name

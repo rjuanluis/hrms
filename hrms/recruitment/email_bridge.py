@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import hmac
+import json
 import re
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -22,13 +24,20 @@ from hrms.security.candidate_cv import (
 )
 
 DEFAULT_JOB_OPENING = "HR-OPN-2026-0001"
+RECRUITMENT_MAILBOX = "empleos@aroypedal.com"
 JOB_OPENING_CONFIG_KEY = "ayp_email_bridge_job_opening"
 MESSAGE_ID_FIELD = "custom_ayp_email_message_id"
 RECEIVED_ON_FIELD = "custom_ayp_email_received_on"
 SUBJECT_FIELD = "custom_ayp_email_subject"
 CURRENT_VACANCY_CONSENT_FIELD = "custom_ayp_email_current_vacancy_consent"
 CONSENT_NOTICE_FIELD = "custom_ayp_email_consent_notice_version"
+CONSENT_EVIDENCE_FIELD = "custom_ayp_email_consent_evidence_sha256"
 EMAIL_CONSENT_NOTICE_VERSION = "AYP-RH-EMAIL-CURRENT-VACANCY-2026-08-15-v1"
+CONSENT_EVIDENCE_FORMAT = "AYP-EMAIL-CONSENT-EVIDENCE-V1"
+NORMALIZED_CONSENT_PHRASE = (
+	"he leido el aviso de privacidad de aro y pedal y autorizo el tratamiento "
+	"de mis datos exclusivamente para esta vacante"
+)
 MAX_DATA_LENGTH = 140
 MAX_RAW_MESSAGE_ID_LENGTH = 4096
 MAX_BASE64_LENGTH = ((MAX_CV_BYTES + 2) // 3) * 4
@@ -62,12 +71,41 @@ def _clean_data(value, *, label: str, required: bool = True, max_length: int = M
 
 def _message_key(payload: dict) -> str:
 	value = _clean_data(
-		payload.get("message_id"),
-		label="El identificador del mensaje",
+		payload.get("graph_message_id"),
+		label="El identificador inmutable de Graph",
 		max_length=MAX_RAW_MESSAGE_ID_LENGTH,
 	)
-	digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+	digest = hashlib.sha256(f"{RECRUITMENT_MAILBOX}\n{value}".encode()).hexdigest()
 	return f"message:{digest}"
+
+
+def _consent_evidence_sha256(payload: dict) -> str:
+	graph_id = _clean_data(
+		payload.get("graph_message_id"),
+		label="El identificador inmutable de Graph",
+		max_length=MAX_RAW_MESSAGE_ID_LENGTH,
+	)
+	received_on = payload.get("received_on")
+	if not isinstance(received_on, str) or not received_on.strip() or len(received_on) > 64:
+		_fail("La fecha de recepción no es válida.")
+	evidence = {
+		"canonical_consent": NORMALIZED_CONSENT_PHRASE,
+		"format": CONSENT_EVIDENCE_FORMAT,
+		"graph_message_id": graph_id,
+		"mailbox": RECRUITMENT_MAILBOX,
+		"notice_version": EMAIL_CONSENT_NOTICE_VERSION,
+		"received_on": received_on.strip(),
+	}
+	canonical = json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+	expected = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+	provided = _clean_data(
+		payload.get("consent_evidence_sha256"),
+		label="La evidencia del consentimiento",
+		max_length=64,
+	)
+	if not re.fullmatch(r"[0-9a-f]{64}", provided) or not hmac.compare_digest(provided, expected):
+		_fail("La evidencia del consentimiento no coincide con el mensaje inmutable.")
+	return expected
 
 
 def _sender(payload: dict) -> tuple[str, str]:
@@ -150,6 +188,7 @@ def _require_configuration() -> None:
 			SUBJECT_FIELD,
 			CURRENT_VACANCY_CONSENT_FIELD,
 			CONSENT_NOTICE_FIELD,
+			CONSENT_EVIDENCE_FIELD,
 		)
 		if not frappe.db.has_column("Job Applicant", fieldname)
 	]
@@ -177,6 +216,7 @@ def _existing_applicant(message_key: str):
 			SUBJECT_FIELD,
 			CURRENT_VACANCY_CONSENT_FIELD,
 			CONSENT_NOTICE_FIELD,
+			CONSENT_EVIDENCE_FIELD,
 		],
 		as_dict=True,
 	)
@@ -207,6 +247,7 @@ def _assert_duplicate_matches(
 	subject: str,
 	job_opening: str,
 	attachment_sha256: str,
+	consent_evidence_sha256: str,
 ) -> None:
 	matches = (
 		existing.get(MESSAGE_ID_FIELD) == message_key,
@@ -217,6 +258,7 @@ def _assert_duplicate_matches(
 		int(existing.custom_data_processing_consent or 0) == 0,
 		int(existing.get(CURRENT_VACANCY_CONSENT_FIELD) or 0) == 1,
 		(existing.get(CONSENT_NOTICE_FIELD) or "") == EMAIL_CONSENT_NOTICE_VERSION,
+		(existing.get(CONSENT_EVIDENCE_FIELD) or "") == consent_evidence_sha256,
 		(existing.custom_privacy_notice_version or "") == EMAIL_CONSENT_NOTICE_VERSION,
 		(existing.custom_cv_sha256 or "").strip().lower() == attachment_sha256,
 		_as_utc_naive(existing.get(RECEIVED_ON_FIELD)) == received_on,
@@ -278,6 +320,7 @@ def ingest_email_payload(payload: dict) -> dict:
 	_require_configuration()
 	message_key = _message_key(payload)
 	_require_current_vacancy_consent(payload)
+	consent_evidence_sha256 = _consent_evidence_sha256(payload)
 	sender_email, sender_name = _sender(payload)
 	received_on = _received_on(payload)
 	subject = _clean_data(payload.get("subject"), label="El asunto", required=False)
@@ -295,6 +338,7 @@ def ingest_email_payload(payload: dict) -> dict:
 			subject=subject,
 			job_opening=job_opening,
 			attachment_sha256=attachment_sha256,
+			consent_evidence_sha256=consent_evidence_sha256,
 		)
 		return {"status": "already_processed", "job_applicant": existing.name}
 
@@ -330,6 +374,7 @@ def ingest_email_payload(payload: dict) -> dict:
 				SUBJECT_FIELD: subject,
 				CURRENT_VACANCY_CONSENT_FIELD: 1,
 				CONSENT_NOTICE_FIELD: EMAIL_CONSENT_NOTICE_VERSION,
+				CONSENT_EVIDENCE_FIELD: consent_evidence_sha256,
 			}
 		)
 		applicant.flags.ignore_notify = True
