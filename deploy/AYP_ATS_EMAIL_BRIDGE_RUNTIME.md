@@ -4,15 +4,16 @@ This host runner is a separately gated part of the AyP HRMS release. Application
 
 ## Install an audited build
 
-From an exact clean checkout, calculate both hashes and invoke:
+From an exact clean checkout, calculate all three hashes and invoke:
 
 ```bash
 runner_sha=$(shasum -a 256 deploy/ayp_ats_email_bridge.py | cut -d ' ' -f 1)
 test_sha=$(shasum -a 256 deploy/test_ayp_ats_email_bridge.py | cut -d ' ' -f 1)
-deploy/install_ayp_ats_email_bridge.sh deploy "$runner_sha" "$test_sha"
+launcher_sha=$(shasum -a 256 deploy/run_ayp_ats_email_bridge.sh | cut -d ' ' -f 1)
+deploy/install_ayp_ats_email_bridge.sh deploy "$runner_sha" "$test_sha" "$launcher_sha"
 ```
 
-The installer verifies both source hashes, runs the runner suite from a temporary directory, installs the runner as `0700`, its test as `0600`, ensures the state directory is `0700`, verifies installed hashes, and reports `installed_not_scheduled`.
+The installer verifies all source hashes, runs the runner suite from a temporary directory, installs the runner and launcher as `0700`, its test as `0600`, ensures the state directory is `0700`, verifies installed hashes, and reports `installed_not_scheduled`.
 
 The host Graph client must expose the backward-compatible `immutable_message_ids` option and emit `Prefer: IdType="ImmutableId"`. The runner verifies that capability at load time and fails closed if it is absent.
 
@@ -27,19 +28,19 @@ Do not create a scheduler until all of these are true:
 
 ## Intended scheduler definition
 
-After approval, create a Hermes **no-agent** recurring job using the Graph virtual environment explicitly:
+After approval, create a Hermes **no-agent** recurring job whose `script` is the installed launcher:
 
 ```text
-~/.hermes/venvs/msgraph-app/bin/python ~/.hermes/scripts/ayp_ats_email_bridge.py --limit 10
+~/.hermes/scripts/run_ayp_ats_email_bridge.sh
 ```
 
-Do not invoke the runner through the system `python3`: the imported Graph client depends on packages installed in `~/.hermes/venvs/msgraph-app`. Before activation, verify locally—without making a Graph request—that this interpreter can import `msal` and that `msgraph_app_cli.request_graph` exposes `immutable_message_ids`.
+The launcher accepts no arguments and invokes `~/.hermes/venvs/msgraph-app/bin/python ~/.hermes/scripts/ayp_ats_email_bridge.py --limit 10`. Do not register the Python file itself as the no-agent script: Hermes would otherwise use a generic Python environment that may not contain `msal`. Before activation, verify locally—without making a Graph request—that the Graph venv can import `msal` and that `msgraph_app_cli.request_graph` exposes `immutable_message_ids`.
 
 Recommended interval: every 5 minutes. Empty stdout means success/no alert. The runner emits only sanitized attention/error JSON and exits non-zero on blocked/error outcomes. No scheduler is installed by this repository.
 
 ## Rollback
 
 1. Pause/remove the no-agent job.
-2. Restore the prior audited runner/test pair using the same SHA-verifying installer, or remove both installed files.
+2. Restore the prior audited runner/test/launcher set using the same SHA-verifying installer, or remove all three installed files.
 3. Restore the previous immutable HRMS image if application rollback is required.
 4. Preserve the mailbox: the runner uses Graph GET only and never marks, moves, deletes, or replies.
