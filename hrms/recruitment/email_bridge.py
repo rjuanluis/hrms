@@ -13,7 +13,7 @@ from typing import NoReturn
 import frappe
 from frappe import _
 from frappe.utils import validate_email_address
-from frappe.utils.file_manager import get_content_hash, save_file
+from frappe.utils.file_manager import get_content_hash
 
 from hrms.recruitment.matching import EMAIL_RECRUITMENT_SOURCE, normalize_email
 from hrms.security.candidate_cv import (
@@ -156,6 +156,30 @@ def _attachment(payload: dict) -> tuple[str, bytes, str]:
 		raise EmailBridgeError(_("El contenido base64 del CV no es válido.")) from exc
 	validate_cv_file(filename, content)
 	return filename, content, hashlib.sha256(content).hexdigest()
+
+
+def _save_detached_private_file(filename: str, content: bytes):
+	"""Create a private File without Frappe's lossy pre-write/read cycle.
+
+	``frappe.utils.file_manager.save_file`` writes the bytes before creating the
+	File document. ``File.before_insert`` then reads that path as text when a PDF
+	contains a decodable binary comment and rewrites different UTF-8 bytes.
+	Passing the original bytes through File's virtual ``content`` field lets the
+	standard document lifecycle write them exactly once and register rollback
+	cleanup normally.
+	"""
+
+	file_doc = frappe.get_doc(
+		{
+			"doctype": "File",
+			"file_name": filename,
+			"is_private": 1,
+			"content": content,
+		}
+	)
+	file_doc.flags.ignore_permissions = True
+	file_doc.insert()
+	return file_doc
 
 
 def _job_opening() -> str:
@@ -424,7 +448,7 @@ def ingest_email_payload(payload: dict) -> dict:
 		)
 	)
 	try:
-		file_doc = save_file(filename, content, None, None, is_private=1)
+		file_doc = _save_detached_private_file(filename, content)
 		stored_sha256 = scan_stored_candidate_cv(file_doc)
 		if stored_sha256 != attachment_sha256:
 			raise CandidateCVSecurityError(_("No se pudo verificar la integridad del CV almacenado."))

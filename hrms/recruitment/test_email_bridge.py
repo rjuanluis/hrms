@@ -153,6 +153,40 @@ class FakeApplicant:
 		return self
 
 
+class FakeFile:
+	def __init__(self, values, owner):
+		self.values = values
+		self.owner = owner
+		self.flags = FakeFlags()
+
+	def insert(self):
+		content = self.values.get("content")
+		if not isinstance(content, bytes):
+			raise AssertionError("File.content must preserve the original bytes")
+		if self.values.get("is_private") != 1:
+			raise AssertionError("CV must first be stored as a detached private File")
+		if any(self.values.get(fieldname) for fieldname in ("attached_to_doctype", "attached_to_name")):
+			raise AssertionError("CV File must remain detached until Applicant.insert")
+		self.name = f"FILE-{len(self.owner.saved_files) + 1}"
+		self.file_name = self.values["file_name"]
+		self.file_url = f"/private/files/{self.file_name}"
+		self.file_size = len(content)
+		self.is_private = 1
+		self.content = content
+		self.content_hash = hashlib.md5(content, usedforsecurity=False).hexdigest()
+		self.attached_to_doctype = None
+		self.attached_to_name = None
+		self.attached_to_field = None
+		self.custom_av_scan_status = None
+		self.custom_av_scan_engine = None
+		self.custom_av_scanned_on = None
+		self.custom_cv_sha256 = None
+		self.owner.saved_files.append(self)
+		self.owner.files_by_url[self.file_url] = self
+		self.owner.files_by_name[self.name] = self
+		return self
+
+
 class FakeFrappe(types.ModuleType):
 	def __init__(self):
 		super().__init__("frappe")
@@ -171,6 +205,7 @@ class FakeFrappe(types.ModuleType):
 		self.inserted_applicants = []
 		self.applicants_by_message = {}
 		self.saved_files = []
+		self.legacy_save_file_calls = 0
 		self.existing_private_hashes = set()
 		self.preexisting_file_names = set()
 		self.fail_applicant_insert = False
@@ -184,7 +219,9 @@ class FakeFrappe(types.ModuleType):
 	def get_doc(self, values, name=None):
 		if values == "File" and name:
 			return self.files_by_name[name]
-		if values.get("doctype") != "Job Applicant":
+		if isinstance(values, dict) and values.get("doctype") == "File":
+			return FakeFile(values, self)
+		if not isinstance(values, dict) or values.get("doctype") != "Job Applicant":
 			raise AssertionError(f"Unexpected document: {values}")
 		return FakeApplicant(values, self)
 
@@ -227,29 +264,9 @@ def load_email_bridge(fake_frappe):
 	frappe_utils.validate_email_address = validate_email_address
 	file_manager = types.ModuleType("frappe.utils.file_manager")
 
-	def save_file(filename, content, dt, dn, is_private=0):
-		if (dt, dn, is_private) != (None, None, 1):
-			raise AssertionError("CV must first be stored as a detached private File")
-		file_doc = types.SimpleNamespace(
-			name=f"FILE-{len(fake_frappe.saved_files) + 1}",
-			file_name=filename,
-			file_url=f"/private/files/{filename}",
-			file_size=len(content),
-			is_private=1,
-			content=content,
-			content_hash=hashlib.md5(content, usedforsecurity=False).hexdigest(),
-			attached_to_doctype=None,
-			attached_to_name=None,
-			attached_to_field=None,
-			custom_av_scan_status=None,
-			custom_av_scan_engine=None,
-			custom_av_scanned_on=None,
-			custom_cv_sha256=None,
-		)
-		fake_frappe.saved_files.append(file_doc)
-		fake_frappe.files_by_url[file_doc.file_url] = file_doc
-		fake_frappe.files_by_name[file_doc.name] = file_doc
-		return file_doc
+	def save_file(*args, **kwargs):
+		fake_frappe.legacy_save_file_calls += 1
+		raise AssertionError("email bridge must not use the lossy save_file helper")
 
 	file_manager.save_file = save_file
 	file_manager.get_content_hash = lambda content: hashlib.md5(content, usedforsecurity=False).hexdigest()
@@ -334,11 +351,15 @@ class TestEmailBridge(unittest.TestCase):
 		self.bridge = load_email_bridge(self.frappe)
 
 	def test_happy_path_is_private_atomic_and_stores_no_body(self):
-		result = self.bridge.ingest_email_payload(email_payload())
+		content = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n"
+		payload = email_payload(content)
+		result = self.bridge.ingest_email_payload(payload)
 
 		self.assertEqual(result, {"status": "created", "job_applicant": "candidate@example.com"})
 		self.assertEqual(len(self.frappe.saved_files), 1)
 		self.assertEqual(self.frappe.saved_files[0].is_private, 1)
+		self.assertEqual(self.frappe.saved_files[0].content, content)
+		self.assertEqual(self.frappe.legacy_save_file_calls, 0)
 		applicant = self.frappe.inserted_applicants[0]
 		self.assertEqual(applicant.email_id, "candidate@example.com")
 		self.assertEqual(applicant.source, EMAIL_RECRUITMENT_SOURCE)
