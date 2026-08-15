@@ -9,7 +9,7 @@ import unittest
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from hrms.recruitment import candidate_document_service
 from hrms.recruitment.candidate_document_processing import (
@@ -177,7 +177,9 @@ class TestCandidateDocumentProcessing(unittest.TestCase):
 				"custom_cv_sha256": "a" * 64,
 			}.get(key),
 		)
-		with patch.object(candidate_document_service.frappe.db.after_commit, "add") as add:
+		add = MagicMock()
+		fake_db = SimpleNamespace(after_commit=SimpleNamespace(add=add))
+		with patch.object(candidate_document_service.frappe, "db", fake_db):
 			candidate_document_service.enqueue_candidate_document(doc)
 		add.assert_not_called()
 
@@ -193,7 +195,9 @@ class TestCandidateDocumentProcessing(unittest.TestCase):
 				"custom_cv_sha256": "c" * 64,
 			}.get(key),
 		)
-		with patch.object(candidate_document_service.frappe.db.after_commit, "add") as add:
+		add = MagicMock()
+		fake_db = SimpleNamespace(after_commit=SimpleNamespace(add=add))
+		with patch.object(candidate_document_service.frappe, "db", fake_db):
 			candidate_document_service.enqueue_candidate_document(doc)
 		add.assert_not_called()
 
