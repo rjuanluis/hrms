@@ -11,6 +11,7 @@ from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
 from frappe.desk.page.setup_wizard.setup_wizard import setup_complete
 from frappe.translate import set_default_language
 
+from hrms.recruitment.matching import EMAIL_RECRUITMENT_SOURCE
 from hrms.recruitment.talent_pool import backfill_candidate_profiles
 
 SITE = os.environ.get("AYP_SITE_NAME", "hr.aroypedal.com")
@@ -371,10 +372,67 @@ def ensure_recruitment_security_fields() -> None:
 					"hidden": 1,
 					"insert_after": "custom_normalized_email",
 				},
+				{
+					"fieldname": "custom_ayp_email_message_id",
+					"label": "Identificador de mensaje de RRHH",
+					"fieldtype": "Data",
+					"unique": 1,
+					"read_only": 1,
+					"hidden": 1,
+					"no_copy": 1,
+					"insert_after": "custom_normalized_phone",
+				},
+				{
+					"fieldname": "custom_ayp_email_received_on",
+					"label": "Correo de RRHH recibido el",
+					"fieldtype": "Datetime",
+					"read_only": 1,
+					"hidden": 1,
+					"no_copy": 1,
+					"insert_after": "custom_ayp_email_message_id",
+				},
+				{
+					"fieldname": "custom_ayp_email_subject",
+					"label": "Asunto del correo de RRHH",
+					"fieldtype": "Data",
+					"length": 140,
+					"read_only": 1,
+					"hidden": 1,
+					"no_copy": 1,
+					"insert_after": "custom_ayp_email_received_on",
+				},
+				{
+					"fieldname": "custom_ayp_email_current_vacancy_consent",
+					"label": "Consentimiento por correo para vacante actual",
+					"fieldtype": "Check",
+					"default": "0",
+					"read_only": 1,
+					"hidden": 1,
+					"no_copy": 1,
+					"insert_after": "custom_ayp_email_subject",
+				},
+				{
+					"fieldname": "custom_ayp_email_consent_notice_version",
+					"label": "Versión del consentimiento por correo",
+					"fieldtype": "Data",
+					"length": 140,
+					"read_only": 1,
+					"hidden": 1,
+					"no_copy": 1,
+					"insert_after": "custom_ayp_email_current_vacancy_consent",
+				},
 			],
 		},
 		update=True,
 	)
+
+
+def ensure_recruitment_email_source() -> str:
+	if not frappe.db.exists("Job Applicant Source", EMAIL_RECRUITMENT_SOURCE):
+		frappe.get_doc(
+			{"doctype": "Job Applicant Source", "source_name": EMAIL_RECRUITMENT_SOURCE}
+		).insert(ignore_permissions=True)
+	return EMAIL_RECRUITMENT_SOURCE
 
 
 def ensure_recruitment_web_form() -> tuple[str, list[str]]:
@@ -639,6 +697,7 @@ def main() -> None:
 		departments = ensure_departments()
 		leave_period = ensure_active_leave_period()
 		ensure_recruitment_security_fields()
+		recruitment_email_source = ensure_recruitment_email_source()
 		candidate_profiles_backfilled = backfill_candidate_profiles()
 		recruitment_web_form, retired_recruitment_web_forms = ensure_recruitment_web_form()
 		recruitment_job_opening = ensure_native_recruitment_job_opening()
@@ -661,6 +720,7 @@ def main() -> None:
 				"leave_period": leave_period,
 				"recruitment_web_form": recruitment_web_form,
 				"recruitment_job_opening": recruitment_job_opening,
+				"recruitment_email_source": recruitment_email_source,
 				"recruitment_email_accounts": recruitment_email_accounts,
 				"retired_recruitment_web_forms": retired_recruitment_web_forms,
 				"candidate_profiles_backfilled": candidate_profiles_backfilled,

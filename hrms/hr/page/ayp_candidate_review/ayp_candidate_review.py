@@ -24,7 +24,7 @@ from hrms.recruitment.candidate_scoring_domain import (
 	CandidateScoringValidationError,
 	Scorecard,
 )
-from hrms.recruitment.matching import normalize_email, normalize_phone
+from hrms.recruitment.matching import EMAIL_RECRUITMENT_SOURCE, normalize_email, normalize_phone
 from hrms.recruitment.talent_pool import acquire_candidate_identity_lock, resolve_candidate_profile
 
 EVENT_DOCTYPE = "AYP Candidate Review Event"
@@ -1031,6 +1031,13 @@ def update_candidate_profile(applicant: str, action: str, reason: str):
 		frappe.throw(_("La acción de Talent Pool no es válida."), frappe.ValidationError)
 	if len(reason) < 20 or len(reason) > 500:
 		frappe.throw(_("El motivo debe tener entre 20 y 500 caracteres."), frappe.ValidationError)
+	if applicant_doc.source == EMAIL_RECRUITMENT_SOURCE and action in {"retain", "priority"}:
+		frappe.throw(
+			_(
+				"Una solicitud recibida por correo no puede incorporarse a futuras oportunidades sin un flujo separado de consentimiento del candidato."
+			),
+			frappe.ValidationError,
+		)
 
 	savepoint = f"ayp_profile_{frappe.generate_hash(length=12)}"
 	frappe.db.savepoint(savepoint)

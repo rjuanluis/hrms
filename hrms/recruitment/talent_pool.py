@@ -14,6 +14,7 @@ from hrms.recruitment.matching import (
 	normalize_email,
 	normalize_phone,
 	requires_name_compatibility,
+	should_enroll_in_talent_pool,
 )
 
 PROFILE_DOCTYPE = "AYP Candidate Profile"
@@ -170,6 +171,13 @@ def _set_if_supported(doc, fieldname: str, value) -> None:
 		doc.set(fieldname, value)
 
 
+def should_link_job_applicant_profile(doc) -> bool:
+	return should_enroll_in_talent_pool(
+		source=doc.get("source"),
+		has_data_processing_consent=bool(doc.get("custom_data_processing_consent")),
+	)
+
+
 def _create_candidate_profile(doc, *, email: str, phone: str, cv_sha256: str, dedupe_status: str) -> str:
 	profile = frappe.get_doc(
 		{
@@ -210,6 +218,12 @@ def link_job_applicant_profile(doc, method=None) -> None:
 	# test explicitly opts in by setting the field itself.
 	if not frappe.flags.in_test or doc.get("custom_ayp_governed"):
 		_set_if_supported(doc, "custom_ayp_governed", 1)
+	# A sender who emails a CV has applied to this vacancy, but has not consented
+	# to reuse in the broader talent pool. Never trust or retain a supplied link.
+	if not should_link_job_applicant_profile(doc):
+		doc.set("custom_candidate_profile", None)
+		_set_if_supported(doc, "custom_dedupe_status", None)
+		return
 	_acquire_candidate_locks(email=email, phone=phone, cv_sha256=cv_sha256)
 
 	persisted = None if doc.is_new() else _persisted_applicant_for_update(doc.name)
@@ -293,6 +307,20 @@ def backfill_candidate_profiles() -> int:
 		if applicant.resume_attachment and not applicant.custom_cv_sha256:
 			applicant.custom_dedupe_status = DEDUPE_REVIEW
 		profile_name = applicant.get("custom_candidate_profile")
+		if not profile_name and not should_link_job_applicant_profile(applicant):
+			frappe.db.set_value(
+				"Job Applicant",
+				applicant.name,
+				{
+					"custom_candidate_profile": None,
+					"custom_normalized_email": applicant.custom_normalized_email,
+					"custom_normalized_phone": applicant.custom_normalized_phone,
+					"custom_dedupe_status": None,
+					"custom_ayp_governed": 1,
+				},
+				update_modified=False,
+			)
+			continue
 		if not profile_name:
 			frappe.throw(_("No se pudo crear el perfil canónico para {0}.").format(applicant.name))
 		frappe.db.set_value(

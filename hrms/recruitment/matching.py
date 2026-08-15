@@ -8,6 +8,13 @@ from collections.abc import Mapping
 DEDUPE_NEW = "Nuevo"
 DEDUPE_MATCHED = "Coincidencia"
 DEDUPE_REVIEW = "Revisión requerida"
+EMAIL_RECRUITMENT_SOURCE = "Email Recursos Humanos"
+
+
+def should_enroll_in_talent_pool(*, source: str | None, has_data_processing_consent: bool) -> bool:
+	"""Keep unconsented email applications out of the reusable talent pool."""
+
+	return source != EMAIL_RECRUITMENT_SOURCE or has_data_processing_consent
 
 
 def candidate_lock_names(*, email: str, phone: str, cv_sha256: str) -> tuple[str, ...]:

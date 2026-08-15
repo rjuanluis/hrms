@@ -45,6 +45,51 @@ class _Document:
 
 
 class TestNativeRecruitmentSetup(TestCase):
+	def test_email_bridge_fields_are_hidden_read_only_no_copy_and_message_id_is_unique(self):
+		with patch.object(setup, "create_custom_fields") as create_fields:
+			setup.ensure_recruitment_security_fields()
+
+		field_map = create_fields.call_args.args[0]
+		email_fields = {
+			field["fieldname"]: field
+			for field in field_map["Job Applicant"]
+			if field["fieldname"].startswith("custom_ayp_email_")
+		}
+		self.assertEqual(
+			set(email_fields),
+			{
+				"custom_ayp_email_message_id",
+				"custom_ayp_email_received_on",
+				"custom_ayp_email_subject",
+				"custom_ayp_email_current_vacancy_consent",
+				"custom_ayp_email_consent_notice_version",
+			},
+		)
+		for field in email_fields.values():
+			self.assertEqual(field["hidden"], 1)
+			self.assertEqual(field["read_only"], 1)
+			self.assertEqual(field["no_copy"], 1)
+		self.assertEqual(email_fields["custom_ayp_email_message_id"]["unique"], 1)
+		self.assertEqual(email_fields["custom_ayp_email_subject"]["length"], 140)
+		self.assertEqual(email_fields["custom_ayp_email_consent_notice_version"]["length"], 140)
+
+	def test_email_recruitment_source_is_created_idempotently(self):
+		source = _Document()
+		with (
+			patch.object(setup.frappe.db, "exists", side_effect=[False, True]) as exists,
+			patch.object(setup.frappe, "get_doc", return_value=source) as get_doc,
+		):
+			first = setup.ensure_recruitment_email_source()
+			second = setup.ensure_recruitment_email_source()
+
+		self.assertEqual(first, setup.EMAIL_RECRUITMENT_SOURCE)
+		self.assertEqual(second, setup.EMAIL_RECRUITMENT_SOURCE)
+		self.assertTrue(source.inserted)
+		get_doc.assert_called_once_with(
+			{"doctype": "Job Applicant Source", "source_name": setup.EMAIL_RECRUITMENT_SOURCE}
+		)
+		self.assertEqual(exists.call_count, 2)
+
 	def test_internal_job_opening_uses_native_autonaming(self):
 		designation = _Document()
 		opening = _Document("HR-OPN-2026-0001")

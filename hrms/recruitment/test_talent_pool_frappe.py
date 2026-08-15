@@ -5,7 +5,24 @@ from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
 from frappe.tests import UnitTestCase
 
 from hrms.patches.v16_0.create_ayp_candidate_profiles import CANDIDATE_PROFILE_FIELDS
-from hrms.recruitment.matching import DEDUPE_REVIEW
+from hrms.recruitment.matching import (
+	DEDUPE_REVIEW,
+	EMAIL_RECRUITMENT_SOURCE,
+	normalize_email,
+	normalize_phone,
+)
+
+EMAIL_CONSENT_FIELD = {
+	"Job Applicant": [
+		{
+			"fieldname": "custom_data_processing_consent",
+			"label": "Consentimiento para tratamiento de datos",
+			"fieldtype": "Check",
+			"default": "0",
+			"insert_after": "upper_range",
+		}
+	]
+}
 
 
 class TestTalentPoolLifecycle(UnitTestCase):
@@ -13,7 +30,44 @@ class TestTalentPoolLifecycle(UnitTestCase):
 	def setUpClass(cls):
 		super().setUpClass()
 		create_custom_fields(CANDIDATE_PROFILE_FIELDS, update=True)
+		create_custom_fields(EMAIL_CONSENT_FIELD, update=True)
+		if not frappe.db.exists("Job Applicant Source", EMAIL_RECRUITMENT_SOURCE):
+			frappe.get_doc(
+				{"doctype": "Job Applicant Source", "source_name": EMAIL_RECRUITMENT_SOURCE}
+			).insert(ignore_permissions=True)
 		frappe.clear_cache()
+
+	def test_email_applicant_without_consent_is_normalized_without_profile(self):
+		token = uuid4().hex
+		email = f"Email-Candidate-{token}@Example.com"
+		phone = "(809) 555-0123"
+		supplied_profile = frappe.get_doc(
+			{
+				"doctype": "AYP Candidate Profile",
+				"candidate_name": "Perfil suministrado",
+				"talent_pool_status": "Activo",
+			}
+		).insert(ignore_permissions=True)
+		profile_count = frappe.db.count("AYP Candidate Profile")
+
+		applicant = frappe.get_doc(
+			{
+				"doctype": "Job Applicant",
+				"applicant_name": "Candidata por Email",
+				"email_id": email,
+				"phone_number": phone,
+				"status": "Open",
+				"source": EMAIL_RECRUITMENT_SOURCE,
+				"custom_data_processing_consent": 0,
+				"custom_candidate_profile": supplied_profile.name,
+				"custom_ayp_governed": 1,
+			}
+		).insert(ignore_permissions=True)
+
+		self.assertEqual(applicant.custom_normalized_email, normalize_email(email))
+		self.assertEqual(applicant.custom_normalized_phone, normalize_phone(phone))
+		self.assertFalse(applicant.custom_candidate_profile)
+		self.assertEqual(frappe.db.count("AYP Candidate Profile"), profile_count)
 
 	def test_identity_change_keeps_profile_and_marks_review(self):
 		token = uuid4().hex

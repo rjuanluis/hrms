@@ -219,6 +219,27 @@ def _scan_candidate_cv(content: bytes) -> None:
 		) from exc
 
 
+def scan_stored_candidate_cv(file_doc) -> str:
+	"""Validate and antivirus-scan an already stored private candidate CV."""
+
+	security_fields = ("custom_av_scan_status", "custom_av_scan_engine", "custom_av_scanned_on")
+	if not all(_file_has_column(fieldname) for fieldname in security_fields):
+		raise CandidateCVSecurityError(
+			_("El control antivirus todavía no está disponible. Intenta nuevamente en unos minutos.")
+		)
+	if not file_doc.is_private or not (file_doc.file_url or "").startswith("/private/files/"):
+		raise CandidateCVSecurityError(_("El CV debe almacenarse como archivo privado."))
+
+	content = read_stored_candidate_cv_bytes(file_doc)
+	validate_cv_file(file_doc.file_name, content)
+	if file_doc.file_size != len(content):
+		raise CandidateCVSecurityError(_("No se pudo verificar la integridad del CV cargado."))
+	_scan_candidate_cv(content)
+	sha256 = hashlib.sha256(content).hexdigest()
+	_mark_file_clean(file_doc, sha256=sha256)
+	return sha256
+
+
 def _mark_file_clean(file_doc, *, sha256: str = "") -> None:
 	values = {
 		"custom_av_scan_status": "Clean",

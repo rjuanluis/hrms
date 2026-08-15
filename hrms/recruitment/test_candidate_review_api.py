@@ -78,6 +78,7 @@ class FakeDoc:
 		self.status = status
 		self.job_title = job_title
 		self.custom_candidate_profile = candidate_profile
+		self.source = "Sitio web"
 		self.saved = 0
 		self.comments = []
 		self.db_sets = []
@@ -627,6 +628,19 @@ class TestCandidateReviewAPI(unittest.TestCase):
 		self.assertEqual(result["talent_pool_status"], "Prioritario")
 		self.assertEqual(profile.saved, 1)
 		self.assertEqual(self.frappe.events[-1][0]["action"], "Decisión Talent Pool")
+
+	def test_email_applicant_cannot_be_promoted_to_future_talent_pool_without_separate_consent_flow(self):
+		applicant = FakeDoc("A", "Rejected", "JOB-1", "PROFILE-A")
+		applicant.source = "Email Recursos Humanos"
+		profile = FakeProfile("PROFILE-A")
+		self.frappe.docs = {"A": applicant, "PROFILE-A": profile}
+		with self.assertRaisesRegex(FakeValidationError, "flujo separado de consentimiento"):
+			self.api.update_candidate_profile(
+				"A",
+				"priority",
+				"Perfil relevante para futuras vacantes similares verificadas.",
+			)
+		self.assertEqual(profile.saved, 0)
 
 	def test_identity_split_creates_new_profile_and_relinks_only_selected_application(self):
 		applicant = FakeDoc("A", "Open", "JOB-1", "PROFILE-A")

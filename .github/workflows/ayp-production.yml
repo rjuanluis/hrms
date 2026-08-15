@@ -45,7 +45,11 @@ jobs:
           python-version: "3.14"
       - name: Validate Python, JSON, shell and deployment files
         run: |
-          python -m compileall -q hrms deploy/bootstrap_site.py deploy/configure_standard.py
+          python -m compileall -q hrms deploy/bootstrap_site.py deploy/configure_standard.py deploy/ayp_ats_email_bridge.py deploy/test_ayp_ats_email_bridge.py
+          python deploy/test_ayp_ats_email_bridge.py
+          python hrms/recruitment/test_email_bridge.py
+          python hrms/recruitment/test_talent_pool.py
+          python hrms/recruitment/test_candidate_review_api.py
           python -m json.tool deploy/apps.json >/dev/null
           bash -n deploy/deploy.sh deploy/host-deploy-wrapper.sh deploy/provision-host.sh deploy/backup.sh
           node --check deploy/easypanel_compose_api.js
@@ -369,6 +373,7 @@ jobs:
                   "hrms.recruitment.test_candidate_scoring_domain",
                   "hrms.recruitment.test_interview_decision_domain",
                   "hrms.recruitment.test_talent_pool",
+                  "hrms.recruitment.test_email_bridge",
               ):
                   suite.addTests(unittest.defaultTestLoader.loadTestsFromName(test_module))
               result = unittest.TextTestRunner(verbosity=2).run(suite)

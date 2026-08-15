@@ -7,6 +7,7 @@ if __package__:
 		DEDUPE_MATCHED,
 		DEDUPE_NEW,
 		DEDUPE_REVIEW,
+		EMAIL_RECRUITMENT_SOURCE,
 		candidate_lock_names,
 		choose_profile_match,
 		names_are_compatible,
@@ -14,12 +15,14 @@ if __package__:
 		normalize_name,
 		normalize_phone,
 		requires_name_compatibility,
+		should_enroll_in_talent_pool,
 	)
 else:
 	from matching import (
 		DEDUPE_MATCHED,
 		DEDUPE_NEW,
 		DEDUPE_REVIEW,
+		EMAIL_RECRUITMENT_SOURCE,
 		candidate_lock_names,
 		choose_profile_match,
 		names_are_compatible,
@@ -27,6 +30,7 @@ else:
 		normalize_name,
 		normalize_phone,
 		requires_name_compatibility,
+		should_enroll_in_talent_pool,
 	)
 
 
@@ -106,6 +110,23 @@ class TestTalentPoolMatching(unittest.TestCase):
 
 	def test_multiple_matching_signals_do_not_require_name_gate(self):
 		self.assertFalse(requires_name_compatibility(["email", "cv"]))
+
+	def test_email_without_consent_stays_out_of_talent_pool(self):
+		self.assertFalse(
+			should_enroll_in_talent_pool(
+				source=EMAIL_RECRUITMENT_SOURCE,
+				has_data_processing_consent=False,
+			)
+		)
+
+	def test_web_form_and_consented_email_behavior_is_unchanged(self):
+		self.assertTrue(should_enroll_in_talent_pool(source=None, has_data_processing_consent=True))
+		self.assertTrue(
+			should_enroll_in_talent_pool(
+				source=EMAIL_RECRUITMENT_SOURCE,
+				has_data_processing_consent=True,
+			)
+		)
 
 
 if __name__ == "__main__":
