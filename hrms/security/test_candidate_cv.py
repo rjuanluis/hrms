@@ -190,6 +190,8 @@ class TestCandidateCVSecurity(unittest.TestCase):
 			prevent_candidate_cv_file_deletion(file_doc)
 
 	def test_frappe_delete_doc_cannot_remove_bound_candidate_cv_bytes(self):
+		if not getattr(frappe.local, "db", None):
+			self.skipTest("requires a connected Frappe test database")
 		file_doc = frappe.get_doc(
 			{
 				"doctype": "File",
@@ -235,8 +237,9 @@ class TestCandidateCVSecurity(unittest.TestCase):
 		current.is_private = 0
 		current.is_new = lambda: False
 		current.get_doc_before_save = lambda: previous
+		exists = Mock(return_value=True)
 		with (
-			patch.object(frappe.db, "exists", return_value=True) as exists,
+			patch.object(frappe, "db", SimpleNamespace(exists=exists)),
 			self.assertRaises(CandidateCVSecurityError),
 		):
 			validate_candidate_cv_file_evidence(current)
