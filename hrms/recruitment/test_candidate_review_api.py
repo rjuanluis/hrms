@@ -535,11 +535,11 @@ class TestCandidateReviewAPI(unittest.TestCase):
 				"evidence": "Evidencia comprobada por revisión humana.",
 			}
 			for key in (
-				"minimum_requirements",
-				"relevant_experience",
-				"functional_skills",
-				"service_communication",
-				"availability_conditions",
+				"sales_service_experience",
+				"retail_experience",
+				"schedule_availability",
+				"bicycle_knowledge_learning",
+				"motivation_fit",
 			)
 		]
 		result = self.api.save_scorecard("A", criteria)
@@ -547,7 +547,7 @@ class TestCandidateReviewAPI(unittest.TestCase):
 		self.assertEqual(result["total_score"], 80.0)
 		self.assertEqual(result["recommendation"], "Recomendado para shortlist")
 		payload = self.frappe.scorecards[0][0]
-		self.assertEqual([row["weight"] for row in payload["criteria"]], [30, 25, 20, 15, 10])
+		self.assertEqual([row["weight"] for row in payload["criteria"]], [30, 20, 20, 15, 15])
 		self.assertEqual(applicant.custom_candidate_score, 80.0)
 		self.assertEqual(applicant.custom_candidate_scorecard, "AYP-SCORE-0001")
 		self.assertEqual(applicant.status, "Open")
@@ -564,11 +564,11 @@ class TestCandidateReviewAPI(unittest.TestCase):
 				"evidence": "Evidencia comprobada por revisión humana.",
 			}
 			for key in (
-				"minimum_requirements",
-				"relevant_experience",
-				"functional_skills",
-				"service_communication",
-				"availability_conditions",
+				"sales_service_experience",
+				"retail_experience",
+				"schedule_availability",
+				"bicycle_knowledge_learning",
+				"motivation_fit",
 			)
 		]
 		calls = []

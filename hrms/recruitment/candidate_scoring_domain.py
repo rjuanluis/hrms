@@ -23,34 +23,34 @@ class CriterionDefinition:
 
 DEFAULT_CRITERIA = (
 	CriterionDefinition(
-		"minimum_requirements",
-		"Requisitos mínimos",
+		"sales_service_experience",
+		"Experiencia en ventas y servicio",
 		30,
-		"Cumplimiento comprobable de requisitos indispensables para la vacante.",
+		"Experiencia comprobable atendiendo clientes y cerrando ventas.",
 	),
 	CriterionDefinition(
-		"relevant_experience",
-		"Experiencia relevante",
-		25,
-		"Experiencia aplicable a las responsabilidades reales del puesto.",
-	),
-	CriterionDefinition(
-		"functional_skills",
-		"Habilidades funcionales",
+		"retail_experience",
+		"Experiencia en retail",
 		20,
-		"Dominio demostrado de las habilidades técnicas u operativas necesarias.",
+		"Experiencia comprobable en operaciones o ventas de tiendas físicas o digitales.",
 	),
 	CriterionDefinition(
-		"service_communication",
-		"Servicio y comunicación",
+		"schedule_availability",
+		"Disponibilidad de horario",
+		20,
+		"Compatibilidad comprobable con el horario y las condiciones informadas de la vacante.",
+	),
+	CriterionDefinition(
+		"bicycle_knowledge_learning",
+		"Bicicletas o capacidad de aprendizaje",
 		15,
-		"Claridad, trato y orientación al cliente o al equipo.",
+		"Conocimiento relevante de bicicletas o evidencia de capacidad para aprender el catálogo.",
 	),
 	CriterionDefinition(
-		"availability_conditions",
-		"Disponibilidad y condiciones",
-		10,
-		"Compatibilidad con horario, ubicación y condiciones informadas de la vacante.",
+		"motivation_fit",
+		"Motivación y ajuste con la vacante",
+		15,
+		"Motivación explicada y ajuste observable con el trabajo de ventas y servicio de Aro y Pedal.",
 	),
 )
 CRITERIA_BY_KEY = {criterion.key: criterion for criterion in DEFAULT_CRITERIA}

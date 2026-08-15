@@ -20,6 +20,22 @@ def complete_rows(rating=4):
 
 
 class TestCandidateScoring(unittest.TestCase):
+	def test_uses_the_approved_ayp_rubric(self):
+		self.assertEqual(
+			[(criterion.key, criterion.label, criterion.weight) for criterion in DEFAULT_CRITERIA],
+			[
+				("sales_service_experience", "Experiencia en ventas y servicio", 30),
+				("retail_experience", "Experiencia en retail", 20),
+				("schedule_availability", "Disponibilidad de horario", 20),
+				(
+					"bicycle_knowledge_learning",
+					"Bicicletas o capacidad de aprendizaje",
+					15,
+				),
+				("motivation_fit", "Motivación y ajuste con la vacante", 15),
+			],
+		)
+
 	def test_weights_total_one_hundred(self):
 		self.assertEqual(sum(criterion.weight for criterion in DEFAULT_CRITERIA), 100)
 
@@ -29,7 +45,7 @@ class TestCandidateScoring(unittest.TestCase):
 		self.assertEqual(scorecard.total_score, 80.0)
 		self.assertEqual(scorecard.recommendation, "Recomendado para shortlist")
 		self.assertEqual(sum(row.weighted_score for row in scorecard.rows), 80.0)
-		self.assertIn("Requisitos mínimos: 4/5 × 30% = 24.0", scorecard.explanation)
+		self.assertIn("Experiencia en ventas y servicio: 4/5 × 30% = 24.0", scorecard.explanation)
 
 	def test_uses_server_weights_instead_of_client_weights(self):
 		rows = complete_rows(rating=5)
