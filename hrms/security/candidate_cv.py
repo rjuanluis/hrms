@@ -58,12 +58,33 @@ def validate_candidate_cv_file_evidence(file_doc: Any, method=None) -> None:
 	"""Reject ordinary document mutations of a bound, scanned candidate CV."""
 
 	getter = getattr(file_doc, "get_doc_before_save", None)
-	previous = getter() if callable(getter) and not file_doc.is_new() else None
-	if not previous or not _is_bound_candidate_cv(previous):
+	previous: Any = getter() if callable(getter) and not file_doc.is_new() else None
+	if not previous:
 		return
-	for fieldname in CANDIDATE_CV_EVIDENCE_FIELDS:
-		if file_doc.get(fieldname) != previous.get(fieldname):
-			raise CandidateCVSecurityError(_("La evidencia del CV escaneado es inmutable."))
+	if _is_bound_candidate_cv(previous):
+		for fieldname in CANDIDATE_CV_EVIDENCE_FIELDS:
+			if file_doc.get(fieldname) != previous.get(fieldname):
+				raise CandidateCVSecurityError(_("La evidencia del CV escaneado es inmutable."))
+
+	# Frappe propagates privacy changes to every File row with the same
+	# content_hash. Block an unbound alias before File.validate can publish or
+	# move a blob that is governed by any bound candidate CV row.
+	privacy_or_url_changed = any(
+		file_doc.get(fieldname) != previous.get(fieldname) for fieldname in ("is_private", "file_url")
+	)
+	if not privacy_or_url_changed:
+		return
+	for content_hash in {previous.get("content_hash"), file_doc.get("content_hash")} - {None, ""}:
+		if frappe.db.exists(
+			"File",
+			{
+				"content_hash": content_hash,
+				"attached_to_doctype": "Job Applicant",
+				"attached_to_field": "resume_attachment",
+				"attached_to_name": ("is", "set"),
+			},
+		):
+			raise CandidateCVSecurityError(_("La privacidad del CV escaneado es inmutable."))
 
 
 def prevent_candidate_cv_file_deletion(file_doc: Any, method=None) -> None:

@@ -84,11 +84,22 @@ class FakeDB:
 		raise AssertionError(f"Unexpected get_value call: {(doctype, filters, fieldname, as_dict)}")
 
 	def sql(self, query, params, as_dict=False):
-		if "FROM `tabJob Applicant`" not in query or "FOR UPDATE" not in query:
+		if "FOR UPDATE" not in query:
 			raise AssertionError(f"Unexpected SQL: {query}")
 		self.owner.locking_reads += 1
-		row = self.owner.applicants_by_message.get(params[0])
-		return [row] if row else []
+		if "FROM `tabJob Applicant`" in query:
+			row = self.owner.applicants_by_message.get(params[0])
+			return [row] if row else []
+		if "FROM `tabFile`" in query:
+			file_doc = self.owner.files_by_name.get(params[0])
+			return [FakeRow(vars(file_doc))] if file_doc else []
+		raise AssertionError(f"Unexpected SQL: {query}")
+
+	def delete(self, doctype, filters):
+		if doctype != "File" or set(filters) != {"name"}:
+			raise AssertionError(f"Unexpected direct delete: {(doctype, filters)}")
+		self.owner.direct_db_deletes.append((doctype, filters["name"]))
+		self.owner.files_by_name.pop(filters["name"], None)
 
 	def commit(self):
 		raise AssertionError("ingest_email_payload must not commit")
@@ -106,10 +117,17 @@ class FakeApplicant:
 
 	def insert(self):
 		if self.owner.duplicate_winner_on_insert:
-			file_doc = self.owner.files_by_url[self.values["resume_attachment"]]
+			loser_file = self.owner.files_by_url[self.values["resume_attachment"]]
+			file_doc = types.SimpleNamespace(**vars(loser_file))
+			file_doc.name = "FILE-WINNER"
+			file_doc.attached_to_doctype = "Job Applicant"
+			file_doc.attached_to_name = "race-winner@example.com"
+			file_doc.attached_to_field = "resume_attachment"
+			self.owner.files_by_name[file_doc.name] = file_doc
+			winner_values = {**self.values, "custom_ayp_email_file_name": file_doc.name}
 			winner = FakeRow(
 				{
-					**self.values,
+					**winner_values,
 					"name": "race-winner@example.com",
 					"custom_cv_sha256": hashlib.sha256(file_doc.content).hexdigest(),
 				}
@@ -122,6 +140,9 @@ class FakeApplicant:
 		if self.flags.ayp_candidate_cv_file_name != file_doc.name:
 			raise AssertionError("Applicant must carry the exact scanned File.name")
 		file_content = file_doc.content
+		file_doc.attached_to_doctype = "Job Applicant"
+		file_doc.attached_to_name = self.name
+		file_doc.attached_to_field = "resume_attachment"
 		self.values["custom_cv_sha256"] = hashlib.sha256(file_content).hexdigest()
 		row = FakeRow(self.values)
 		row.name = self.name
@@ -142,7 +163,9 @@ class FakeFrappe(types.ModuleType):
 		self.db = FakeDB(self)
 		self.job_opening_status = "Open"
 		self.files_by_url = {}
+		self.files_by_name = {}
 		self.deleted_files = []
+		self.direct_db_deletes = []
 		self.inserted_applicants = []
 		self.applicants_by_message = {}
 		self.saved_files = []
@@ -155,7 +178,9 @@ class FakeFrappe(types.ModuleType):
 	def _(self, text):
 		return text
 
-	def get_doc(self, values):
+	def get_doc(self, values, name=None):
+		if values == "File" and name:
+			return self.files_by_name[name]
 		if values.get("doctype") != "Job Applicant":
 			raise AssertionError(f"Unexpected document: {values}")
 		return FakeApplicant(values, self)
@@ -209,9 +234,18 @@ def load_email_bridge(fake_frappe):
 			file_size=len(content),
 			is_private=1,
 			content=content,
+			content_hash=hashlib.md5(content, usedforsecurity=False).hexdigest(),
+			attached_to_doctype=None,
+			attached_to_name=None,
+			attached_to_field=None,
+			custom_av_scan_status=None,
+			custom_av_scan_engine=None,
+			custom_av_scanned_on=None,
+			custom_cv_sha256=None,
 		)
 		fake_frappe.saved_files.append(file_doc)
 		fake_frappe.files_by_url[file_doc.file_url] = file_doc
+		fake_frappe.files_by_name[file_doc.name] = file_doc
 		return file_doc
 
 	file_manager.save_file = save_file
@@ -227,7 +261,17 @@ def load_email_bridge(fake_frappe):
 			raise FakeCandidateCVSecurityError("invalid size")
 
 	candidate_cv.validate_cv_file = validate_cv_file
-	candidate_cv.scan_stored_candidate_cv = lambda file_doc: hashlib.sha256(file_doc.content).hexdigest()
+
+	def scan_stored_candidate_cv(file_doc):
+		sha256 = hashlib.sha256(file_doc.content).hexdigest()
+		file_doc.custom_av_scan_status = "Clean"
+		file_doc.custom_av_scan_engine = "ClamAV"
+		file_doc.custom_av_scanned_on = "2026-08-15 17:15:00"
+		file_doc.custom_cv_sha256 = sha256
+		return sha256
+
+	candidate_cv.scan_stored_candidate_cv = scan_stored_candidate_cv
+	candidate_cv.read_stored_candidate_cv_bytes = lambda file_doc: file_doc.content
 
 	try:
 		sys.modules["frappe"] = fake_frappe
@@ -349,6 +393,24 @@ class TestEmailBridge(unittest.TestCase):
 		self.assertEqual(len(self.frappe.saved_files), 1)
 		self.assertEqual(len(self.frappe.inserted_applicants), 1)
 
+	def test_duplicate_fails_closed_when_exact_file_is_missing(self):
+		self.bridge.ingest_email_payload(email_payload())
+		self.frappe.files_by_name.clear()
+		with self.assertRaisesRegex(self.bridge.EmailBridgeError, "archivo único"):
+			self.bridge.ingest_email_payload(email_payload())
+
+	def test_duplicate_fails_closed_when_exact_file_is_public(self):
+		self.bridge.ingest_email_payload(email_payload())
+		self.frappe.files_by_name["FILE-1"].is_private = 0
+		with self.assertRaisesRegex(self.bridge.EmailBridgeError, "evidencia privada"):
+			self.bridge.ingest_email_payload(email_payload())
+
+	def test_duplicate_fails_closed_when_exact_file_bytes_drift(self):
+		self.bridge.ingest_email_payload(email_payload())
+		self.frappe.files_by_name["FILE-1"].content = b"tampered"
+		with self.assertRaisesRegex(self.bridge.EmailBridgeError, "evidencia privada"):
+			self.bridge.ingest_email_payload(email_payload())
+
 	def test_concurrent_unique_race_returns_verified_winner_and_cleans_loser_file(self):
 		self.frappe.duplicate_winner_on_insert = True
 		result = self.bridge.ingest_email_payload(email_payload())
@@ -356,8 +418,10 @@ class TestEmailBridge(unittest.TestCase):
 			result,
 			{"status": "already_processed", "job_applicant": "race-winner@example.com"},
 		)
-		self.assertEqual(self.frappe.deleted_files[0][0:2], ("File", "FILE-1"))
-		self.assertEqual(self.frappe.locking_reads, 1)
+		self.assertEqual(self.frappe.deleted_files, [])
+		self.assertEqual(self.frappe.direct_db_deletes, [("File", "FILE-1")])
+		self.assertEqual(self.frappe.locking_reads, 2)
+		self.assertIn("FILE-WINNER", self.frappe.files_by_name)
 
 	def test_duplicate_message_key_with_changed_payload_fails_closed(self):
 		self.bridge.ingest_email_payload(email_payload())
@@ -420,13 +484,14 @@ class TestEmailBridge(unittest.TestCase):
 			self.bridge.ingest_email_payload(email_payload())
 		self.assertEqual(self.frappe.saved_files, [])
 
-	def test_insert_failure_cleans_file_without_commit_or_rollback(self):
+	def test_insert_failure_defers_file_cleanup_to_caller_rollback(self):
 		self.frappe.fail_applicant_insert = True
 		with self.assertRaisesRegex(FakeValidationError, "insert failed"):
 			self.bridge.ingest_email_payload(email_payload())
-		self.assertEqual(self.frappe.deleted_files[0][0:2], ("File", "FILE-1"))
+		self.assertEqual(self.frappe.deleted_files, [])
+		self.assertEqual(self.frappe.direct_db_deletes, [])
 
-	def test_insert_failure_deletes_new_file_record_even_when_blob_is_shared(self):
+	def test_insert_failure_never_deletes_shared_blob_before_rollback(self):
 		content = b"synthetic cv"
 		self.frappe.existing_private_hashes.add(hashlib.md5(content, usedforsecurity=False).hexdigest())
 		self.frappe.fail_applicant_insert = True
@@ -434,7 +499,8 @@ class TestEmailBridge(unittest.TestCase):
 		with self.assertRaisesRegex(FakeValidationError, "insert failed"):
 			self.bridge.ingest_email_payload(email_payload(content))
 
-		self.assertEqual(self.frappe.deleted_files[0][0:2], ("File", "FILE-1"))
+		self.assertEqual(self.frappe.deleted_files, [])
+		self.assertEqual(self.frappe.direct_db_deletes, [])
 
 
 if __name__ == "__main__":

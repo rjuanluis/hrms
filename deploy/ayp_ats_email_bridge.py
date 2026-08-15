@@ -274,9 +274,8 @@ def _select_candidate_attachment(rows: list[dict[str, Any]]) -> tuple[dict[str, 
 		return None, "blocked_candidate_filename"
 	if _candidate_extension(filename) not in ALLOWED_EXTENSIONS:
 		return None, "ignored_no_candidate_cv"
-	try:
-		declared_size = int(row.get("size") or 0)
-	except (TypeError, ValueError):
+	declared_size = row.get("size")
+	if not isinstance(declared_size, int) or isinstance(declared_size, bool):
 		return None, "blocked_candidate_attachment_size"
 	content = str(row.get("contentBytes") or "")
 	if (

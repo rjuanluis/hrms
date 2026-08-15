@@ -275,6 +275,15 @@ class TestAyPEmailBridge(unittest.TestCase):
 		self.assertIsNone(selected)
 		self.assertEqual(status, "blocked_candidate_attachment_size")
 
+	def test_attachment_size_accepts_only_exact_integer_type(self):
+		for malformed in (True, False, 12.0, "12", None, float("inf"), float("nan")):
+			attachment = self.attachment()
+			attachment["size"] = malformed
+			with self.subTest(size=malformed):
+				selected, status = bridge._select_candidate_attachment([attachment])
+				self.assertIsNone(selected)
+				self.assertEqual(status, "blocked_candidate_attachment_size")
+
 	def test_message_pagination_skips_known_page_and_reaches_pending_message(self):
 		known = self.message()
 		pending = {**self.message(), "id": "GRAPH-ID-2", "internetMessageId": "<synthetic-2@example.test>"}

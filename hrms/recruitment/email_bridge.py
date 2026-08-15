@@ -19,6 +19,7 @@ from hrms.recruitment.matching import EMAIL_RECRUITMENT_SOURCE, normalize_email
 from hrms.security.candidate_cv import (
 	MAX_CV_BYTES,
 	CandidateCVSecurityError,
+	read_stored_candidate_cv_bytes,
 	scan_stored_candidate_cv,
 	validate_cv_file,
 )
@@ -209,6 +210,7 @@ def _existing_applicant(message_key: str, *, for_update: bool = False):
 		"email_id",
 		"job_title",
 		"source",
+		"resume_attachment",
 		"custom_data_processing_consent",
 		"custom_privacy_notice_version",
 		"custom_cv_sha256",
@@ -265,7 +267,7 @@ def _assert_duplicate_matches(
 	job_opening: str,
 	attachment_sha256: str,
 	consent_evidence_sha256: str,
-) -> None:
+):
 	matches = (
 		existing.get(EMAIL_PROVENANCE_FIELD) in (True, 1, "1"),
 		bool(existing.get(CV_FILE_FIELD)),
@@ -285,6 +287,53 @@ def _assert_duplicate_matches(
 	)
 	if not all(matches):
 		_fail("El identificador del mensaje ya existe con datos diferentes.")
+
+	file_name = existing.get(CV_FILE_FIELD)
+	file_fields = (
+		"name",
+		"file_name",
+		"file_url",
+		"file_size",
+		"content_hash",
+		"is_private",
+		"attached_to_doctype",
+		"attached_to_name",
+		"attached_to_field",
+		"custom_av_scan_status",
+		"custom_av_scan_engine",
+		"custom_av_scanned_on",
+		"custom_cv_sha256",
+	)
+	columns = ", ".join(f"`{fieldname}`" for fieldname in file_fields)
+	rows = frappe.db.sql(  # nosemgrep
+		f"SELECT {columns} FROM `tabFile` WHERE `name` = %s FOR UPDATE",
+		(file_name,),
+		as_dict=True,
+	)
+	if len(rows) != 1:
+		_fail("El CV procesado ya no tiene un archivo único y verificable.")
+	file_record = rows[0]
+	file_doc = frappe.get_doc("File", file_name)
+	content = read_stored_candidate_cv_bytes(file_doc)
+	actual_sha256 = hashlib.sha256(content).hexdigest()
+	file_matches = (
+		file_record.get("file_url") == existing.get("resume_attachment"),
+		bool(file_record.get("file_url")) and file_record.get("file_url").startswith("/private/files/"),
+		file_record.get("is_private") in (True, 1, "1"),
+		file_record.get("attached_to_doctype") == "Job Applicant",
+		file_record.get("attached_to_name") == existing.name,
+		file_record.get("attached_to_field") == "resume_attachment",
+		file_record.get("custom_av_scan_status") == "Clean",
+		file_record.get("custom_av_scan_engine") == "ClamAV",
+		bool(file_record.get("custom_av_scanned_on")),
+		bool(file_record.get("content_hash")),
+		file_record.get("file_size") == len(content),
+		file_record.get("custom_cv_sha256") == attachment_sha256,
+		actual_sha256 == attachment_sha256,
+	)
+	if not all(file_matches):
+		_fail("El CV procesado ya no coincide con su evidencia privada e inmutable.")
+	return file_record
 
 
 @contextmanager
@@ -313,15 +362,16 @@ def _suppress_document_notifications():
 		frappe.flags.mute_emails = previous_mute_emails
 
 
-def _cleanup_uncommitted_file(file_doc) -> None:
-	try:
-		# save_file creates File with framework-level permission bypass. Match that
-		# narrow behavior only for best-effort physical cleanup before caller rollback.
-		frappe.delete_doc("File", file_doc.name, ignore_permissions=True, force=True)
-	except Exception:
-		# The caller owns the transaction and will roll back the File row. Cleanup is
-		# best effort because a duplicate blob may be shared with another File record.
-		pass
+def _remove_verified_duplicate_file_row(file_doc, winner_file) -> None:
+	"""Remove only the losing DB alias; never invoke File.on_trash on shared bytes."""
+
+	if file_doc.name == winner_file.get("name"):
+		return
+	if file_doc.file_url != winner_file.get("file_url") or file_doc.content_hash != winner_file.get(
+		"content_hash"
+	):
+		_fail("El archivo perdedor de la carrera no comparte el CV verificado del ganador.")
+	frappe.db.delete("File", {"name": file_doc.name})
 
 
 def ingest_email_payload(payload: dict) -> dict:
@@ -406,15 +456,12 @@ def ingest_email_payload(payload: dict) -> dict:
 			applicant.insert()
 		return {"status": "created", "job_applicant": applicant.name}
 	except frappe.DuplicateEntryError as exc:
-		if file_doc is not None and file_doc.name not in preexisting_file_names:
-			_cleanup_uncommitted_file(file_doc)
-		file_doc = None
 		winner = _existing_applicant(message_key, for_update=True)
 		if not winner:
 			raise EmailBridgeError(
 				_("La carrera de idempotencia no produjo un registro verificable.")
 			) from exc
-		_assert_duplicate_matches(
+		winner_file = _assert_duplicate_matches(
 			winner,
 			message_key=message_key,
 			sender_email=sender_email,
@@ -425,8 +472,11 @@ def ingest_email_payload(payload: dict) -> dict:
 			attachment_sha256=attachment_sha256,
 			consent_evidence_sha256=consent_evidence_sha256,
 		)
+		if file_doc is not None and file_doc.name not in preexisting_file_names:
+			_remove_verified_duplicate_file_row(file_doc, winner_file)
+		file_doc = None
 		return {"status": "already_processed", "job_applicant": winner.name}
 	except Exception:
-		if file_doc is not None and file_doc.name not in preexisting_file_names:
-			_cleanup_uncommitted_file(file_doc)
+		# The caller owns rollback. Frappe registered after_rollback cleanup for
+		# genuinely new bytes; File.on_trash is unsafe when a committed alias shares them.
 		raise

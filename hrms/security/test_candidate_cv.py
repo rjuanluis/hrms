@@ -189,6 +189,59 @@ class TestCandidateCVSecurity(unittest.TestCase):
 		with self.assertRaises(CandidateCVSecurityError):
 			prevent_candidate_cv_file_deletion(file_doc)
 
+	def test_frappe_delete_doc_cannot_remove_bound_candidate_cv_bytes(self):
+		file_doc = frappe.get_doc(
+			{
+				"doctype": "File",
+				"file_name": f"ats-delete-guard-{frappe.generate_hash(length=8)}.pdf",
+				"content": make_pdf(),
+				"is_private": 1,
+				"attached_to_doctype": "Job Applicant",
+				"attached_to_name": "ATS-DELETION-GUARD",
+				"attached_to_field": "resume_attachment",
+			}
+		).insert(ignore_permissions=True)
+		path = Path(file_doc.get_full_path())
+		try:
+			with self.assertRaises(CandidateCVSecurityError):
+				frappe.delete_doc("File", file_doc.name, ignore_permissions=True, force=True)
+			self.assertTrue(frappe.db.exists("File", file_doc.name))
+			self.assertTrue(path.exists())
+		finally:
+			frappe.db.set_value(
+				"File",
+				file_doc.name,
+				{
+					"attached_to_doctype": None,
+					"attached_to_name": None,
+					"attached_to_field": None,
+				},
+				update_modified=False,
+			)
+			frappe.delete_doc("File", file_doc.name, ignore_permissions=True, force=True)
+
+	def test_unbound_alias_cannot_publish_blob_shared_with_bound_candidate_cv(self):
+		previous = frappe._dict(
+			name="FILE-ALIAS",
+			content_hash="shared-md5",
+			file_url="/private/files/cv.pdf",
+			is_private=1,
+			attached_to_doctype=None,
+			attached_to_name=None,
+			attached_to_field=None,
+		)
+		current = frappe._dict(previous)
+		current.file_url = "/files/cv.pdf"
+		current.is_private = 0
+		current.is_new = lambda: False
+		current.get_doc_before_save = lambda: previous
+		with (
+			patch.object(frappe.db, "exists", return_value=True) as exists,
+			self.assertRaises(CandidateCVSecurityError),
+		):
+			validate_candidate_cv_file_evidence(current)
+		exists.assert_called_once()
+
 	def setUp(self):
 		frappe.local.form_dict = frappe._dict()
 		frappe.local.session = frappe._dict(user="Guest")
