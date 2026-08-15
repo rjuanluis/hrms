@@ -27,11 +27,13 @@ Do not create a scheduler until all of these are true:
 
 ## Intended scheduler definition
 
-After approval, create a Hermes **no-agent** recurring job whose script is the installed path:
+After approval, create a Hermes **no-agent** recurring job using the Graph virtual environment explicitly:
 
 ```text
-~/.hermes/scripts/ayp_ats_email_bridge.py --limit 10
+~/.hermes/venvs/msgraph-app/bin/python ~/.hermes/scripts/ayp_ats_email_bridge.py --limit 10
 ```
+
+Do not invoke the runner through the system `python3`: the imported Graph client depends on packages installed in `~/.hermes/venvs/msgraph-app`. Before activation, verify locally—without making a Graph request—that this interpreter can import `msal` and that `msgraph_app_cli.request_graph` exposes `immutable_message_ids`.
 
 Recommended interval: every 5 minutes. Empty stdout means success/no alert. The runner emits only sanitized attention/error JSON and exits non-zero on blocked/error outcomes. No scheduler is installed by this repository.
 
