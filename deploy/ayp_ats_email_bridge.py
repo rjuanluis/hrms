@@ -125,6 +125,9 @@ class _HTMLTextExtractor(HTMLParser):
 	def unknown_decl(self, data: str) -> None:
 		self.valid = False
 
+	def handle_pi(self, data: str) -> None:
+		self.valid = False
+
 
 def _normalized_words(value: str) -> str:
 	decomposed = unicodedata.normalize("NFKD", value).casefold()
@@ -271,7 +274,10 @@ def _select_candidate_attachment(rows: list[dict[str, Any]]) -> tuple[dict[str, 
 		return None, "blocked_candidate_filename"
 	if _candidate_extension(filename) not in ALLOWED_EXTENSIONS:
 		return None, "ignored_no_candidate_cv"
-	declared_size = int(row.get("size") or 0)
+	try:
+		declared_size = int(row.get("size") or 0)
+	except (TypeError, ValueError):
+		return None, "blocked_candidate_attachment_size"
 	content = str(row.get("contentBytes") or "")
 	if (
 		declared_size <= 0

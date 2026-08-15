@@ -31,6 +31,10 @@ class FakeValidationError(Exception):
 	pass
 
 
+class FakeDuplicateEntryError(FakeValidationError):
+	pass
+
+
 class FakeCandidateCVSecurityError(FakeValidationError):
 	pass
 
@@ -79,6 +83,13 @@ class FakeDB:
 			return self.owner.applicants_by_message.get(message_key)
 		raise AssertionError(f"Unexpected get_value call: {(doctype, filters, fieldname, as_dict)}")
 
+	def sql(self, query, params, as_dict=False):
+		if "FROM `tabJob Applicant`" not in query or "FOR UPDATE" not in query:
+			raise AssertionError(f"Unexpected SQL: {query}")
+		self.owner.locking_reads += 1
+		row = self.owner.applicants_by_message.get(params[0])
+		return [row] if row else []
+
 	def commit(self):
 		raise AssertionError("ingest_email_payload must not commit")
 
@@ -94,6 +105,17 @@ class FakeApplicant:
 		self.flags = FakeFlags()
 
 	def insert(self):
+		if self.owner.duplicate_winner_on_insert:
+			file_doc = self.owner.files_by_url[self.values["resume_attachment"]]
+			winner = FakeRow(
+				{
+					**self.values,
+					"name": "race-winner@example.com",
+					"custom_cv_sha256": hashlib.sha256(file_doc.content).hexdigest(),
+				}
+			)
+			self.owner.applicants_by_message[self.values["custom_ayp_email_message_id"]] = winner
+			raise FakeDuplicateEntryError("unique message id")
 		if self.owner.fail_applicant_insert:
 			raise FakeValidationError("insert failed")
 		file_doc = self.owner.files_by_url[self.values["resume_attachment"]]
@@ -112,6 +134,7 @@ class FakeFrappe(types.ModuleType):
 	def __init__(self):
 		super().__init__("frappe")
 		self.ValidationError = FakeValidationError
+		self.DuplicateEntryError = FakeDuplicateEntryError
 		self.PermissionError = PermissionError
 		self.session = types.SimpleNamespace(user="operator@example.com")
 		self.flags = FakeFlags()
@@ -124,7 +147,10 @@ class FakeFrappe(types.ModuleType):
 		self.applicants_by_message = {}
 		self.saved_files = []
 		self.existing_private_hashes = set()
+		self.preexisting_file_names = set()
 		self.fail_applicant_insert = False
+		self.duplicate_winner_on_insert = False
+		self.locking_reads = 0
 
 	def _(self, text):
 		return text
@@ -136,6 +162,11 @@ class FakeFrappe(types.ModuleType):
 
 	def delete_doc(self, doctype, name, **kwargs):
 		self.deleted_files.append((doctype, name, kwargs))
+
+	def get_all(self, doctype, filters=None, pluck=None):
+		if doctype != "File" or pluck != "name":
+			raise AssertionError(f"Unexpected get_all call: {(doctype, filters, pluck)}")
+		return sorted(self.preexisting_file_names)
 
 	def sendmail(self, *args, **kwargs):
 		raise AssertionError("email bridge must not send email")
@@ -318,6 +349,16 @@ class TestEmailBridge(unittest.TestCase):
 		self.assertEqual(len(self.frappe.saved_files), 1)
 		self.assertEqual(len(self.frappe.inserted_applicants), 1)
 
+	def test_concurrent_unique_race_returns_verified_winner_and_cleans_loser_file(self):
+		self.frappe.duplicate_winner_on_insert = True
+		result = self.bridge.ingest_email_payload(email_payload())
+		self.assertEqual(
+			result,
+			{"status": "already_processed", "job_applicant": "race-winner@example.com"},
+		)
+		self.assertEqual(self.frappe.deleted_files[0][0:2], ("File", "FILE-1"))
+		self.assertEqual(self.frappe.locking_reads, 1)
+
 	def test_duplicate_message_key_with_changed_payload_fails_closed(self):
 		self.bridge.ingest_email_payload(email_payload())
 		changed = email_payload()
@@ -385,7 +426,7 @@ class TestEmailBridge(unittest.TestCase):
 			self.bridge.ingest_email_payload(email_payload())
 		self.assertEqual(self.frappe.deleted_files[0][0:2], ("File", "FILE-1"))
 
-	def test_insert_failure_does_not_delete_a_preexisting_shared_blob(self):
+	def test_insert_failure_deletes_new_file_record_even_when_blob_is_shared(self):
 		content = b"synthetic cv"
 		self.frappe.existing_private_hashes.add(hashlib.md5(content, usedforsecurity=False).hexdigest())
 		self.frappe.fail_applicant_insert = True
@@ -393,7 +434,7 @@ class TestEmailBridge(unittest.TestCase):
 		with self.assertRaisesRegex(FakeValidationError, "insert failed"):
 			self.bridge.ingest_email_payload(email_payload(content))
 
-		self.assertEqual(self.frappe.deleted_files, [])
+		self.assertEqual(self.frappe.deleted_files[0][0:2], ("File", "FILE-1"))
 
 
 if __name__ == "__main__":

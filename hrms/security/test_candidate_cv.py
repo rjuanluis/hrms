@@ -12,7 +12,7 @@ import zipfile
 import zlib
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import DictionaryObject, IndirectObject, NameObject, TextStringObject
@@ -26,8 +26,10 @@ from hrms.security.candidate_cv import (
 	_verified_candidate_cv_sha256,
 	guard_candidate_cv_upload,
 	mark_scanned_candidate_cv_file,
+	prevent_candidate_cv_file_deletion,
 	read_stored_candidate_cv_bytes,
 	scan_bytes_with_clamd,
+	validate_candidate_cv_file_evidence,
 	validate_cv_file,
 	validate_job_applicant_cv,
 )
@@ -155,6 +157,38 @@ def make_pdf_with_compressed_action_object() -> bytes:
 
 
 class TestCandidateCVSecurity(unittest.TestCase):
+	def test_bound_candidate_cv_evidence_is_immutable(self):
+		previous = frappe._dict(
+			attached_to_doctype="Job Applicant",
+			attached_to_name="APP-1",
+			attached_to_field="resume_attachment",
+			file_name="cv.pdf",
+			file_url="/private/files/cv.pdf",
+			file_size=10,
+			content_hash="md5",
+			is_private=1,
+			custom_av_scan_status="Clean",
+			custom_av_scan_engine="ClamAV",
+			custom_av_scanned_on="2026-08-15 12:00:00",
+			custom_cv_sha256="a" * 64,
+		)
+		current = frappe._dict(previous)
+		current.is_new = lambda: False
+		current.get_doc_before_save = lambda: previous
+		validate_candidate_cv_file_evidence(current)
+		current.custom_cv_sha256 = "b" * 64
+		with self.assertRaises(CandidateCVSecurityError):
+			validate_candidate_cv_file_evidence(current)
+
+	def test_bound_candidate_cv_cannot_be_deleted_in_isolation(self):
+		file_doc = frappe._dict(
+			attached_to_doctype="Job Applicant",
+			attached_to_name="APP-1",
+			attached_to_field="resume_attachment",
+		)
+		with self.assertRaises(CandidateCVSecurityError):
+			prevent_candidate_cv_file_deletion(file_doc)
+
 	def setUp(self):
 		frappe.local.form_dict = frappe._dict()
 		frappe.local.session = frappe._dict(user="Guest")
@@ -311,18 +345,20 @@ class TestCandidateCVSecurity(unittest.TestCase):
 	def test_accepts_simple_docx(self):
 		validate_cv_file("cv.docx", make_docx())
 
-	def test_accepts_supported_images_and_legacy_doc_by_signature(self):
+	def test_accepts_supported_images(self):
 		validate_cv_file("cv.jpg", b"\xff\xd8\xff\xe0synthetic")
 		validate_cv_file("cv.png", b"\x89PNG\r\n\x1a\nsynthetic")
 		validate_cv_file("cv.heic", b"\x00\x00\x00\x18ftypheicsynthetic")
-		validate_cv_file("cv.doc", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1synthetic")
+
+	def test_rejects_legacy_doc_even_with_ole_signature(self):
+		with self.assertRaises(CandidateCVSecurityError):
+			validate_cv_file("cv.doc", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1synthetic")
 
 	def test_rejects_extension_content_mismatches(self):
 		for filename, content in (
 			("cv.jpg", b"%PDF-1.7"),
 			("cv.png", b"not-png"),
 			("cv.heic", b"not-heic"),
-			("cv.doc", b"not-ole"),
 		):
 			with self.subTest(filename=filename), self.assertRaises(CandidateCVSecurityError):
 				validate_cv_file(filename, content)
@@ -430,14 +466,17 @@ class TestCandidateCVSecurity(unittest.TestCase):
 			attached_to_field="resume_attachment",
 			custom_cv_sha256="a" * 64,
 		)
+		fake_db = SimpleNamespace(
+			has_column=Mock(return_value=True),
+			get_value=Mock(return_value=file_record),
+		)
 		with (
 			patch.object(frappe, "session", SimpleNamespace(user="Administrator")),
-			patch.object(frappe.db, "has_column", return_value=True),
-			patch.object(frappe.db, "get_value", return_value=file_record) as get_value,
+			patch.object(frappe, "db", fake_db),
 			patch("hrms.security.candidate_cv._verified_candidate_cv_sha256", return_value="a" * 64),
 		):
 			validate_job_applicant_cv(doc)
-		self.assertEqual(get_value.call_args.args[1], "FILE-1")
+		self.assertEqual(fake_db.get_value.call_args.args[1], "FILE-1")
 		self.assertEqual(doc.custom_cv_sha256, "a" * 64)
 
 	def test_verified_hash_rejects_invalid_pdf_signature(self):

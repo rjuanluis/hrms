@@ -29,6 +29,7 @@ EMAIL_CV_FILE_FIELD = "custom_ayp_email_file_name"
 EMAIL_MESSAGE_KEY_FIELD = "custom_ayp_email_message_id"
 EMAIL_CONSENT_EVIDENCE_FIELD = "custom_ayp_email_consent_evidence_sha256"
 EMAIL_IMMUTABLE_FIELDS = (
+	EMAIL_PROVENANCE_MARKER_FIELD,
 	"job_title",
 	"custom_privacy_notice_version",
 	EMAIL_CV_FILE_FIELD,
@@ -216,7 +217,7 @@ def validate_email_provenance(doc) -> None:
 			)
 		for fieldname in EMAIL_IMMUTABLE_FIELDS:
 			previous_value = previous.get(fieldname)
-			if previous_value not in (None, "") and doc.get(fieldname) != previous_value:
+			if doc.get(fieldname) != previous_value:
 				frappe.throw(
 					_("La evidencia de procedencia y consentimiento por correo es inmutable."),
 					frappe.ValidationError,
@@ -389,21 +390,15 @@ def backfill_candidate_profiles() -> int:
 		applicant = frappe.get_doc("Job Applicant", applicant_name)
 		if job_applicant_has_email_provenance(applicant):
 			stale_profile = applicant.get("custom_candidate_profile")
-			if (
-				stale_profile
-				and frappe.db.exists(PROFILE_DOCTYPE, stale_profile)
-				and frappe.db.count("Job Applicant", {"custom_candidate_profile": stale_profile}) == 1
-			):
-				frappe.db.set_value(
-					PROFILE_DOCTYPE,
-					stale_profile,
-					{
-						"talent_pool_status": "Dispuesto",
-						"do_not_contact": 1,
-						"disposition_reason": "Remediación de procedencia de correo sin consentimiento futuro",
-					},
-					update_modified=False,
-				)
+			if stale_profile and frappe.db.exists(PROFILE_DOCTYPE, stale_profile):
+				linked_count = frappe.db.count("Job Applicant", {"custom_candidate_profile": stale_profile})
+				if linked_count != 1:
+					frappe.throw(
+						_(
+							"Un perfil compartido contiene procedencia de correo; requiere remediación manual antes de continuar."
+						),
+						frappe.ValidationError,
+					)
 			frappe.db.set_value(
 				"Job Applicant",
 				applicant.name,
@@ -416,6 +411,8 @@ def backfill_candidate_profiles() -> int:
 				},
 				update_modified=False,
 			)
+			if stale_profile and frappe.db.exists(PROFILE_DOCTYPE, stale_profile):
+				frappe.delete_doc(PROFILE_DOCTYPE, stale_profile, ignore_permissions=True)
 			updated += 1
 			continue
 		if applicant.get("custom_candidate_profile"):

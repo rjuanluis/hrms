@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from deploy import configure_standard as setup  # type: ignore[import-not-found]
 
@@ -75,8 +75,8 @@ class TestNativeRecruitmentSetup(TestCase):
 			self.assertEqual(field["read_only"], 1)
 			self.assertEqual(field["no_copy"], 1)
 		self.assertEqual(email_fields["custom_ayp_email_message_id"]["unique"], 1)
-		self.assertEqual(email_fields["custom_ayp_email_file_name"]["fieldtype"], "Link")
-		self.assertEqual(email_fields["custom_ayp_email_file_name"]["options"], "File")
+		self.assertEqual(email_fields["custom_ayp_email_file_name"]["fieldtype"], "Data")
+		self.assertNotIn("options", email_fields["custom_ayp_email_file_name"])
 		self.assertEqual(email_fields["custom_ayp_email_subject"]["length"], 140)
 		self.assertEqual(email_fields["custom_ayp_email_consent_notice_version"]["length"], 140)
 		self.assertEqual(email_fields["custom_ayp_email_consent_evidence_sha256"]["length"], 64)
@@ -87,8 +87,9 @@ class TestNativeRecruitmentSetup(TestCase):
 
 	def test_email_recruitment_source_is_created_idempotently(self):
 		source = _Document()
+		fake_db = SimpleNamespace(exists=Mock(side_effect=[False, True]))
 		with (
-			patch.object(setup.frappe.db, "exists", side_effect=[False, True]) as exists,
+			patch.object(setup.frappe, "db", fake_db),
 			patch.object(setup.frappe, "get_doc", return_value=source) as get_doc,
 		):
 			first = setup.ensure_recruitment_email_source()
@@ -100,7 +101,7 @@ class TestNativeRecruitmentSetup(TestCase):
 		get_doc.assert_called_once_with(
 			{"doctype": "Job Applicant Source", "source_name": setup.EMAIL_RECRUITMENT_SOURCE}
 		)
-		self.assertEqual(exists.call_count, 2)
+		self.assertEqual(fake_db.exists.call_count, 2)
 
 	def test_internal_job_opening_is_created_with_exact_authoritative_name(self):
 		designation = _Document()
@@ -117,9 +118,9 @@ class TestNativeRecruitmentSetup(TestCase):
 				return document
 			raise AssertionError(f"Unexpected get_doc call: {args}")
 
+		fake_db = SimpleNamespace(exists=Mock(side_effect=exists), get_value=Mock())
 		with (
-			patch.object(setup.frappe.db, "exists", side_effect=exists),
-			patch.object(setup.frappe.db, "get_value") as get_opening_name,
+			patch.object(setup.frappe, "db", fake_db),
 			patch.object(setup.frappe, "get_doc", side_effect=get_doc),
 			patch.object(
 				setup.frappe,
@@ -134,7 +135,7 @@ class TestNativeRecruitmentSetup(TestCase):
 		):
 			result = setup.ensure_native_recruitment_job_opening()
 
-		get_opening_name.assert_not_called()
+		fake_db.get_value.assert_not_called()
 		self.assertEqual(result, opening.name)
 		self.assertEqual(opening.name, setup.RECRUITMENT_JOB_OPENING)
 		self.assertTrue(opening.inserted)
@@ -170,16 +171,16 @@ class TestNativeRecruitmentSetup(TestCase):
 				return opening
 			raise AssertionError(f"Unexpected get_doc call: {args}")
 
+		fake_db = SimpleNamespace(exists=Mock(side_effect=exists), get_value=Mock())
 		with (
-			patch.object(setup.frappe.db, "exists", side_effect=exists) as opening_exists,
-			patch.object(setup.frappe.db, "get_value") as get_opening_name,
+			patch.object(setup.frappe, "db", fake_db),
 			patch.object(setup.frappe, "get_doc", side_effect=get_doc) as load_opening,
 		):
 			setup.ensure_native_recruitment_job_opening()
 
-		opening_exists.assert_any_call("Job Opening", setup.RECRUITMENT_JOB_OPENING)
+		fake_db.exists.assert_any_call("Job Opening", setup.RECRUITMENT_JOB_OPENING)
 		load_opening.assert_called_once_with("Job Opening", setup.RECRUITMENT_JOB_OPENING)
-		get_opening_name.assert_not_called()
+		fake_db.get_value.assert_not_called()
 		self.assertEqual(opening.name, setup.RECRUITMENT_JOB_OPENING)
 		self.assertEqual(opening.job_title, setup.RECRUITMENT_JOB_TITLE)
 		self.assertEqual(opening.designation, setup.RECRUITMENT_JOB_TITLE)
@@ -205,9 +206,12 @@ class TestNativeRecruitmentSetup(TestCase):
 				return opening
 			raise AssertionError(f"Unexpected get_doc call: {args}")
 
+		fake_db = SimpleNamespace(
+			exists=Mock(side_effect=exists),
+			get_value=Mock(return_value=legacy_opening.name),
+		)
 		with (
-			patch.object(setup.frappe.db, "exists", side_effect=exists),
-			patch.object(setup.frappe.db, "get_value", return_value=legacy_opening.name) as get_opening_name,
+			patch.object(setup.frappe, "db", fake_db),
 			patch.object(setup.frappe, "get_doc", side_effect=get_doc) as load_opening,
 			patch.object(
 				setup.frappe,
@@ -218,7 +222,7 @@ class TestNativeRecruitmentSetup(TestCase):
 		):
 			result = setup.ensure_native_recruitment_job_opening()
 
-		get_opening_name.assert_not_called()
+		fake_db.get_value.assert_not_called()
 		load_opening.assert_called_once()
 		self.assertEqual(result, setup.RECRUITMENT_JOB_OPENING)
 		self.assertEqual(opening.insert_set_name, setup.RECRUITMENT_JOB_OPENING)
@@ -240,8 +244,9 @@ class TestNativeRecruitmentSetup(TestCase):
 				return opening
 			raise AssertionError(f"Unexpected get_doc call: {args}")
 
+		fake_db = SimpleNamespace(exists=Mock(side_effect=exists))
 		with (
-			patch.object(setup.frappe.db, "exists", side_effect=exists),
+			patch.object(setup.frappe, "db", fake_db),
 			patch.object(setup.frappe, "get_doc", side_effect=get_doc),
 			patch.object(
 				setup.frappe,

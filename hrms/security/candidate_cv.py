@@ -10,6 +10,7 @@ import subprocess
 import sys
 import zipfile
 from pathlib import Path
+from typing import Any
 from xml.etree import ElementTree
 
 import frappe
@@ -22,13 +23,54 @@ MAX_CV_BYTES = 5 * 1024 * 1024
 MAX_DOCX_UNCOMPRESSED_BYTES = 20 * 1024 * 1024
 MAX_DOCX_ENTRIES = 1000
 PDF_VALIDATION_TIMEOUT_SECONDS = 7
-ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx", ".heic", ".heif", ".jpeg", ".jpg", ".png"}
+ALLOWED_EXTENSIONS = {".pdf", ".docx", ".heic", ".heif", ".jpeg", ".jpg", ".png"}
 PDF_NAME_ESCAPE = re.compile(rb"#([0-9a-fA-F]{2})")
 PRIVACY_NOTICE_VERSION = "AYP-RH-2026-07-17-v3"
+CANDIDATE_CV_EVIDENCE_FIELDS = (
+	"file_name",
+	"file_url",
+	"file_size",
+	"content_hash",
+	"is_private",
+	"attached_to_doctype",
+	"attached_to_name",
+	"attached_to_field",
+	"custom_av_scan_status",
+	"custom_av_scan_engine",
+	"custom_av_scanned_on",
+	"custom_cv_sha256",
+)
 
 
 class CandidateCVSecurityError(frappe.ValidationError):
 	pass
+
+
+def _is_bound_candidate_cv(file_doc: Any) -> bool:
+	return (
+		file_doc.get("attached_to_doctype") == "Job Applicant"
+		and file_doc.get("attached_to_field") == "resume_attachment"
+		and bool(file_doc.get("attached_to_name"))
+	)
+
+
+def validate_candidate_cv_file_evidence(file_doc: Any, method=None) -> None:
+	"""Reject ordinary document mutations of a bound, scanned candidate CV."""
+
+	getter = getattr(file_doc, "get_doc_before_save", None)
+	previous = getter() if callable(getter) and not file_doc.is_new() else None
+	if not previous or not _is_bound_candidate_cv(previous):
+		return
+	for fieldname in CANDIDATE_CV_EVIDENCE_FIELDS:
+		if file_doc.get(fieldname) != previous.get(fieldname):
+			raise CandidateCVSecurityError(_("La evidencia del CV escaneado es inmutable."))
+
+
+def prevent_candidate_cv_file_deletion(file_doc: Any, method=None) -> None:
+	if _is_bound_candidate_cv(file_doc):
+		raise CandidateCVSecurityError(
+			_("El CV escaneado no puede borrarse mientras permanezca vinculado a la solicitud.")
+		)
 
 
 def _file_has_column(fieldname: str) -> bool:
@@ -158,11 +200,6 @@ def _validate_image(extension: str, content: bytes) -> None:
 		raise CandidateCVSecurityError(_("La imagen no coincide con el formato declarado."))
 
 
-def _validate_legacy_doc(content: bytes) -> None:
-	if not content.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
-		raise CandidateCVSecurityError(_("El archivo no es un documento Word .doc válido."))
-
-
 def validate_cv_file(filename: str, content: bytes) -> None:
 	if not content:
 		raise CandidateCVSecurityError(_("El CV está vacío."))
@@ -171,15 +208,11 @@ def validate_cv_file(filename: str, content: bytes) -> None:
 
 	extension = Path(filename or "").suffix.lower()
 	if extension not in ALLOWED_EXTENSIONS:
-		raise CandidateCVSecurityError(
-			_("Solo se permiten CV en PDF, Word DOC/DOCX o imagen JPG, PNG y HEIC/HEIF.")
-		)
+		raise CandidateCVSecurityError(_("Solo se permiten CV en PDF, DOCX o imagen JPG, PNG y HEIC/HEIF."))
 	if extension == ".pdf":
 		_validate_pdf(content)
 	elif extension == ".docx":
 		_validate_docx(content)
-	elif extension == ".doc":
-		_validate_legacy_doc(content)
 	else:
 		_validate_image(extension, content)
 

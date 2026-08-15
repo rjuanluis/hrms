@@ -202,28 +202,39 @@ def _require_configuration() -> None:
 		_fail("La fuente de solicitudes por correo no está instalada.")
 
 
-def _existing_applicant(message_key: str):
+def _existing_applicant(message_key: str, *, for_update: bool = False):
+	fields = [
+		"name",
+		"applicant_name",
+		"email_id",
+		"job_title",
+		"source",
+		"custom_data_processing_consent",
+		"custom_privacy_notice_version",
+		"custom_cv_sha256",
+		EMAIL_PROVENANCE_FIELD,
+		CV_FILE_FIELD,
+		MESSAGE_ID_FIELD,
+		RECEIVED_ON_FIELD,
+		SUBJECT_FIELD,
+		CURRENT_VACANCY_CONSENT_FIELD,
+		CONSENT_NOTICE_FIELD,
+		CONSENT_EVIDENCE_FIELD,
+	]
+	if for_update:
+		columns = ", ".join(f"`{fieldname}`" for fieldname in fields)
+		rows = frappe.db.sql(  # nosemgrep
+			f"SELECT {columns} FROM `tabJob Applicant` WHERE `{MESSAGE_ID_FIELD}` = %s FOR UPDATE",
+			(message_key,),
+			as_dict=True,
+		)
+		if len(rows) > 1:
+			_fail("La clave inmutable del correo no es única.")
+		return rows[0] if rows else None
 	return frappe.db.get_value(
 		"Job Applicant",
 		{MESSAGE_ID_FIELD: message_key},
-		[
-			"name",
-			"applicant_name",
-			"email_id",
-			"job_title",
-			"source",
-			"custom_data_processing_consent",
-			"custom_privacy_notice_version",
-			"custom_cv_sha256",
-			EMAIL_PROVENANCE_FIELD,
-			CV_FILE_FIELD,
-			MESSAGE_ID_FIELD,
-			RECEIVED_ON_FIELD,
-			SUBJECT_FIELD,
-			CURRENT_VACANCY_CONSENT_FIELD,
-			CONSENT_NOTICE_FIELD,
-			CONSENT_EVIDENCE_FIELD,
-		],
+		fields,
 		as_dict=True,
 	)
 
@@ -351,10 +362,12 @@ def ingest_email_payload(payload: dict) -> dict:
 		return {"status": "already_processed", "job_applicant": existing.name}
 
 	file_doc = None
-	blob_preexisted = bool(
-		frappe.db.exists(
+	content_hash = get_content_hash(content)
+	preexisting_file_names = set(
+		frappe.get_all(
 			"File",
-			{"content_hash": get_content_hash(content), "is_private": 1},
+			filters={"content_hash": content_hash, "is_private": 1},
+			pluck="name",
 		)
 	)
 	try:
@@ -392,7 +405,28 @@ def ingest_email_payload(payload: dict) -> dict:
 		with _suppress_document_notifications():
 			applicant.insert()
 		return {"status": "created", "job_applicant": applicant.name}
+	except frappe.DuplicateEntryError as exc:
+		if file_doc is not None and file_doc.name not in preexisting_file_names:
+			_cleanup_uncommitted_file(file_doc)
+		file_doc = None
+		winner = _existing_applicant(message_key, for_update=True)
+		if not winner:
+			raise EmailBridgeError(
+				_("La carrera de idempotencia no produjo un registro verificable.")
+			) from exc
+		_assert_duplicate_matches(
+			winner,
+			message_key=message_key,
+			sender_email=sender_email,
+			sender_name=sender_name,
+			received_on=received_on,
+			subject=subject,
+			job_opening=job_opening,
+			attachment_sha256=attachment_sha256,
+			consent_evidence_sha256=consent_evidence_sha256,
+		)
+		return {"status": "already_processed", "job_applicant": winner.name}
 	except Exception:
-		if file_doc is not None and not blob_preexisted:
+		if file_doc is not None and file_doc.name not in preexisting_file_names:
 			_cleanup_uncommitted_file(file_doc)
 		raise

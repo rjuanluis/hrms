@@ -258,6 +258,23 @@ class TestAyPEmailBridge(unittest.TestCase):
 		message["subject"] = "Solicitud XHR-OPN-2026-0001-FAKE"
 		self.assertFalse(bridge._has_authoritative_vacancy(message))
 
+	def test_consent_html_rejects_processing_instruction(self):
+		message = self.message()
+		message["body"] = {
+			"contentType": "html",
+			"content": "<?manufactured consent?><p>" + bridge.CONSENT_PHRASE + "</p>",
+		}
+		self.assertFalse(
+			bridge._has_current_vacancy_consent(lambda **kwargs: {"body": message["body"]}, "GRAPH-ID")
+		)
+
+	def test_attachment_with_malformed_declared_size_fails_closed(self):
+		attachment = self.attachment()
+		attachment["size"] = "not-an-integer"
+		selected, status = bridge._select_candidate_attachment([attachment])
+		self.assertIsNone(selected)
+		self.assertEqual(status, "blocked_candidate_attachment_size")
+
 	def test_message_pagination_skips_known_page_and_reaches_pending_message(self):
 		known = self.message()
 		pending = {**self.message(), "id": "GRAPH-ID-2", "internetMessageId": "<synthetic-2@example.test>"}

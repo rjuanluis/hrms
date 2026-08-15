@@ -16,6 +16,12 @@ from hrms.security.candidate_cv import (
 
 PROCESSOR_VERSION = "ayp-cv-extractor-v1"
 QUEUE_NAME = "documents"
+EMAIL_PROVENANCE_FIELDS = (
+	"custom_ayp_email_provenance",
+	"custom_ayp_email_file_name",
+	"custom_ayp_email_message_id",
+	"custom_ayp_email_consent_evidence_sha256",
+)
 READY_FOR_SCORING = frozenset({"Procesado", "Verificado manualmente"})
 MANUAL_REVIEWABLE = frozenset({"Revisión manual", "Ilegible"})
 TERMINAL_FAILURES = frozenset({"Protegido", "No compatible", "Error de seguridad"})
@@ -44,6 +50,27 @@ def _safe_detail(value: str) -> str:
 
 def processing_status_for_method(method: str) -> str:
 	return "Revisión manual" if "OCR" in str(method or "").upper() else "Procesado"
+
+
+def _value(row, fieldname: str):
+	getter = getattr(row, "get", None)
+	return getter(fieldname) if callable(getter) else getattr(row, fieldname, None)
+
+
+def _has_email_provenance(row) -> bool:
+	return has_email_recruitment_provenance(
+		source=_value(row, "source"),
+		email_provenance=bool(_value(row, "custom_ayp_email_provenance")),
+		email_file_name=_value(row, "custom_ayp_email_file_name"),
+		graph_message_key=_value(row, "custom_ayp_email_message_id"),
+		consent_evidence_sha256=_value(row, "custom_ayp_email_consent_evidence_sha256"),
+	)
+
+
+def _installed_email_provenance_fields() -> tuple[str, ...]:
+	return tuple(
+		fieldname for fieldname in EMAIL_PROVENANCE_FIELDS if frappe.db.has_column("Job Applicant", fieldname)
+	)
 
 
 def _clear_document_projection(doc) -> None:
@@ -90,6 +117,15 @@ def prepare_candidate_document_state(doc, method=None) -> None:
 		return
 	if attachment_changed or not doc.custom_cv_processing_status:
 		_clear_document_projection(doc)
+		if _has_email_provenance(doc):
+			doc.custom_cv_processing_status = "Revisión manual"
+			doc.custom_cv_processing_detail = (
+				"CV de correo validado sin extracción automática; requiere revisión humana."
+			)
+			doc.custom_cv_processed_sha256 = sha256
+			doc.custom_cv_processed_on = now_datetime()
+			doc.custom_cv_processor_version = PROCESSOR_VERSION
+			return
 		doc.custom_cv_processing_status = "Pendiente"
 		doc.custom_cv_processing_detail = "CV recibido de forma segura; extracción pendiente."
 		doc.custom_cv_processing_queued_on = now_datetime()
@@ -97,14 +133,22 @@ def prepare_candidate_document_state(doc, method=None) -> None:
 
 
 def _enqueue_candidate_document_job(applicant_name: str, expected_sha256: str) -> None:
+	fields = [
+		"source",
+		"custom_cv_processing_status",
+		"custom_cv_sha256",
+		"resume_attachment",
+		*_installed_email_provenance_fields(),
+	]
 	committed = frappe.db.get_value(
 		"Job Applicant",
 		applicant_name,
-		["custom_cv_processing_status", "custom_cv_sha256", "resume_attachment"],
+		fields,
 		as_dict=True,
 	)
 	if (
 		not committed
+		or _has_email_provenance(committed)
 		or committed.custom_cv_processing_status != "Pendiente"
 		or (committed.custom_cv_sha256 or "") != expected_sha256
 		or not committed.resume_attachment
@@ -125,13 +169,7 @@ def _enqueue_candidate_document_job(applicant_name: str, expected_sha256: str) -
 
 
 def enqueue_candidate_document(doc, method=None) -> None:
-	if has_email_recruitment_provenance(
-		source=doc.get("source"),
-		email_provenance=bool(doc.get("custom_ayp_email_provenance")),
-		email_file_name=doc.get("custom_ayp_email_file_name"),
-		graph_message_key=doc.get("custom_ayp_email_message_id"),
-		consent_evidence_sha256=doc.get("custom_ayp_email_consent_evidence_sha256"),
-	):
+	if _has_email_provenance(doc):
 		return
 	if not _has_processing_fields() or not doc.resume_attachment:
 		return
@@ -162,26 +200,44 @@ def _locked_applicant(applicant_name: str):
 
 
 def _load_exact_cv(applicant) -> tuple[str, bytes]:
-	file_names = frappe.db.sql(
-		"""
-		SELECT name
-		FROM `tabFile`
-		WHERE file_url = %s
-			AND attached_to_doctype = 'Job Applicant'
-			AND attached_to_name = %s
-		ORDER BY creation DESC, name DESC
-		LIMIT 1
-		FOR UPDATE
-		""",
-		(applicant.resume_attachment, applicant.name),
-		pluck=True,
-	)
+	exact_file_name = _value(applicant, "custom_ayp_email_file_name")
+	if exact_file_name:
+		file_names = frappe.db.sql(
+			"SELECT name FROM `tabFile` WHERE name = %s FOR UPDATE",
+			(exact_file_name,),
+			pluck=True,
+		)
+	else:
+		file_names = frappe.db.sql(
+			"""
+			SELECT name
+			FROM `tabFile`
+			WHERE file_url = %s
+				AND attached_to_doctype = 'Job Applicant'
+				AND attached_to_name = %s
+				AND attached_to_field = 'resume_attachment'
+			ORDER BY creation DESC, name DESC
+			LIMIT 2
+			FOR UPDATE
+			""",
+			(applicant.resume_attachment, applicant.name),
+			pluck=True,
+		)
+		if len(file_names) != 1:
+			raise CandidateCVSecurityError("No existe un único archivo CV autorizado para la solicitud.")
 	file_name = file_names[0] if file_names else None
 	file_record = frappe.get_doc("File", file_name, for_update=True) if file_name else None
 	if (
 		not file_record
+		or file_record.file_url != applicant.resume_attachment
 		or not file_record.is_private
+		or not file_record.file_url.startswith("/private/files/")
 		or file_record.custom_av_scan_status != "Clean"
+		or file_record.custom_av_scan_engine != "ClamAV"
+		or not file_record.custom_av_scanned_on
+		or file_record.attached_to_doctype != "Job Applicant"
+		or file_record.attached_to_name != applicant.name
+		or file_record.attached_to_field != "resume_attachment"
 		or file_record.custom_cv_sha256 != applicant.custom_cv_sha256
 	):
 		raise CandidateCVSecurityError("El CV ya no coincide con el archivo privado escaneado.")
@@ -259,6 +315,9 @@ def process_candidate_document(applicant_name: str, expected_sha256: str) -> dic
 	if not _has_processing_fields():
 		raise RuntimeError("Candidate document fields are unavailable; run migrate first.")
 	applicant = _locked_applicant(applicant_name)
+	if _has_email_provenance(applicant):
+		frappe.db.rollback()
+		return {"status": "email-quarantined"}
 	if (applicant.custom_cv_sha256 or "") != expected_sha256:
 		frappe.db.rollback()
 		return {"status": "stale"}
@@ -346,9 +405,14 @@ def recover_stale_candidate_document_jobs() -> int:
 
 	if not _has_processing_fields():
 		return 0
-	stale_rows = frappe.db.sql(
-		"""
-		SELECT name, custom_cv_sha256
+	installed_provenance_fields = set(_installed_email_provenance_fields())
+	provenance_select = ", ".join(
+		f"`{fieldname}`" if fieldname in installed_provenance_fields else f"NULL AS `{fieldname}`"
+		for fieldname in EMAIL_PROVENANCE_FIELDS
+	)
+	stale_rows = frappe.db.sql(  # nosemgrep
+		f"""
+		SELECT name, source, custom_cv_sha256, {provenance_select}
 		FROM `tabJob Applicant`
 		WHERE COALESCE(resume_attachment, '') != ''
 			AND COALESCE(custom_cv_sha256, '') != ''
@@ -366,7 +430,10 @@ def recover_stale_candidate_document_jobs() -> int:
 		""",
 		as_dict=True,
 	)
+	recovered = 0
 	for row in stale_rows:
+		if _has_email_provenance(row):
+			continue
 		frappe.db.set_value(
 			"Job Applicant",
 			row.name,
@@ -382,7 +449,8 @@ def recover_stale_candidate_document_jobs() -> int:
 		frappe.db.after_commit.add(
 			lambda name=row.name, sha256=row.custom_cv_sha256: _enqueue_candidate_document_job(name, sha256)
 		)
-	return len(stale_rows)
+		recovered += 1
+	return recovered
 
 
 def validate_candidate_ready_for_scoring(doc) -> None:

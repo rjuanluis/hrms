@@ -243,7 +243,11 @@ doc_events = {
 		"before_submit": "hrms.recruitment.interview_governance.validate_ayp_interview_feedback",
 		"before_cancel": "hrms.recruitment.interview_governance.validate_ayp_feedback_cancellation",
 	},
-	"File": {"after_insert": "hrms.security.candidate_cv.mark_scanned_candidate_cv_file"},
+	"File": {
+		"validate": "hrms.security.candidate_cv.validate_candidate_cv_file_evidence",
+		"after_insert": "hrms.security.candidate_cv.mark_scanned_candidate_cv_file",
+		"before_trash": "hrms.security.candidate_cv.prevent_candidate_cv_file_deletion",
+	},
 	"Project": {"validate": "hrms.controllers.employee_boarding_controller.update_employee_boarding_status"},
 	"Task": {"on_update": "hrms.controllers.employee_boarding_controller.update_task"},
 }

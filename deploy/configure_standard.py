@@ -388,8 +388,8 @@ def ensure_recruitment_security_fields() -> None:
 				{
 					"fieldname": "custom_ayp_email_file_name",
 					"label": "Archivo CV exacto de correo RRHH",
-					"fieldtype": "Link",
-					"options": "File",
+					"fieldtype": "Data",
+					"length": 140,
 					"read_only": 1,
 					"hidden": 1,
 					"no_copy": 1,
