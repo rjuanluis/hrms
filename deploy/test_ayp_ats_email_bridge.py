@@ -34,7 +34,7 @@ class GraphModule:
 		if immutable_message_ids is not True:
 			raise AssertionError("ATS Graph reads must request immutable message IDs")
 		self.calls.append((role, method, url, body, approval_ref, immutable_message_ids))
-		if "/attachments?" in url:
+		if url.split("?", 1)[0].endswith("/attachments"):
 			return {"value": self.attachments}
 		if "?$select=body" in url:
 			return {"body": self.body}
@@ -120,6 +120,12 @@ class TestAyPEmailBridge(unittest.TestCase):
 			message_list_url = graph.calls[0][2]
 			self.assertIn("$orderby=receivedDateTime%20desc", message_list_url)
 			self.assertIn("hasAttachments%20eq%20true", message_list_url)
+			attachment_urls = [
+				call[2] for call in graph.calls if call[2].split("?", 1)[0].endswith("/attachments")
+			]
+			self.assertEqual(len(attachment_urls), 1)
+			self.assertNotIn("?", attachment_urls[0])
+			self.assertNotIn("$select", attachment_urls[0])
 
 	def test_success_is_silent_and_state_is_private_and_dedupes(self):
 		graph = GraphModule(self.message(), [self.attachment()])
