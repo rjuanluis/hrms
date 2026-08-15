@@ -164,14 +164,14 @@ class TestCandidateReviewSecurityContract(unittest.TestCase):
 			self.assertEqual(prefix, '@frappe.whitelist(methods=["POST"])')
 		self.assertIn('frappe.has_permission("Interview", "read", interview, throw=True)', controller)
 
-	def test_fresh_site_patch_creates_governance_column_before_profile_backfill(self):
+	def test_fresh_site_patch_creates_required_columns_before_profile_backfill(self):
 		patch = (ROOT / "hrms" / "patches" / "v16_0" / "create_ayp_candidate_profiles.py").read_text(
 			encoding="utf-8"
 		)
-		self.assertIn('"fieldname": "custom_ayp_governed"', patch)
-		self.assertLess(
-			patch.index('"fieldname": "custom_ayp_governed"'), patch.index("backfill_candidate_profiles()")
-		)
+		for fieldname in ("custom_ayp_governed", "custom_ayp_email_provenance"):
+			field_definition = f'"fieldname": "{fieldname}"'
+			self.assertIn(field_definition, patch)
+			self.assertLess(patch.index(field_definition), patch.index("backfill_candidate_profiles()"))
 
 	def test_frozen_cohort_and_durable_merge_have_schema_support(self):
 		run = json.loads(

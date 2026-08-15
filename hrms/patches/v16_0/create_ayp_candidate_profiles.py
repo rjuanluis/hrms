@@ -66,6 +66,16 @@ CANDIDATE_PROFILE_FIELDS = {
 			"hidden": 1,
 			"insert_after": "custom_dedupe_status",
 		},
+		{
+			"fieldname": "custom_ayp_email_provenance",
+			"label": "Procedencia inmutable de correo RRHH",
+			"fieldtype": "Check",
+			"default": "0",
+			"read_only": 1,
+			"hidden": 1,
+			"no_copy": 1,
+			"insert_after": "custom_ayp_governed",
+		},
 	],
 }
 
