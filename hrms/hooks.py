@@ -158,6 +158,10 @@ override_doctype_class = {
 	"Project": "hrms.overrides.employee_project.EmployeeProject",
 }
 
+extend_doctype_class = {
+	"File": ["hrms.overrides.candidate_cv_file.CandidateCVFileMixin"],
+}
+
 # Document Events
 # ---------------
 # Hook on document methods and events
@@ -243,7 +247,9 @@ doc_events = {
 		"before_submit": "hrms.recruitment.interview_governance.validate_ayp_interview_feedback",
 		"before_cancel": "hrms.recruitment.interview_governance.validate_ayp_feedback_cancellation",
 	},
-	"File": {"after_insert": "hrms.security.candidate_cv.mark_scanned_candidate_cv_file"},
+	"File": {
+		"after_insert": "hrms.security.candidate_cv.mark_scanned_candidate_cv_file",
+	},
 	"Project": {"validate": "hrms.controllers.employee_boarding_controller.update_employee_boarding_status"},
 	"Task": {"on_update": "hrms.controllers.employee_boarding_controller.update_task"},
 }

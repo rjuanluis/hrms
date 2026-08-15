@@ -12,7 +12,7 @@ import zipfile
 import zlib
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import DictionaryObject, IndirectObject, NameObject, TextStringObject
@@ -26,8 +26,12 @@ from hrms.security.candidate_cv import (
 	_verified_candidate_cv_sha256,
 	guard_candidate_cv_upload,
 	mark_scanned_candidate_cv_file,
+	prevent_candidate_cv_file_deletion,
+	read_stored_candidate_cv_bytes,
 	scan_bytes_with_clamd,
+	validate_candidate_cv_file_evidence,
 	validate_cv_file,
+	validate_job_applicant_cv,
 )
 
 
@@ -153,6 +157,116 @@ def make_pdf_with_compressed_action_object() -> bytes:
 
 
 class TestCandidateCVSecurity(unittest.TestCase):
+	def test_bound_candidate_cv_evidence_is_immutable(self):
+		previous = frappe._dict(
+			attached_to_doctype="Job Applicant",
+			attached_to_name="APP-1",
+			attached_to_field="resume_attachment",
+			file_name="cv.pdf",
+			file_url="/private/files/cv.pdf",
+			file_size=10,
+			content_hash="md5",
+			is_private=1,
+			custom_av_scan_status="Clean",
+			custom_av_scan_engine="ClamAV",
+			custom_av_scanned_on="2026-08-15 12:00:00",
+			custom_cv_sha256="a" * 64,
+		)
+		current = frappe._dict(previous)
+		current.is_new = lambda: False
+		current.get_doc_before_save = lambda: previous
+		validate_candidate_cv_file_evidence(current)
+		current.custom_cv_sha256 = "b" * 64
+		with self.assertRaises(CandidateCVSecurityError):
+			validate_candidate_cv_file_evidence(current)
+
+	def test_bound_candidate_cv_cannot_be_deleted_in_isolation(self):
+		file_doc = frappe._dict(
+			attached_to_doctype="Job Applicant",
+			attached_to_name="APP-1",
+			attached_to_field="resume_attachment",
+		)
+		with self.assertRaises(CandidateCVSecurityError):
+			prevent_candidate_cv_file_deletion(file_doc)
+
+	def test_frappe_delete_doc_cannot_remove_bound_candidate_cv_bytes(self):
+		if not getattr(frappe.local, "db", None):
+			self.skipTest("requires a connected Frappe test database")
+		file_doc = frappe.get_doc(
+			{
+				"doctype": "File",
+				"file_name": f"ats-delete-guard-{frappe.generate_hash(length=8)}.pdf",
+				"content": make_pdf(),
+				"is_private": 1,
+				"attached_to_doctype": "Job Applicant",
+				"attached_to_name": "ATS-DELETION-GUARD",
+				"attached_to_field": "resume_attachment",
+			}
+		).insert(ignore_permissions=True)
+		path = Path(file_doc.get_full_path())
+		try:
+			with self.assertRaises(CandidateCVSecurityError):
+				frappe.delete_doc("File", file_doc.name, ignore_permissions=True, force=True)
+			self.assertTrue(frappe.db.exists("File", file_doc.name))
+			self.assertTrue(path.exists())
+		finally:
+			frappe.db.set_value(
+				"File",
+				file_doc.name,
+				{
+					"attached_to_doctype": None,
+					"attached_to_name": None,
+					"attached_to_field": None,
+				},
+				update_modified=False,
+			)
+			frappe.delete_doc("File", file_doc.name, ignore_permissions=True, force=True)
+
+	def test_unbound_alias_cannot_publish_blob_shared_with_bound_candidate_cv(self):
+		previous = frappe._dict(
+			name="FILE-ALIAS",
+			content_hash="shared-md5",
+			file_url="/private/files/cv.pdf",
+			is_private=1,
+			attached_to_doctype=None,
+			attached_to_name=None,
+			attached_to_field=None,
+		)
+		current = frappe._dict(previous)
+		current.file_url = "/files/cv.pdf"
+		current.is_private = 0
+		current.is_new = lambda: False
+		current.get_doc_before_save = lambda: previous
+		exists = Mock(return_value=True)
+		with (
+			patch.object(frappe, "db", SimpleNamespace(exists=exists)),
+			self.assertRaises(CandidateCVSecurityError),
+		):
+			validate_candidate_cv_file_evidence(current)
+		exists.assert_called_once()
+
+	def test_unbound_alias_cannot_first_change_hash_shared_with_bound_candidate_cv(self):
+		previous = frappe._dict(
+			name="FILE-ALIAS",
+			content_hash="governed-md5",
+			file_url="/private/files/cv.pdf",
+			is_private=1,
+			attached_to_doctype=None,
+			attached_to_name=None,
+			attached_to_field=None,
+		)
+		current = frappe._dict(previous)
+		current.content_hash = "attacker-controlled-md5"
+		current.is_new = lambda: False
+		current.get_doc_before_save = lambda: previous
+		exists = Mock(side_effect=lambda doctype, filters: filters["content_hash"] == "governed-md5")
+		with (
+			patch.object(frappe, "db", SimpleNamespace(exists=exists)),
+			self.assertRaises(CandidateCVSecurityError),
+		):
+			validate_candidate_cv_file_evidence(current)
+		self.assertTrue(any(call.args[1]["content_hash"] == "governed-md5" for call in exists.call_args_list))
+
 	def setUp(self):
 		frappe.local.form_dict = frappe._dict()
 		frappe.local.session = frappe._dict(user="Guest")
@@ -309,18 +423,20 @@ class TestCandidateCVSecurity(unittest.TestCase):
 	def test_accepts_simple_docx(self):
 		validate_cv_file("cv.docx", make_docx())
 
-	def test_accepts_supported_images_and_legacy_doc_by_signature(self):
+	def test_accepts_supported_images(self):
 		validate_cv_file("cv.jpg", b"\xff\xd8\xff\xe0synthetic")
 		validate_cv_file("cv.png", b"\x89PNG\r\n\x1a\nsynthetic")
 		validate_cv_file("cv.heic", b"\x00\x00\x00\x18ftypheicsynthetic")
-		validate_cv_file("cv.doc", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1synthetic")
+
+	def test_rejects_legacy_doc_even_with_ole_signature(self):
+		with self.assertRaises(CandidateCVSecurityError):
+			validate_cv_file("cv.doc", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1synthetic")
 
 	def test_rejects_extension_content_mismatches(self):
 		for filename, content in (
 			("cv.jpg", b"%PDF-1.7"),
 			("cv.png", b"not-png"),
 			("cv.heic", b"not-heic"),
-			("cv.doc", b"not-ole"),
 		):
 			with self.subTest(filename=filename), self.assertRaises(CandidateCVSecurityError):
 				validate_cv_file(filename, content)
@@ -390,6 +506,56 @@ class TestCandidateCVSecurity(unittest.TestCase):
 			sha256 = _verified_candidate_cv_sha256(file_record)
 		self.assertEqual(sha256, hashlib.sha256(content).hexdigest())
 		persist_sha256.assert_called_once_with(file_record.name, sha256)
+
+	def test_stored_ascii_pdf_round_trips_from_frappe_text_decode(self):
+		content = "%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF"
+		file_doc = SimpleNamespace(file_url="/private/files/ascii.pdf")
+		with patch("hrms.security.candidate_cv.get_file", return_value=("ascii.pdf", content)):
+			result = read_stored_candidate_cv_bytes(file_doc)
+		self.assertEqual(result, content.encode("utf-8"))
+
+	def test_stored_cv_rejects_non_bytes_non_text_content(self):
+		file_doc = SimpleNamespace(file_url="/private/files/cv.pdf")
+		with (
+			patch("hrms.security.candidate_cv.get_file", return_value=("cv.pdf", object())),
+			self.assertRaises(CandidateCVSecurityError),
+		):
+			read_stored_candidate_cv_bytes(file_doc)
+
+	def test_email_applicant_revalidates_persisted_exact_file_name(self):
+		doc = frappe._dict(
+			name="APP-1",
+			resume_attachment="/private/files/cv.pdf",
+			custom_ayp_email_file_name="FILE-1",
+		)
+		doc.set = lambda fieldname, value: doc.update({fieldname: value})
+		file_record = frappe._dict(
+			name="FILE-1",
+			file_name="cv.pdf",
+			file_url="/private/files/cv.pdf",
+			file_size=100,
+			content_hash="frappe-hash",
+			is_private=1,
+			custom_av_scan_status="Clean",
+			custom_av_scan_engine="ClamAV",
+			custom_av_scanned_on="2026-08-15 00:00:00",
+			attached_to_doctype="Job Applicant",
+			attached_to_name="APP-1",
+			attached_to_field="resume_attachment",
+			custom_cv_sha256="a" * 64,
+		)
+		fake_db = SimpleNamespace(
+			has_column=Mock(return_value=True),
+			get_value=Mock(return_value=file_record),
+		)
+		with (
+			patch.object(frappe, "session", SimpleNamespace(user="Administrator")),
+			patch.object(frappe, "db", fake_db),
+			patch("hrms.security.candidate_cv._verified_candidate_cv_sha256", return_value="a" * 64),
+		):
+			validate_job_applicant_cv(doc)
+		self.assertEqual(fake_db.get_value.call_args.args[1], "FILE-1")
+		self.assertEqual(doc.custom_cv_sha256, "a" * 64)
 
 	def test_verified_hash_rejects_invalid_pdf_signature(self):
 		content = b"not-a-pdf"

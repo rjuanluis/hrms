@@ -45,9 +45,31 @@ jobs:
           python-version: "3.14"
       - name: Validate Python, JSON, shell and deployment files
         run: |
-          python -m compileall -q hrms deploy/bootstrap_site.py deploy/configure_standard.py
+          python -m compileall -q hrms deploy/bootstrap_site.py deploy/configure_standard.py deploy/ayp_ats_email_bridge.py deploy/test_ayp_ats_email_bridge.py
+          python deploy/test_ayp_ats_email_bridge.py
+          runner_sha=$(sha256sum deploy/ayp_ats_email_bridge.py | cut -d ' ' -f 1)
+          test_sha=$(sha256sum deploy/test_ayp_ats_email_bridge.py | cut -d ' ' -f 1)
+          launcher_sha=$(sha256sum deploy/run_ayp_ats_email_bridge.sh | cut -d ' ' -f 1)
+          runtime_root=$(mktemp -d)
+          AYP_ATS_BRIDGE_INSTALL_DIR="$runtime_root/scripts" \
+            AYP_ATS_BRIDGE_STATE_DIR="$runtime_root/state" \
+            deploy/install_ayp_ats_email_bridge.sh deploy "$runner_sha" "$test_sha" "$launcher_sha"
+          cmp deploy/ayp_ats_email_bridge.py "$runtime_root/scripts/ayp_ats_email_bridge.py"
+          cmp deploy/test_ayp_ats_email_bridge.py "$runtime_root/scripts/test_ayp_ats_email_bridge.py"
+          cmp deploy/run_ayp_ats_email_bridge.sh "$runtime_root/scripts/run_ayp_ats_email_bridge.sh"
+          printf '#!/usr/bin/env bash\nprintf "%%s|%%s|%%s\\n" "$1" "$2" "$3" > "$AYP_ATS_LAUNCHER_CAPTURE"\n' > "$runtime_root/fake-python"
+          chmod 0700 "$runtime_root/fake-python"
+          AYP_ATS_GRAPH_PYTHON="$runtime_root/fake-python" \
+            AYP_ATS_BRIDGE_RUNNER="$runtime_root/scripts/ayp_ats_email_bridge.py" \
+            AYP_ATS_LAUNCHER_CAPTURE="$runtime_root/launcher-capture" \
+            "$runtime_root/scripts/run_ayp_ats_email_bridge.sh"
+          IFS= read -r launcher_capture < "$runtime_root/launcher-capture"
+          test "$launcher_capture" = "$runtime_root/scripts/ayp_ats_email_bridge.py|--limit|10"
+          python hrms/recruitment/test_email_bridge.py
+          python hrms/recruitment/test_talent_pool.py
+          python hrms/recruitment/test_candidate_review_api.py
           python -m json.tool deploy/apps.json >/dev/null
-          bash -n deploy/deploy.sh deploy/host-deploy-wrapper.sh deploy/provision-host.sh deploy/backup.sh
+          bash -n deploy/deploy.sh deploy/host-deploy-wrapper.sh deploy/provision-host.sh deploy/backup.sh deploy/install_ayp_ats_email_bridge.sh deploy/run_ayp_ats_email_bridge.sh
           node --check deploy/easypanel_compose_api.js
           python - <<'PY'
           from pathlib import Path
@@ -369,6 +391,8 @@ jobs:
                   "hrms.recruitment.test_candidate_scoring_domain",
                   "hrms.recruitment.test_interview_decision_domain",
                   "hrms.recruitment.test_talent_pool",
+                  "hrms.recruitment.test_email_bridge",
+                  "hrms.recruitment.test_native_recruitment_setup",
               ):
                   suite.addTests(unittest.defaultTestLoader.loadTestsFromName(test_module))
               result = unittest.TextTestRunner(verbosity=2).run(suite)

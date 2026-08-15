@@ -8,12 +8,15 @@ from frappe import _
 from hrms.recruitment.matching import (
 	DEDUPE_NEW,
 	DEDUPE_REVIEW,
+	EMAIL_RECRUITMENT_SOURCE,
 	candidate_lock_names,
 	choose_profile_match,
+	has_email_recruitment_provenance,
 	names_are_compatible,
 	normalize_email,
 	normalize_phone,
 	requires_name_compatibility,
+	should_enroll_in_talent_pool,
 )
 
 PROFILE_DOCTYPE = "AYP Candidate Profile"
@@ -21,6 +24,24 @@ STATUS_ACTIVE = "Activo"
 LOCK_TIMEOUT_SECONDS = 10
 GLOBAL_CANDIDATE_LOCK = "ayp-candidate-pool-global"
 MAX_PROFILE_REDIRECTS = 20
+EMAIL_PROVENANCE_MARKER_FIELD = "custom_ayp_email_provenance"
+EMAIL_CV_FILE_FIELD = "custom_ayp_email_file_name"
+EMAIL_MESSAGE_KEY_FIELD = "custom_ayp_email_message_id"
+EMAIL_CONSENT_EVIDENCE_FIELD = "custom_ayp_email_consent_evidence_sha256"
+EMAIL_IMMUTABLE_FIELDS = (
+	EMAIL_PROVENANCE_MARKER_FIELD,
+	"job_title",
+	"resume_attachment",
+	"custom_cv_sha256",
+	"custom_privacy_notice_version",
+	EMAIL_CV_FILE_FIELD,
+	EMAIL_MESSAGE_KEY_FIELD,
+	"custom_ayp_email_received_on",
+	"custom_ayp_email_subject",
+	"custom_ayp_email_current_vacancy_consent",
+	"custom_ayp_email_consent_notice_version",
+	EMAIL_CONSENT_EVIDENCE_FIELD,
+)
 
 
 def _release_candidate_locks(lock_names: tuple[str, ...]) -> None:
@@ -170,6 +191,84 @@ def _set_if_supported(doc, fieldname: str, value) -> None:
 		doc.set(fieldname, value)
 
 
+def job_applicant_has_email_provenance(doc) -> bool:
+	return has_email_recruitment_provenance(
+		source=doc.get("source"),
+		email_provenance=bool(doc.get(EMAIL_PROVENANCE_MARKER_FIELD)),
+		email_file_name=doc.get(EMAIL_CV_FILE_FIELD),
+		graph_message_key=doc.get(EMAIL_MESSAGE_KEY_FIELD),
+		consent_evidence_sha256=doc.get(EMAIL_CONSENT_EVIDENCE_FIELD),
+	)
+
+
+def _doc_before_save(doc):
+	getter = getattr(doc, "get_doc_before_save", None)
+	return getter() if callable(getter) and not doc.is_new() else None
+
+
+def validate_email_provenance(doc) -> None:
+	"""Keep email origin and its current-vacancy evidence immutable server-side."""
+
+	previous = _doc_before_save(doc)
+	previous_is_email = bool(previous and job_applicant_has_email_provenance(previous))
+	current_is_email = job_applicant_has_email_provenance(doc)
+	if previous_is_email and previous is not None:
+		if doc.get("source") != EMAIL_RECRUITMENT_SOURCE:
+			frappe.throw(
+				_("La procedencia de una solicitud recibida por correo es inmutable."), frappe.ValidationError
+			)
+		for fieldname in EMAIL_IMMUTABLE_FIELDS:
+			previous_value = previous.get(fieldname)
+			if doc.get(fieldname) != previous_value:
+				frappe.throw(
+					_("La evidencia de procedencia y consentimiento por correo es inmutable."),
+					frappe.ValidationError,
+				)
+		current_is_email = True
+	elif current_is_email and previous:
+		frappe.throw(
+			_("Una solicitud existente no puede convertirse manualmente en una solicitud por correo."),
+			frappe.ValidationError,
+		)
+
+	if not current_is_email:
+		return
+	_set_if_supported(doc, EMAIL_PROVENANCE_MARKER_FIELD, 1)
+	if doc.get("custom_data_processing_consent") in (True, 1, "1"):
+		frappe.throw(
+			_(
+				"Las solicitudes por correo requieren un flujo separado y auditable para futuras oportunidades."
+			),
+			frappe.ValidationError,
+		)
+	_set_if_supported(doc, "custom_candidate_profile", None)
+	_set_if_supported(doc, "custom_dedupe_status", None)
+
+
+def should_link_job_applicant_profile(doc) -> bool:
+	return should_enroll_in_talent_pool(
+		source=doc.get("source"),
+		has_data_processing_consent=bool(doc.get("custom_data_processing_consent")),
+		email_provenance=bool(doc.get(EMAIL_PROVENANCE_MARKER_FIELD)),
+		email_file_name=doc.get(EMAIL_CV_FILE_FIELD),
+		graph_message_key=doc.get(EMAIL_MESSAGE_KEY_FIELD),
+		consent_evidence_sha256=doc.get(EMAIL_CONSENT_EVIDENCE_FIELD),
+	)
+
+
+def validate_email_future_consent(doc) -> None:
+	"""Reject manufactured future-opportunity consent for email applicants."""
+
+	consent_value = doc.get("custom_data_processing_consent")
+	if job_applicant_has_email_provenance(doc) and consent_value in (True, 1, "1"):
+		frappe.throw(
+			_(
+				"Las solicitudes por correo requieren un flujo separado y auditable para futuras oportunidades."
+			),
+			frappe.ValidationError,
+		)
+
+
 def _create_candidate_profile(doc, *, email: str, phone: str, cv_sha256: str, dedupe_status: str) -> str:
 	profile = frappe.get_doc(
 		{
@@ -196,6 +295,8 @@ def link_job_applicant_profile(doc, method=None) -> None:
 	profile flagged for human review rather than risking an incorrect merge.
 	"""
 
+	validate_email_provenance(doc)
+	validate_email_future_consent(doc)
 	if not _job_applicant_has_field(doc, "custom_candidate_profile"):
 		return
 
@@ -210,6 +311,12 @@ def link_job_applicant_profile(doc, method=None) -> None:
 	# test explicitly opts in by setting the field itself.
 	if not frappe.flags.in_test or doc.get("custom_ayp_governed"):
 		_set_if_supported(doc, "custom_ayp_governed", 1)
+	# A sender who emails a CV has applied to this vacancy, but has not consented
+	# to reuse in the broader talent pool. Never trust or retain a supplied link.
+	if not should_link_job_applicant_profile(doc):
+		doc.set("custom_candidate_profile", None)
+		_set_if_supported(doc, "custom_dedupe_status", None)
+		return
 	_acquire_candidate_locks(email=email, phone=phone, cv_sha256=cv_sha256)
 
 	persisted = None if doc.is_new() else _persisted_applicant_for_update(doc.name)
@@ -269,6 +376,7 @@ def backfill_candidate_profiles() -> int:
 	if not frappe.db.exists("DocType", PROFILE_DOCTYPE):
 		frappe.throw(_("AYP Candidate Profile no está disponible; ejecuta bench migrate primero."))
 	required_fields = (
+		EMAIL_PROVENANCE_MARKER_FIELD,
 		"custom_candidate_profile",
 		"custom_normalized_email",
 		"custom_normalized_phone",
@@ -282,6 +390,33 @@ def backfill_candidate_profiles() -> int:
 	updated = 0
 	for applicant_name in frappe.get_all("Job Applicant", pluck="name"):
 		applicant = frappe.get_doc("Job Applicant", applicant_name)
+		if job_applicant_has_email_provenance(applicant):
+			stale_profile = applicant.get("custom_candidate_profile")
+			if stale_profile and frappe.db.exists(PROFILE_DOCTYPE, stale_profile):
+				linked_count = frappe.db.count("Job Applicant", {"custom_candidate_profile": stale_profile})
+				if linked_count != 1:
+					frappe.throw(
+						_(
+							"Un perfil compartido contiene procedencia de correo; requiere remediación manual antes de continuar."
+						),
+						frappe.ValidationError,
+					)
+			frappe.db.set_value(
+				"Job Applicant",
+				applicant.name,
+				{
+					"source": EMAIL_RECRUITMENT_SOURCE,
+					EMAIL_PROVENANCE_MARKER_FIELD: 1,
+					"custom_data_processing_consent": 0,
+					"custom_candidate_profile": None,
+					"custom_dedupe_status": None,
+				},
+				update_modified=False,
+			)
+			if stale_profile and frappe.db.exists(PROFILE_DOCTYPE, stale_profile):
+				frappe.delete_doc(PROFILE_DOCTYPE, stale_profile, ignore_permissions=True)
+			updated += 1
+			continue
 		if applicant.get("custom_candidate_profile"):
 			continue
 		if applicant.resume_attachment and frappe.db.has_column("File", "custom_cv_sha256"):
@@ -293,6 +428,20 @@ def backfill_candidate_profiles() -> int:
 		if applicant.resume_attachment and not applicant.custom_cv_sha256:
 			applicant.custom_dedupe_status = DEDUPE_REVIEW
 		profile_name = applicant.get("custom_candidate_profile")
+		if not profile_name and not should_link_job_applicant_profile(applicant):
+			frappe.db.set_value(
+				"Job Applicant",
+				applicant.name,
+				{
+					"custom_candidate_profile": None,
+					"custom_normalized_email": applicant.custom_normalized_email,
+					"custom_normalized_phone": applicant.custom_normalized_phone,
+					"custom_dedupe_status": None,
+					"custom_ayp_governed": 1,
+				},
+				update_modified=False,
+			)
+			continue
 		if not profile_name:
 			frappe.throw(_("No se pudo crear el perfil canónico para {0}.").format(applicant.name))
 		frappe.db.set_value(

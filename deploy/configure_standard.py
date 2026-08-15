@@ -9,13 +9,16 @@ from pathlib import Path
 import frappe
 from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
 from frappe.desk.page.setup_wizard.setup_wizard import setup_complete
+from frappe.model.naming import parse_naming_series
 from frappe.translate import set_default_language
 
+from hrms.recruitment.matching import EMAIL_RECRUITMENT_SOURCE
 from hrms.recruitment.talent_pool import backfill_candidate_profiles
 
 SITE = os.environ.get("AYP_SITE_NAME", "hr.aroypedal.com")
 COMPANY = "ARO Y PEDAL SRL"
 RECRUITMENT_JOB_OPENING = "HR-OPN-2026-0001"
+RECRUITMENT_JOB_OPENING_SERIES = "HR-OPN-.YYYY.-.####"
 RECRUITMENT_JOB_TITLE = "Asesor Venta Online"
 RECRUITMENT_MAILBOX = "empleos@aroypedal.com"
 TAX_ID = "101-57005-9"
@@ -320,6 +323,7 @@ def ensure_recruitment_security_fields() -> None:
 					"label": "Consentimiento para tratamiento de datos",
 					"fieldtype": "Check",
 					"default": "0",
+					"read_only_depends_on": "eval:doc.custom_ayp_email_provenance || doc.source=='Email Recursos Humanos'",
 					"insert_after": "upper_range",
 				},
 				{
@@ -371,10 +375,97 @@ def ensure_recruitment_security_fields() -> None:
 					"hidden": 1,
 					"insert_after": "custom_normalized_email",
 				},
+				{
+					"fieldname": "custom_ayp_email_provenance",
+					"label": "Procedencia inmutable de correo RRHH",
+					"fieldtype": "Check",
+					"default": "0",
+					"read_only": 1,
+					"hidden": 1,
+					"no_copy": 1,
+					"insert_after": "custom_privacy_notice_version",
+				},
+				{
+					"fieldname": "custom_ayp_email_file_name",
+					"label": "Archivo CV exacto de correo RRHH",
+					"fieldtype": "Data",
+					"length": 140,
+					"read_only": 1,
+					"hidden": 1,
+					"no_copy": 1,
+					"insert_after": "custom_ayp_email_provenance",
+				},
+				{
+					"fieldname": "custom_ayp_email_message_id",
+					"label": "Identificador de mensaje de RRHH",
+					"fieldtype": "Data",
+					"unique": 1,
+					"read_only": 1,
+					"hidden": 1,
+					"no_copy": 1,
+					"insert_after": "custom_ayp_email_provenance",
+				},
+				{
+					"fieldname": "custom_ayp_email_received_on",
+					"label": "Correo de RRHH recibido el",
+					"fieldtype": "Datetime",
+					"read_only": 1,
+					"hidden": 1,
+					"no_copy": 1,
+					"insert_after": "custom_ayp_email_message_id",
+				},
+				{
+					"fieldname": "custom_ayp_email_subject",
+					"label": "Asunto del correo de RRHH",
+					"fieldtype": "Data",
+					"length": 140,
+					"read_only": 1,
+					"hidden": 1,
+					"no_copy": 1,
+					"insert_after": "custom_ayp_email_received_on",
+				},
+				{
+					"fieldname": "custom_ayp_email_current_vacancy_consent",
+					"label": "Consentimiento por correo para vacante actual",
+					"fieldtype": "Check",
+					"default": "0",
+					"read_only": 1,
+					"hidden": 1,
+					"no_copy": 1,
+					"insert_after": "custom_ayp_email_subject",
+				},
+				{
+					"fieldname": "custom_ayp_email_consent_notice_version",
+					"label": "Versión del consentimiento por correo",
+					"fieldtype": "Data",
+					"length": 140,
+					"read_only": 1,
+					"hidden": 1,
+					"no_copy": 1,
+					"insert_after": "custom_ayp_email_current_vacancy_consent",
+				},
+				{
+					"fieldname": "custom_ayp_email_consent_evidence_sha256",
+					"label": "Huella de evidencia del consentimiento por correo",
+					"fieldtype": "Data",
+					"length": 64,
+					"read_only": 1,
+					"hidden": 1,
+					"no_copy": 1,
+					"insert_after": "custom_ayp_email_consent_notice_version",
+				},
 			],
 		},
 		update=True,
 	)
+
+
+def ensure_recruitment_email_source() -> str:
+	if not frappe.db.exists("Job Applicant Source", EMAIL_RECRUITMENT_SOURCE):
+		frappe.get_doc({"doctype": "Job Applicant Source", "source_name": EMAIL_RECRUITMENT_SOURCE}).insert(
+			ignore_permissions=True
+		)
+	return EMAIL_RECRUITMENT_SOURCE
 
 
 def ensure_recruitment_web_form() -> tuple[str, list[str]]:
@@ -541,12 +632,6 @@ def ensure_native_recruitment_job_opening() -> str:
 		"job_application_route": RECRUITMENT_WEB_FORM_ROUTE,
 	}
 	opening_name = frappe.db.exists("Job Opening", RECRUITMENT_JOB_OPENING)
-	if not opening_name:
-		opening_name = frappe.db.get_value(
-			"Job Opening",
-			{"job_title": RECRUITMENT_JOB_TITLE, "company": COMPANY},
-			"name",
-		)
 	if opening_name:
 		opening = frappe.get_doc("Job Opening", opening_name)
 		opening.update(values)
@@ -560,16 +645,26 @@ def ensure_native_recruitment_job_opening() -> str:
 				"publish": 0,
 			}
 		)
-		opening.insert(ignore_permissions=True)
+		autoname = frappe.get_meta("Job Opening").autoname
+		if autoname != RECRUITMENT_JOB_OPENING_SERIES:
+			raise RuntimeError(f"Unexpected Job Opening naming series: {autoname}")
+		generated_name = parse_naming_series(autoname, doctype="Job Opening", doc=opening)
+		if generated_name != RECRUITMENT_JOB_OPENING:
+			raise RuntimeError(
+				f"Expected next Job Opening name {RECRUITMENT_JOB_OPENING}; generated {generated_name}"
+			)
+		opening.insert(ignore_permissions=True, set_name=generated_name)
 
 	opening.reload()
+	if opening.name != RECRUITMENT_JOB_OPENING:
+		raise RuntimeError(f"Expected exact Job Opening {RECRUITMENT_JOB_OPENING}; found {opening.name}")
 	if any(opening.get(fieldname) != value for fieldname, value in values.items()):
 		raise RuntimeError(f"Job Opening {opening.name} did not persist as configured")
 	return opening.name
 
 
 def configure_native_recruitment_mailbox() -> list[str]:
-	"""Use Frappe's native Email Account → Job Applicant integration."""
+	"""Disable Frappe POP/IMAP intake; Graph is the only authorized email path."""
 
 	account_names = frappe.get_all(
 		"Email Account",
@@ -578,18 +673,12 @@ def configure_native_recruitment_mailbox() -> list[str]:
 	)
 	for account_name in account_names:
 		account = frappe.get_doc("Email Account", account_name)
+		account.enable_incoming = 0
 		account.enable_auto_reply = 0
-		account.append_to = "Job Applicant"
-		if account.use_imap:
-			inbox_folders = [
-				folder
-				for folder in account.imap_folder
-				if (folder.folder_name or "").strip().casefold() == "inbox"
-			]
-			if not inbox_folders:
-				raise RuntimeError(f"Email Account {account.name} has no configured IMAP Inbox folder")
-			for folder in inbox_folders:
-				folder.append_to = "Job Applicant"
+		account.append_to = None
+		for folder in account.get("imap_folder") or []:
+			if (folder.append_to or "").strip() == "Job Applicant":
+				folder.append_to = None
 		account.save(ignore_permissions=True)
 	return account_names
 
@@ -639,6 +728,7 @@ def main() -> None:
 		departments = ensure_departments()
 		leave_period = ensure_active_leave_period()
 		ensure_recruitment_security_fields()
+		recruitment_email_source = ensure_recruitment_email_source()
 		candidate_profiles_backfilled = backfill_candidate_profiles()
 		recruitment_web_form, retired_recruitment_web_forms = ensure_recruitment_web_form()
 		recruitment_job_opening = ensure_native_recruitment_job_opening()
@@ -661,6 +751,7 @@ def main() -> None:
 				"leave_period": leave_period,
 				"recruitment_web_form": recruitment_web_form,
 				"recruitment_job_opening": recruitment_job_opening,
+				"recruitment_email_source": recruitment_email_source,
 				"recruitment_email_accounts": recruitment_email_accounts,
 				"retired_recruitment_web_forms": retired_recruitment_web_forms,
 				"candidate_profiles_backfilled": candidate_profiles_backfilled,

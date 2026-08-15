@@ -9,7 +9,7 @@ import unittest
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from hrms.recruitment import candidate_document_service
 from hrms.recruitment.candidate_document_processing import (
@@ -31,7 +31,15 @@ class FakeMeta:
 
 
 class FakeApplicant:
-	def __init__(self, *, attachment="", sha256="", status="Sin CV", previous=None):
+	def __init__(
+		self,
+		*,
+		attachment="",
+		sha256="",
+		status="Sin CV",
+		previous=None,
+		email_provenance=False,
+	):
 		self.meta = FakeMeta()
 		self.resume_attachment = attachment
 		self.custom_cv_sha256 = sha256
@@ -54,6 +62,11 @@ class FakeApplicant:
 		self.custom_candidate_scorecard = "SCORE-1"
 		self.custom_candidate_scored_on = "old-score-date"
 		self.custom_cv_processor_version = "old-version"
+		self.source = "Referral"
+		self.custom_ayp_email_provenance = int(email_provenance)
+		self.custom_ayp_email_file_name = "FILE-EMAIL" if email_provenance else ""
+		self.custom_ayp_email_message_id = "message-key" if email_provenance else ""
+		self.custom_ayp_email_consent_evidence_sha256 = "evidence" if email_provenance else ""
 		self._previous = previous
 
 	def get(self, key):
@@ -103,6 +116,11 @@ class TestCandidateDocumentProcessing(unittest.TestCase):
 			file_name="cv.pdf",
 			is_private=1,
 			custom_av_scan_status="Clean",
+			custom_av_scan_engine="ClamAV",
+			custom_av_scanned_on="2026-08-15 12:00:00",
+			attached_to_doctype="Job Applicant",
+			attached_to_name=applicant.name,
+			attached_to_field="resume_attachment",
 			custom_cv_sha256=digest,
 			get_content=lambda: raw.decode("latin-1"),
 		)
@@ -124,6 +142,8 @@ class TestCandidateDocumentProcessing(unittest.TestCase):
 		source = inspect.getsource(candidate_document_service._load_exact_cv)
 		self.assertIn("attached_to_doctype = 'Job Applicant'", source)
 		self.assertIn("attached_to_name = %s", source)
+		self.assertIn("attached_to_field = 'resume_attachment'", source)
+		self.assertIn("exact_file_name", source)
 		self.assertIn("FOR UPDATE", source)
 		self.assertIn('frappe.get_doc("File", file_name, for_update=True)', source)
 
@@ -168,6 +188,52 @@ class TestCandidateDocumentProcessing(unittest.TestCase):
 		self.assertIn("deduplicate=True", callback_source)
 		self.assertNotIn("enqueue_after_commit=True", callback_source)
 
+	def test_email_source_never_registers_post_commit_enqueue(self):
+		doc = SimpleNamespace(
+			resume_attachment="/private/files/cv.pdf",
+			get=lambda key: {
+				"source": candidate_document_service.EMAIL_RECRUITMENT_SOURCE,
+				"custom_cv_processing_status": "Pendiente",
+				"custom_cv_sha256": "a" * 64,
+			}.get(key),
+		)
+		add = MagicMock()
+		fake_db = SimpleNamespace(after_commit=SimpleNamespace(add=add))
+		with patch.object(candidate_document_service.frappe, "db", fake_db):
+			candidate_document_service.enqueue_candidate_document(doc)
+		add.assert_not_called()
+
+	def test_email_marker_with_mutated_source_never_registers_post_commit_enqueue(self):
+		doc = SimpleNamespace(
+			resume_attachment="/private/files/cv.pdf",
+			get=lambda key: {
+				"source": "Referral",
+				"custom_ayp_email_provenance": 1,
+				"custom_ayp_email_message_id": "a" * 64,
+				"custom_ayp_email_consent_evidence_sha256": "b" * 64,
+				"custom_cv_processing_status": "Pendiente",
+				"custom_cv_sha256": "c" * 64,
+			}.get(key),
+		)
+		add = MagicMock()
+		fake_db = SimpleNamespace(after_commit=SimpleNamespace(add=add))
+		with patch.object(candidate_document_service.frappe, "db", fake_db):
+			candidate_document_service.enqueue_candidate_document(doc)
+		add.assert_not_called()
+
+	def test_email_attachment_is_never_initialized_as_pending(self):
+		doc = FakeApplicant(
+			attachment="/private/files/cv.pdf",
+			sha256="a" * 64,
+			status="",
+			email_provenance=True,
+		)
+		with patch.object(candidate_document_service, "now_datetime", return_value="2026-08-15 12:00:00"):
+			prepare_candidate_document_state(doc)
+		self.assertEqual(doc.custom_cv_processing_status, "Revisión manual")
+		self.assertEqual(doc.custom_cv_processed_sha256, "a" * 64)
+		self.assertFalse(doc.custom_cv_processing_queued_on)
+
 	def test_late_worker_persistence_requires_processing_claim(self):
 		source = inspect.getsource(candidate_document_service._persist_result)
 		self.assertIn('custom_cv_processing_status != "Procesando"', source)
@@ -182,6 +248,37 @@ class TestCandidateDocumentProcessing(unittest.TestCase):
 		self.assertIn("custom_cv_processing_queued_on", source)
 		self.assertIn('"custom_cv_processing_claim": ""', source)
 		self.assertIn("_enqueue_candidate_document_job", source)
+
+	def test_recovery_skips_source_tampered_email_row_without_reset_or_callback(self):
+		row = SimpleNamespace(
+			name="APP-EMAIL",
+			source="Referral",
+			custom_cv_sha256="a" * 64,
+			custom_ayp_email_provenance=1,
+			custom_ayp_email_file_name="FILE-EMAIL",
+			custom_ayp_email_message_id="message-key",
+			custom_ayp_email_consent_evidence_sha256="evidence",
+		)
+		add = MagicMock()
+		fake_db = SimpleNamespace(
+			sql=MagicMock(return_value=[row]),
+			set_value=MagicMock(),
+			after_commit=SimpleNamespace(add=add),
+		)
+		with (
+			patch.object(candidate_document_service, "_has_processing_fields", return_value=True),
+			patch.object(
+				candidate_document_service,
+				"_installed_email_provenance_fields",
+				return_value=list(candidate_document_service.EMAIL_PROVENANCE_FIELDS),
+			),
+			patch.object(candidate_document_service.frappe, "db", fake_db),
+		):
+			recovered = candidate_document_service.recover_stale_candidate_document_jobs()
+
+		self.assertEqual(recovered, 0)
+		fake_db.set_value.assert_not_called()
+		add.assert_not_called()
 
 	def test_locked_applicant_reloads_authoritatively(self):
 		root = Path(__file__).resolve().parents[2]

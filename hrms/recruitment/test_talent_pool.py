@@ -7,26 +7,32 @@ if __package__:
 		DEDUPE_MATCHED,
 		DEDUPE_NEW,
 		DEDUPE_REVIEW,
+		EMAIL_RECRUITMENT_SOURCE,
 		candidate_lock_names,
 		choose_profile_match,
+		has_email_recruitment_provenance,
 		names_are_compatible,
 		normalize_email,
 		normalize_name,
 		normalize_phone,
 		requires_name_compatibility,
+		should_enroll_in_talent_pool,
 	)
 else:
 	from matching import (
 		DEDUPE_MATCHED,
 		DEDUPE_NEW,
 		DEDUPE_REVIEW,
+		EMAIL_RECRUITMENT_SOURCE,
 		candidate_lock_names,
 		choose_profile_match,
+		has_email_recruitment_provenance,
 		names_are_compatible,
 		normalize_email,
 		normalize_name,
 		normalize_phone,
 		requires_name_compatibility,
+		should_enroll_in_talent_pool,
 	)
 
 
@@ -106,6 +112,58 @@ class TestTalentPoolMatching(unittest.TestCase):
 
 	def test_multiple_matching_signals_do_not_require_name_gate(self):
 		self.assertFalse(requires_name_compatibility(["email", "cv"]))
+
+	def test_email_without_consent_stays_out_of_talent_pool(self):
+		self.assertFalse(
+			should_enroll_in_talent_pool(
+				source=EMAIL_RECRUITMENT_SOURCE,
+				has_data_processing_consent=False,
+			)
+		)
+
+	def test_web_form_behavior_is_unchanged_but_email_checkbox_cannot_enroll(self):
+		self.assertTrue(should_enroll_in_talent_pool(source=None, has_data_processing_consent=True))
+		self.assertFalse(should_enroll_in_talent_pool(source=None, has_data_processing_consent=False))
+		self.assertFalse(
+			should_enroll_in_talent_pool(
+				source=EMAIL_RECRUITMENT_SOURCE,
+				has_data_processing_consent=True,
+			)
+		)
+
+	def test_exact_email_file_name_alone_preserves_provenance(self):
+		self.assertTrue(
+			has_email_recruitment_provenance(
+				source="Referral",
+				email_file_name="FILE-0001",
+			)
+		)
+		self.assertFalse(
+			should_enroll_in_talent_pool(
+				source="Referral",
+				has_data_processing_consent=True,
+				email_file_name="FILE-0001",
+			)
+		)
+
+	def test_email_provenance_survives_mutated_source(self):
+		self.assertTrue(
+			has_email_recruitment_provenance(
+				source="Referral",
+				email_provenance=True,
+				graph_message_key="a" * 64,
+				consent_evidence_sha256="b" * 64,
+			)
+		)
+		self.assertFalse(
+			should_enroll_in_talent_pool(
+				source="Referral",
+				has_data_processing_consent=False,
+				email_provenance=True,
+				graph_message_key="a" * 64,
+				consent_evidence_sha256="b" * 64,
+			)
+		)
 
 
 if __name__ == "__main__":

@@ -164,14 +164,14 @@ class TestCandidateReviewSecurityContract(unittest.TestCase):
 			self.assertEqual(prefix, '@frappe.whitelist(methods=["POST"])')
 		self.assertIn('frappe.has_permission("Interview", "read", interview, throw=True)', controller)
 
-	def test_fresh_site_patch_creates_governance_column_before_profile_backfill(self):
+	def test_fresh_site_patch_creates_required_columns_before_profile_backfill(self):
 		patch = (ROOT / "hrms" / "patches" / "v16_0" / "create_ayp_candidate_profiles.py").read_text(
 			encoding="utf-8"
 		)
-		self.assertIn('"fieldname": "custom_ayp_governed"', patch)
-		self.assertLess(
-			patch.index('"fieldname": "custom_ayp_governed"'), patch.index("backfill_candidate_profiles()")
-		)
+		for fieldname in ("custom_ayp_governed", "custom_ayp_email_provenance"):
+			field_definition = f'"fieldname": "{fieldname}"'
+			self.assertIn(field_definition, patch)
+			self.assertLess(patch.index(field_definition), patch.index("backfill_candidate_profiles()"))
 
 	def test_frozen_cohort_and_durable_merge_have_schema_support(self):
 		run = json.loads(
@@ -233,6 +233,31 @@ class TestCandidateReviewSecurityContract(unittest.TestCase):
 		hooks = (ROOT / "hrms" / "hooks.py").read_text(encoding="utf-8")
 		self.assertIn("validate_ayp_interview_cancellation", hooks)
 		self.assertIn("validate_ayp_feedback_cancellation", hooks)
+
+	def test_application_received_notification_excludes_email_intake(self):
+		notification = json.loads(
+			(
+				ROOT
+				/ "hrms"
+				/ "hr"
+				/ "notification"
+				/ "ayp_candidate_application_received"
+				/ "ayp_candidate_application_received.json"
+			).read_text(encoding="utf-8")
+		)
+		self.assertIn("doc.source != 'Email Recursos Humanos'", notification["condition"])
+		self.assertIn("not doc.get('custom_ayp_email_provenance')", notification["condition"])
+		self.assertIn("not doc.get('custom_ayp_email_file_name')", notification["condition"])
+		self.assertIn("not doc.get('custom_ayp_email_message_id')", notification["condition"])
+		self.assertIn("not doc.get('custom_ayp_email_consent_evidence_sha256')", notification["condition"])
+
+	def test_native_recruitment_mailbox_is_authoritatively_disabled(self):
+		setup_source = (ROOT / "deploy" / "configure_standard.py").read_text(encoding="utf-8")
+		self.assertIn("account.enable_incoming = 0", setup_source)
+		self.assertIn("account.enable_auto_reply = 0", setup_source)
+		self.assertIn("account.append_to = None", setup_source)
+		self.assertNotIn('account.append_to = "Job Applicant"', setup_source)
+		self.assertNotIn('folder.append_to = "Job Applicant"', setup_source)
 
 
 if __name__ == "__main__":

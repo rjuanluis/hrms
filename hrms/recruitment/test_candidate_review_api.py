@@ -78,6 +78,7 @@ class FakeDoc:
 		self.status = status
 		self.job_title = job_title
 		self.custom_candidate_profile = candidate_profile
+		self.source = "Sitio web"
 		self.saved = 0
 		self.comments = []
 		self.db_sets = []
@@ -87,6 +88,9 @@ class FakeDoc:
 		self.custom_cv_sha256 = ""
 		self.custom_cv_processing_status = "Verificado manualmente"
 		self.custom_privacy_notice_version = "v1"
+		self.custom_ayp_email_provenance = 0
+		self.custom_ayp_email_message_id = ""
+		self.custom_ayp_email_consent_evidence_sha256 = ""
 
 	def get(self, key, default=None):
 		return getattr(self, key, default)
@@ -627,6 +631,68 @@ class TestCandidateReviewAPI(unittest.TestCase):
 		self.assertEqual(result["talent_pool_status"], "Prioritario")
 		self.assertEqual(profile.saved, 1)
 		self.assertEqual(self.frappe.events[-1][0]["action"], "Decisión Talent Pool")
+
+	def test_email_applicant_cannot_be_promoted_to_future_talent_pool_without_separate_consent_flow(self):
+		applicant = FakeDoc("A", "Rejected", "JOB-1", "PROFILE-A")
+		applicant.source = "Email Recursos Humanos"
+		profile = FakeProfile("PROFILE-A")
+		self.frappe.docs = {"A": applicant, "PROFILE-A": profile}
+		with self.assertRaisesRegex(FakeValidationError, "flujo separado de consentimiento"):
+			self.api.update_candidate_profile(
+				"A",
+				"priority",
+				"Perfil relevante para futuras vacantes similares verificadas.",
+			)
+		self.assertEqual(profile.saved, 0)
+
+	def test_mutated_source_with_email_marker_still_cannot_be_promoted(self):
+		applicant = FakeDoc("A", "Rejected", "JOB-1", "PROFILE-A")
+		applicant.source = "Referral"
+		applicant.custom_ayp_email_provenance = 1
+		applicant.custom_ayp_email_message_id = "a" * 64
+		profile = FakeProfile("PROFILE-A")
+		self.frappe.docs = {"A": applicant, "PROFILE-A": profile}
+		with self.assertRaisesRegex(FakeValidationError, "flujo separado de consentimiento"):
+			self.api.update_candidate_profile(
+				"A",
+				"priority",
+				"Intento con procedencia mutada que debe permanecer bloqueado.",
+			)
+		self.assertEqual(profile.saved, 0)
+
+	def test_email_marker_blocks_identity_split(self):
+		applicant = FakeDoc("A", "Open", "JOB-1", "PROFILE-A")
+		applicant.source = "Referral"
+		applicant.custom_ayp_email_provenance = 1
+		profile = FakeProfile("PROFILE-A")
+		self.frappe.docs = {"A": applicant, "PROFILE-A": profile}
+		with self.assertRaisesRegex(FakeValidationError, "flujo separado de consentimiento"):
+			self.api.resolve_candidate_identity(
+				"A", "split", None, "Intento de separar una identidad originada por correo."
+			)
+
+	def test_identity_merge_cannot_drag_linked_email_applicant(self):
+		applicant = FakeDoc("A", "Open", "JOB-1", "PROFILE-A")
+		linked_email = FakeDoc("B", "Hold", "JOB-2", "PROFILE-A")
+		linked_email.source = "Referral"
+		linked_email.custom_ayp_email_provenance = 1
+		source = FakeProfile("PROFILE-A")
+		target = FakeProfile("PROFILE-B")
+		self.frappe.docs = {
+			"A": applicant,
+			"B": linked_email,
+			"PROFILE-A": source,
+			"PROFILE-B": target,
+		}
+		preview = self.api._identity_preview_payload(applicant, source, target, "merge", ["A", "B"])
+		with self.assertRaisesRegex(FakeValidationError, "flujo separado de consentimiento"):
+			self.api.resolve_candidate_identity(
+				"A",
+				"merge",
+				"PROFILE-B",
+				"Intento de fusionar un perfil que contiene procedencia de correo.",
+				preview["binding"],
+			)
 
 	def test_identity_split_creates_new_profile_and_relinks_only_selected_application(self):
 		applicant = FakeDoc("A", "Open", "JOB-1", "PROFILE-A")
