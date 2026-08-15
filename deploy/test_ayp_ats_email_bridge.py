@@ -256,7 +256,7 @@ class TestAyPEmailBridge(unittest.TestCase):
 			)
 		self.assertEqual(result["blocked"], 1)
 		self.assertEqual(result["errors"][0]["code"], "blocked_missing_authoritative_vacancy")
-		self.assertFalse(any("/attachments?" in call[2] for call in graph.calls))
+		self.assertFalse(any(call[2].split("?", 1)[0].endswith("/attachments") for call in graph.calls))
 		remote.assert_not_called()
 
 	def test_embedded_vacancy_token_does_not_count_as_authoritative(self):
