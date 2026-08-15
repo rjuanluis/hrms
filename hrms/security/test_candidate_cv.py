@@ -431,7 +431,7 @@ class TestCandidateCVSecurity(unittest.TestCase):
 			custom_cv_sha256="a" * 64,
 		)
 		with (
-			patch.object(frappe.session, "user", "Administrator"),
+			patch.object(frappe, "session", SimpleNamespace(user="Administrator")),
 			patch.object(frappe.db, "has_column", return_value=True),
 			patch.object(frappe.db, "get_value", return_value=file_record) as get_value,
 			patch("hrms.security.candidate_cv._verified_candidate_cv_sha256", return_value="a" * 64),
