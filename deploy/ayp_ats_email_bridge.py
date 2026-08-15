@@ -347,10 +347,11 @@ def _has_authoritative_vacancy(message: dict[str, Any]) -> bool:
 def _fetch_attachments(request_graph: Callable[..., Any], graph_id: str) -> list[dict[str, Any]]:
 	mailbox = quote(MAILBOX, safe="@")
 	message_id = quote(graph_id, safe="")
-	select = "id,name,contentType,size,isInline,contentBytes"
-	url = (
-		f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments?$select={select}"
-	)
+	# `attachments` is a heterogeneous base collection. Exchange rejects a
+	# collection-level `$select=contentBytes` because that property belongs only
+	# to fileAttachment. The unfiltered endpoint returns the derived resource,
+	# including contentBytes, as documented by Microsoft Graph.
+	url = f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments"
 	response = _graph_get(request_graph, url)
 	if response.get("@odata.nextLink"):
 		raise BridgeError("graph_attachment_list_paginated")
