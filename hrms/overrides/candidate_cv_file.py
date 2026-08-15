@@ -1,4 +1,4 @@
-from frappe.core.doctype.file.file import File
+from frappe.model.document import Document
 
 from hrms.security.candidate_cv import (
 	prevent_candidate_cv_file_deletion,
@@ -6,7 +6,7 @@ from hrms.security.candidate_cv import (
 )
 
 
-class CandidateCVFile(File):
+class CandidateCVFileMixin(Document):
 	"""Run candidate-CV guards before Frappe mutates or deletes file bytes."""
 
 	def validate(self):

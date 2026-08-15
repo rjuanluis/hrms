@@ -153,10 +153,13 @@ has_upload_permission = {"Employee": "erpnext.setup.doctype.employee.employee.ha
 
 override_doctype_class = {
 	"Employee": "hrms.overrides.employee_master.EmployeeMaster",
-	"File": "hrms.overrides.candidate_cv_file.CandidateCVFile",
 	"Timesheet": "hrms.overrides.employee_timesheet.EmployeeTimesheet",
 	"Payment Entry": "hrms.overrides.employee_payment_entry.EmployeePaymentEntry",
 	"Project": "hrms.overrides.employee_project.EmployeeProject",
+}
+
+extend_doctype_class = {
+	"File": ["hrms.overrides.candidate_cv_file.CandidateCVFileMixin"],
 }
 
 # Document Events
