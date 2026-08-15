@@ -245,6 +245,28 @@ class TestCandidateCVSecurity(unittest.TestCase):
 			validate_candidate_cv_file_evidence(current)
 		exists.assert_called_once()
 
+	def test_unbound_alias_cannot_first_change_hash_shared_with_bound_candidate_cv(self):
+		previous = frappe._dict(
+			name="FILE-ALIAS",
+			content_hash="governed-md5",
+			file_url="/private/files/cv.pdf",
+			is_private=1,
+			attached_to_doctype=None,
+			attached_to_name=None,
+			attached_to_field=None,
+		)
+		current = frappe._dict(previous)
+		current.content_hash = "attacker-controlled-md5"
+		current.is_new = lambda: False
+		current.get_doc_before_save = lambda: previous
+		exists = Mock(side_effect=lambda doctype, filters: filters["content_hash"] == "governed-md5")
+		with (
+			patch.object(frappe, "db", SimpleNamespace(exists=exists)),
+			self.assertRaises(CandidateCVSecurityError),
+		):
+			validate_candidate_cv_file_evidence(current)
+		self.assertTrue(any(call.args[1]["content_hash"] == "governed-md5" for call in exists.call_args_list))
+
 	def setUp(self):
 		frappe.local.form_dict = frappe._dict()
 		frappe.local.session = frappe._dict(user="Guest")
