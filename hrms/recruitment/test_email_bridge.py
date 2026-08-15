@@ -88,9 +88,11 @@ class FakeDB:
 			raise AssertionError(f"Unexpected SQL: {query}")
 		self.owner.locking_reads += 1
 		if "FROM `tabJob Applicant`" in query:
+			self.owner.locking_read_tables.append("Job Applicant")
 			row = self.owner.applicants_by_message.get(params[0])
 			return [row] if row else []
 		if "FROM `tabFile`" in query:
+			self.owner.locking_read_tables.append("File")
 			file_doc = self.owner.files_by_name.get(params[0])
 			return [FakeRow(vars(file_doc))] if file_doc else []
 		raise AssertionError(f"Unexpected SQL: {query}")
@@ -174,6 +176,7 @@ class FakeFrappe(types.ModuleType):
 		self.fail_applicant_insert = False
 		self.duplicate_winner_on_insert = False
 		self.locking_reads = 0
+		self.locking_read_tables = []
 
 	def _(self, text):
 		return text
@@ -386,12 +389,14 @@ class TestEmailBridge(unittest.TestCase):
 
 	def test_exact_duplicate_returns_existing_without_new_file_or_applicant(self):
 		first = self.bridge.ingest_email_payload(email_payload())
+		self.frappe.locking_read_tables.clear()
 		second = self.bridge.ingest_email_payload(email_payload())
 
 		self.assertEqual(first["job_applicant"], second["job_applicant"])
 		self.assertEqual(second["status"], "already_processed")
 		self.assertEqual(len(self.frappe.saved_files), 1)
 		self.assertEqual(len(self.frappe.inserted_applicants), 1)
+		self.assertEqual(self.frappe.locking_read_tables, ["Job Applicant", "File"])
 
 	def test_duplicate_fails_closed_when_exact_file_is_missing(self):
 		self.bridge.ingest_email_payload(email_payload())
@@ -420,7 +425,11 @@ class TestEmailBridge(unittest.TestCase):
 		)
 		self.assertEqual(self.frappe.deleted_files, [])
 		self.assertEqual(self.frappe.direct_db_deletes, [("File", "FILE-1")])
-		self.assertEqual(self.frappe.locking_reads, 2)
+		self.assertEqual(self.frappe.locking_reads, 3)
+		self.assertEqual(
+			self.frappe.locking_read_tables,
+			["Job Applicant", "Job Applicant", "File"],
+		)
 		self.assertIn("FILE-WINNER", self.frappe.files_by_name)
 
 	def test_duplicate_message_key_with_changed_payload_fails_closed(self):

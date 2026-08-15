@@ -11,6 +11,7 @@ from hrms.recruitment.matching import (
 	normalize_email,
 	normalize_phone,
 )
+from hrms.recruitment.talent_pool import validate_email_provenance
 
 EMAIL_CONSENT_FIELD = {
 	"Job Applicant": [
@@ -106,6 +107,34 @@ class TestTalentPoolLifecycle(UnitTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			applicant.save(ignore_permissions=True)
 		self.assertEqual(frappe.db.count("AYP Candidate Profile"), profile_count)
+
+	def test_email_cv_reference_and_digest_are_server_immutable(self):
+		class SavedApplicant(frappe._dict):
+			def is_new(self):
+				return False
+
+			def get_doc_before_save(self):
+				return self.previous
+
+		previous = frappe._dict(
+			source=EMAIL_RECRUITMENT_SOURCE,
+			custom_ayp_email_provenance=1,
+			custom_ayp_email_file_name="FILE-1",
+			custom_ayp_email_message_id="a" * 64,
+			custom_ayp_email_consent_evidence_sha256="b" * 64,
+			resume_attachment="/private/files/cv.pdf",
+			custom_cv_sha256="c" * 64,
+			custom_data_processing_consent=0,
+		)
+		for fieldname, changed_value in (
+			("resume_attachment", "/private/files/replacement.pdf"),
+			("custom_cv_sha256", "d" * 64),
+		):
+			current = SavedApplicant(previous.copy())
+			current.previous = previous
+			current[fieldname] = changed_value
+			with self.subTest(fieldname=fieldname), self.assertRaises(frappe.ValidationError):
+				validate_email_provenance(current)
 
 	def test_identity_change_keeps_profile_and_marks_review(self):
 		token = uuid4().hex

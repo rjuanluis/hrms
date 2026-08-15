@@ -31,6 +31,8 @@ EMAIL_CONSENT_EVIDENCE_FIELD = "custom_ayp_email_consent_evidence_sha256"
 EMAIL_IMMUTABLE_FIELDS = (
 	EMAIL_PROVENANCE_MARKER_FIELD,
 	"job_title",
+	"resume_attachment",
+	"custom_cv_sha256",
 	"custom_privacy_notice_version",
 	EMAIL_CV_FILE_FIELD,
 	EMAIL_MESSAGE_KEY_FIELD,

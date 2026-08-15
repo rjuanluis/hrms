@@ -396,7 +396,10 @@ def ingest_email_payload(payload: dict) -> dict:
 	filename, content, attachment_sha256 = _attachment(payload)
 	job_opening = _job_opening()
 
-	existing = _existing_applicant(message_key)
+	# Lock and reload the authoritative applicant before locking its exact File.
+	# Otherwise a concurrent save can change the evidence tuple between the
+	# initial lookup and terminal duplicate readback.
+	existing = _existing_applicant(message_key, for_update=True)
 	if existing:
 		_assert_duplicate_matches(
 			existing,
