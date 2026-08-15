@@ -392,6 +392,7 @@ jobs:
                   "hrms.recruitment.test_interview_decision_domain",
                   "hrms.recruitment.test_talent_pool",
                   "hrms.recruitment.test_email_bridge",
+                  "hrms.recruitment.test_native_recruitment_setup",
               ):
                   suite.addTests(unittest.defaultTestLoader.loadTestsFromName(test_module))
               result = unittest.TextTestRunner(verbosity=2).run(suite)

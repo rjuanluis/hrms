@@ -82,6 +82,18 @@ class TestAyPEmailBridge(unittest.TestCase):
 		self.assertIsNone(selected)
 		self.assertEqual(status, "blocked_multiple_or_ambiguous_attachments")
 
+	def test_blocks_missing_or_wrong_graph_attachment_type(self):
+		for odata_type in (None, "#microsoft.graph.itemAttachment", "fileAttachment"):
+			attachment = self.attachment()
+			if odata_type is None:
+				attachment.pop("@odata.type")
+			else:
+				attachment["@odata.type"] = odata_type
+			with self.subTest(odata_type=odata_type):
+				selected, status = bridge._select_candidate_attachment([attachment])
+				self.assertIsNone(selected)
+				self.assertEqual(status, "blocked_attachment_type")
+
 	def test_rejects_filename_over_255_without_truncating_away_extension(self):
 		selected, status = bridge._select_candidate_attachment([self.attachment(f"{'a' * 252}.pdf")])
 		self.assertIsNone(selected)
@@ -163,6 +175,33 @@ class TestAyPEmailBridge(unittest.TestCase):
 		self.assertEqual(result["blocked"], 1)
 		self.assertEqual(result["errors"][0]["code"], "blocked_missing_current_vacancy_consent")
 		remote.assert_not_called()
+
+	def test_consent_rejects_hidden_or_ambiguous_html(self):
+		bodies = (
+			f'<span style="display:none">{bridge.CONSENT_PHRASE}</span>',
+			f"<script>{bridge.CONSENT_PHRASE}</script>",
+			f"<template>{bridge.CONSENT_PHRASE}</template>",
+			f"<blockquote>{bridge.CONSENT_PHRASE}</blockquote>",
+			f'<p class="hidden">{bridge.CONSENT_PHRASE}</p>',
+			f"<!-- {bridge.CONSENT_PHRASE} -->",
+		)
+		for content in bodies:
+			graph = GraphModule(
+				self.message(),
+				[self.attachment()],
+				body={"contentType": "html", "content": content},
+			)
+			with self.subTest(content=content):
+				self.assertFalse(bridge._has_current_vacancy_consent(graph.request_graph, "MSG-1"))
+
+	def test_consent_accepts_only_exact_plain_text_or_simple_visible_html(self):
+		for body in (
+			{"contentType": "text", "content": bridge.CONSENT_PHRASE},
+			{"contentType": "html", "content": f"<p>{bridge.CONSENT_PHRASE}</p>"},
+		):
+			graph = GraphModule(self.message(), [self.attachment()], body=body)
+			with self.subTest(body=body):
+				self.assertTrue(bridge._has_current_vacancy_consent(graph.request_graph, "MSG-1"))
 
 	def test_negated_quoted_or_signed_consent_text_fails_closed(self):
 		bodies = (

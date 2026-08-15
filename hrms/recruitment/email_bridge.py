@@ -26,6 +26,8 @@ from hrms.security.candidate_cv import (
 DEFAULT_JOB_OPENING = "HR-OPN-2026-0001"
 RECRUITMENT_MAILBOX = "empleos@aroypedal.com"
 JOB_OPENING_CONFIG_KEY = "ayp_email_bridge_job_opening"
+EMAIL_PROVENANCE_FIELD = "custom_ayp_email_provenance"
+CV_FILE_FIELD = "custom_ayp_email_file_name"
 MESSAGE_ID_FIELD = "custom_ayp_email_message_id"
 RECEIVED_ON_FIELD = "custom_ayp_email_received_on"
 SUBJECT_FIELD = "custom_ayp_email_subject"
@@ -183,6 +185,8 @@ def _require_configuration() -> None:
 	missing_fields = [
 		fieldname
 		for fieldname in (
+			EMAIL_PROVENANCE_FIELD,
+			CV_FILE_FIELD,
 			MESSAGE_ID_FIELD,
 			RECEIVED_ON_FIELD,
 			SUBJECT_FIELD,
@@ -211,6 +215,8 @@ def _existing_applicant(message_key: str):
 			"custom_data_processing_consent",
 			"custom_privacy_notice_version",
 			"custom_cv_sha256",
+			EMAIL_PROVENANCE_FIELD,
+			CV_FILE_FIELD,
 			MESSAGE_ID_FIELD,
 			RECEIVED_ON_FIELD,
 			SUBJECT_FIELD,
@@ -250,6 +256,8 @@ def _assert_duplicate_matches(
 	consent_evidence_sha256: str,
 ) -> None:
 	matches = (
+		existing.get(EMAIL_PROVENANCE_FIELD) in (True, 1, "1"),
+		bool(existing.get(CV_FILE_FIELD)),
 		existing.get(MESSAGE_ID_FIELD) == message_key,
 		normalize_email(existing.email_id) == sender_email,
 		(existing.applicant_name or "").strip() == sender_name,
@@ -369,6 +377,8 @@ def ingest_email_payload(payload: dict) -> dict:
 				"custom_data_processing_consent": 0,
 				"custom_privacy_notice_version": EMAIL_CONSENT_NOTICE_VERSION,
 				"custom_candidate_profile": None,
+				EMAIL_PROVENANCE_FIELD: 1,
+				CV_FILE_FIELD: file_doc.name,
 				MESSAGE_ID_FIELD: message_key,
 				RECEIVED_ON_FIELD: received_on,
 				SUBJECT_FIELD: subject,
@@ -378,6 +388,7 @@ def ingest_email_payload(payload: dict) -> dict:
 			}
 		)
 		applicant.flags.ignore_notify = True
+		applicant.flags.ayp_candidate_cv_file_name = file_doc.name
 		with _suppress_document_notifications():
 			applicant.insert()
 		return {"status": "created", "job_applicant": applicant.name}

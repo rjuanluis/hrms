@@ -13,6 +13,7 @@ class _Document:
 	publish: int
 	job_application_route: str
 	use_imap: int
+	enable_incoming: int
 	enable_auto_reply: int
 	append_to: str
 	imap_folder: list[SimpleNamespace]
@@ -59,6 +60,8 @@ class TestNativeRecruitmentSetup(TestCase):
 		self.assertEqual(
 			set(email_fields),
 			{
+				"custom_ayp_email_provenance",
+				"custom_ayp_email_file_name",
 				"custom_ayp_email_message_id",
 				"custom_ayp_email_received_on",
 				"custom_ayp_email_subject",
@@ -72,12 +75,14 @@ class TestNativeRecruitmentSetup(TestCase):
 			self.assertEqual(field["read_only"], 1)
 			self.assertEqual(field["no_copy"], 1)
 		self.assertEqual(email_fields["custom_ayp_email_message_id"]["unique"], 1)
+		self.assertEqual(email_fields["custom_ayp_email_file_name"]["fieldtype"], "Link")
+		self.assertEqual(email_fields["custom_ayp_email_file_name"]["options"], "File")
 		self.assertEqual(email_fields["custom_ayp_email_subject"]["length"], 140)
 		self.assertEqual(email_fields["custom_ayp_email_consent_notice_version"]["length"], 140)
 		self.assertEqual(email_fields["custom_ayp_email_consent_evidence_sha256"]["length"], 64)
 		self.assertEqual(
 			fields["custom_data_processing_consent"]["read_only_depends_on"],
-			"eval:doc.source=='Email Recursos Humanos'",
+			"eval:doc.custom_ayp_email_provenance || doc.source=='Email Recursos Humanos'",
 		)
 
 	def test_email_recruitment_source_is_created_idempotently(self):
@@ -116,6 +121,16 @@ class TestNativeRecruitmentSetup(TestCase):
 			patch.object(setup.frappe.db, "exists", side_effect=exists),
 			patch.object(setup.frappe.db, "get_value") as get_opening_name,
 			patch.object(setup.frappe, "get_doc", side_effect=get_doc),
+			patch.object(
+				setup.frappe,
+				"get_meta",
+				return_value=SimpleNamespace(autoname=setup.RECRUITMENT_JOB_OPENING_SERIES),
+			),
+			patch.object(
+				setup,
+				"parse_naming_series",
+				return_value=setup.RECRUITMENT_JOB_OPENING,
+			) as parse_series,
 		):
 			result = setup.ensure_native_recruitment_job_opening()
 
@@ -123,7 +138,12 @@ class TestNativeRecruitmentSetup(TestCase):
 		self.assertEqual(result, opening.name)
 		self.assertEqual(opening.name, setup.RECRUITMENT_JOB_OPENING)
 		self.assertTrue(opening.inserted)
-		self.assertIsNone(opening.insert_set_name)
+		self.assertEqual(opening.insert_set_name, setup.RECRUITMENT_JOB_OPENING)
+		parse_series.assert_called_once_with(
+			setup.RECRUITMENT_JOB_OPENING_SERIES,
+			doctype="Job Opening",
+			doc=opening,
+		)
 		self.assertEqual(opening.job_title, setup.RECRUITMENT_JOB_TITLE)
 		self.assertEqual(opening.designation, setup.RECRUITMENT_JOB_TITLE)
 		self.assertEqual(opening.company, setup.COMPANY)
@@ -189,22 +209,59 @@ class TestNativeRecruitmentSetup(TestCase):
 			patch.object(setup.frappe.db, "exists", side_effect=exists),
 			patch.object(setup.frappe.db, "get_value", return_value=legacy_opening.name) as get_opening_name,
 			patch.object(setup.frappe, "get_doc", side_effect=get_doc) as load_opening,
+			patch.object(
+				setup.frappe,
+				"get_meta",
+				return_value=SimpleNamespace(autoname=setup.RECRUITMENT_JOB_OPENING_SERIES),
+			),
+			patch.object(setup, "parse_naming_series", return_value=setup.RECRUITMENT_JOB_OPENING),
 		):
 			result = setup.ensure_native_recruitment_job_opening()
 
 		get_opening_name.assert_not_called()
 		load_opening.assert_called_once()
 		self.assertEqual(result, setup.RECRUITMENT_JOB_OPENING)
+		self.assertEqual(opening.insert_set_name, setup.RECRUITMENT_JOB_OPENING)
 		self.assertTrue(opening.inserted)
 		self.assertEqual(opening.name, setup.RECRUITMENT_JOB_OPENING)
 		self.assertEqual(opening.status, "Open")
 		self.assertEqual(opening.publish, 0)
 		self.assertEqual(opening.job_application_route, setup.RECRUITMENT_WEB_FORM_ROUTE)
 
-	def test_pop_mailbox_appends_natively_without_auto_reply(self):
+	def test_job_opening_creation_fails_if_series_is_not_at_authoritative_name(self):
+		opening = _Document()
+
+		def exists(doctype, name):
+			return doctype == "Designation"
+
+		def get_doc(*args):
+			if len(args) == 1:
+				opening.update(args[0])
+				return opening
+			raise AssertionError(f"Unexpected get_doc call: {args}")
+
+		with (
+			patch.object(setup.frappe.db, "exists", side_effect=exists),
+			patch.object(setup.frappe, "get_doc", side_effect=get_doc),
+			patch.object(
+				setup.frappe,
+				"get_meta",
+				return_value=SimpleNamespace(autoname=setup.RECRUITMENT_JOB_OPENING_SERIES),
+			),
+			patch.object(setup, "parse_naming_series", return_value="HR-OPN-2026-0002"),
+			self.assertRaisesRegex(RuntimeError, "Expected next Job Opening name"),
+		):
+			setup.ensure_native_recruitment_job_opening()
+
+		self.assertFalse(opening.inserted)
+
+	def test_pop_mailbox_is_disabled_without_auto_reply_or_append(self):
 		account = _Document("Recruitment")
 		account.use_imap = 0
+		account.enable_incoming = 1
 		account.enable_auto_reply = 1
+		account.append_to = "Job Applicant"
+		account.imap_folder = []
 
 		with (
 			patch.object(setup.frappe, "get_all", return_value=[account.name]),
@@ -213,17 +270,19 @@ class TestNativeRecruitmentSetup(TestCase):
 			result = setup.configure_native_recruitment_mailbox()
 
 		self.assertEqual(result, [account.name])
-		self.assertEqual(account.append_to, "Job Applicant")
+		self.assertIsNone(account.append_to)
+		self.assertEqual(account.enable_incoming, 0)
 		self.assertEqual(account.enable_auto_reply, 0)
 		self.assertTrue(account.saved)
 
-	def test_imap_mailbox_changes_only_inbox_folder(self):
+	def test_imap_mailbox_clears_only_job_applicant_routes_and_disables_incoming(self):
 		account = _Document("Recruitment")
 		account.use_imap = 1
+		account.enable_incoming = 1
 		account.enable_auto_reply = 1
-		account.append_to = "Issue"
+		account.append_to = "Job Applicant"
 		account.imap_folder = [
-			SimpleNamespace(folder_name="INBOX", append_to="Communication"),
+			SimpleNamespace(folder_name="INBOX", append_to="Job Applicant"),
 			SimpleNamespace(folder_name="Archive", append_to="Communication"),
 		]
 
@@ -233,9 +292,10 @@ class TestNativeRecruitmentSetup(TestCase):
 		):
 			setup.configure_native_recruitment_mailbox()
 
-		self.assertEqual(account.imap_folder[0].append_to, "Job Applicant")
+		self.assertIsNone(account.imap_folder[0].append_to)
 		self.assertEqual(account.imap_folder[1].append_to, "Communication")
-		self.assertEqual(account.append_to, "Job Applicant")
+		self.assertIsNone(account.append_to)
+		self.assertEqual(account.enable_incoming, 0)
 		self.assertEqual(account.enable_auto_reply, 0)
 
 	def test_missing_mailbox_is_safe_during_fresh_install(self):
@@ -257,15 +317,20 @@ class TestNativeRecruitmentSetup(TestCase):
 		get_doc.assert_not_called()
 		new_doc.assert_not_called()
 
-	def test_imap_mailbox_requires_an_inbox_folder(self):
+	def test_imap_mailbox_does_not_require_inbox_when_incoming_is_disabled(self):
 		account = _Document("Recruitment")
 		account.use_imap = 1
+		account.enable_incoming = 1
 		account.enable_auto_reply = 1
+		account.append_to = "Job Applicant"
 		account.imap_folder = [SimpleNamespace(folder_name="Archive", append_to="Communication")]
 
 		with (
 			patch.object(setup.frappe, "get_all", return_value=[account.name]),
 			patch.object(setup.frappe, "get_doc", return_value=account),
-			self.assertRaisesRegex(RuntimeError, "no configured IMAP Inbox"),
 		):
 			setup.configure_native_recruitment_mailbox()
+
+		self.assertEqual(account.enable_incoming, 0)
+		self.assertIsNone(account.append_to)
+		self.assertEqual(account.imap_folder[0].append_to, "Communication")

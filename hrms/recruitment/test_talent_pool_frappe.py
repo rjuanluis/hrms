@@ -86,6 +86,27 @@ class TestTalentPoolLifecycle(UnitTestCase):
 			).insert(ignore_permissions=True)
 		self.assertEqual(frappe.db.count("AYP Candidate Profile"), profile_count)
 
+	def test_email_source_and_future_consent_cannot_be_mutated_after_insert(self):
+		token = uuid4().hex
+		profile_count = frappe.db.count("AYP Candidate Profile")
+		applicant = frappe.get_doc(
+			{
+				"doctype": "Job Applicant",
+				"applicant_name": "Candidata con procedencia inmutable",
+				"email_id": f"email-immutable-{token}@example.com",
+				"status": "Open",
+				"source": EMAIL_RECRUITMENT_SOURCE,
+				"custom_data_processing_consent": 0,
+				"custom_ayp_governed": 1,
+			}
+		).insert(ignore_permissions=True)
+
+		applicant.source = "Referral"
+		applicant.custom_data_processing_consent = 1
+		with self.assertRaises(frappe.ValidationError):
+			applicant.save(ignore_permissions=True)
+		self.assertEqual(frappe.db.count("AYP Candidate Profile"), profile_count)
+
 	def test_identity_change_keeps_profile_and_marks_review(self):
 		token = uuid4().hex
 		applicant = frappe.get_doc(

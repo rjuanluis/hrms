@@ -24,8 +24,12 @@ from hrms.recruitment.candidate_scoring_domain import (
 	CandidateScoringValidationError,
 	Scorecard,
 )
-from hrms.recruitment.matching import EMAIL_RECRUITMENT_SOURCE, normalize_email, normalize_phone
-from hrms.recruitment.talent_pool import acquire_candidate_identity_lock, resolve_candidate_profile
+from hrms.recruitment.matching import normalize_email, normalize_phone
+from hrms.recruitment.talent_pool import (
+	acquire_candidate_identity_lock,
+	job_applicant_has_email_provenance,
+	resolve_candidate_profile,
+)
 
 EVENT_DOCTYPE = "AYP Candidate Review Event"
 RUN_DOCTYPE = "AYP Candidate Review Run"
@@ -40,6 +44,16 @@ PROFILE_ACTIONS = {
 }
 CV_SCORE_READY = frozenset({"Procesado", "Verificado manualmente"})
 CV_DECISIVE_TARGETS = frozenset({"Shortlisted", "Rejected"})
+
+
+def _reject_email_talent_pool_operation(applicant_doc) -> None:
+	if job_applicant_has_email_provenance(applicant_doc):
+		frappe.throw(
+			_(
+				"Una solicitud recibida por correo no puede incorporarse ni moverse dentro del Talent Pool sin un flujo separado de consentimiento del candidato."
+			),
+			frappe.ValidationError,
+		)
 
 
 def _validation_error(exc: CandidateReviewValidationError):
@@ -1021,6 +1035,7 @@ def update_candidate_profile(applicant: str, action: str, reason: str):
 	frappe.only_for(PAGE_ROLES)
 	frappe.has_permission("Job Applicant", "write", applicant, throw=True)
 	applicant_doc = frappe.get_doc("Job Applicant", applicant)
+	_reject_email_talent_pool_operation(applicant_doc)
 	profile_name = applicant_doc.custom_candidate_profile
 	if not profile_name:
 		frappe.throw(_("La aplicación no tiene un perfil canónico vinculado."), frappe.ValidationError)
@@ -1031,14 +1046,6 @@ def update_candidate_profile(applicant: str, action: str, reason: str):
 		frappe.throw(_("La acción de Talent Pool no es válida."), frappe.ValidationError)
 	if len(reason) < 20 or len(reason) > 500:
 		frappe.throw(_("El motivo debe tener entre 20 y 500 caracteres."), frappe.ValidationError)
-	if applicant_doc.source == EMAIL_RECRUITMENT_SOURCE and action in {"retain", "priority"}:
-		frappe.throw(
-			_(
-				"Una solicitud recibida por correo no puede incorporarse a futuras oportunidades sin un flujo separado de consentimiento del candidato."
-			),
-			frappe.ValidationError,
-		)
-
 	savepoint = f"ayp_profile_{frappe.generate_hash(length=12)}"
 	frappe.db.savepoint(savepoint)
 	try:
@@ -1047,6 +1054,7 @@ def update_candidate_profile(applicant: str, action: str, reason: str):
 		acquire_candidate_identity_lock()
 		frappe.db.sql("SELECT name FROM `tabJob Applicant` WHERE name = %s FOR UPDATE", (applicant,))
 		applicant_doc = frappe.get_doc("Job Applicant", applicant, for_update=True)
+		_reject_email_talent_pool_operation(applicant_doc)
 		if applicant_doc.custom_candidate_profile != profile_name:
 			frappe.throw(
 				_("La aplicación cambió de perfil; recarga antes de continuar."), frappe.ValidationError
@@ -1224,6 +1232,7 @@ def resolve_candidate_identity(
 	frappe.only_for(PAGE_ROLES)
 	frappe.has_permission("Job Applicant", "write", applicant, throw=True)
 	applicant_doc = frappe.get_doc("Job Applicant", applicant)
+	_reject_email_talent_pool_operation(applicant_doc)
 	source_profile_name = applicant_doc.custom_candidate_profile
 	if not source_profile_name:
 		frappe.throw(_("La aplicación no tiene un perfil canónico vinculado."), frappe.ValidationError)
@@ -1255,6 +1264,7 @@ def resolve_candidate_identity(
 		# Re-lock and reload the applicant before trusting its profile binding.
 		frappe.db.sql("SELECT name FROM `tabJob Applicant` WHERE name = %s FOR UPDATE", (applicant,))
 		applicant_doc = frappe.get_doc("Job Applicant", applicant, for_update=True)
+		_reject_email_talent_pool_operation(applicant_doc)
 		if applicant_doc.custom_candidate_profile != source_profile_name:
 			frappe.throw(
 				_("La aplicación cambió de perfil; recarga antes de continuar."), frappe.ValidationError
@@ -1274,6 +1284,10 @@ def resolve_candidate_identity(
 		_lock_profiles([name for name in (source_profile_name, target_profile) if name])
 		source_profile = frappe.get_doc("AYP Candidate Profile", source_profile_name, for_update=True)
 		source_applications = _linked_applications_for_update(source_profile_name)
+		for source_application in source_applications:
+			_reject_email_talent_pool_operation(
+				frappe.get_doc("Job Applicant", source_application, for_update=True)
+			)
 		if applicant not in source_applications:
 			frappe.throw(
 				_("La aplicación cambió de perfil; recarga antes de continuar."), frappe.ValidationError

@@ -26,8 +26,10 @@ from hrms.security.candidate_cv import (
 	_verified_candidate_cv_sha256,
 	guard_candidate_cv_upload,
 	mark_scanned_candidate_cv_file,
+	read_stored_candidate_cv_bytes,
 	scan_bytes_with_clamd,
 	validate_cv_file,
+	validate_job_applicant_cv,
 )
 
 
@@ -390,6 +392,53 @@ class TestCandidateCVSecurity(unittest.TestCase):
 			sha256 = _verified_candidate_cv_sha256(file_record)
 		self.assertEqual(sha256, hashlib.sha256(content).hexdigest())
 		persist_sha256.assert_called_once_with(file_record.name, sha256)
+
+	def test_stored_ascii_pdf_round_trips_from_frappe_text_decode(self):
+		content = "%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF"
+		file_doc = SimpleNamespace(file_url="/private/files/ascii.pdf")
+		with patch("hrms.security.candidate_cv.get_file", return_value=("ascii.pdf", content)):
+			result = read_stored_candidate_cv_bytes(file_doc)
+		self.assertEqual(result, content.encode("utf-8"))
+
+	def test_stored_cv_rejects_non_bytes_non_text_content(self):
+		file_doc = SimpleNamespace(file_url="/private/files/cv.pdf")
+		with (
+			patch("hrms.security.candidate_cv.get_file", return_value=("cv.pdf", object())),
+			self.assertRaises(CandidateCVSecurityError),
+		):
+			read_stored_candidate_cv_bytes(file_doc)
+
+	def test_email_applicant_revalidates_persisted_exact_file_name(self):
+		doc = frappe._dict(
+			name="APP-1",
+			resume_attachment="/private/files/cv.pdf",
+			custom_ayp_email_file_name="FILE-1",
+		)
+		doc.set = lambda fieldname, value: doc.update({fieldname: value})
+		file_record = frappe._dict(
+			name="FILE-1",
+			file_name="cv.pdf",
+			file_url="/private/files/cv.pdf",
+			file_size=100,
+			content_hash="frappe-hash",
+			is_private=1,
+			custom_av_scan_status="Clean",
+			custom_av_scan_engine="ClamAV",
+			custom_av_scanned_on="2026-08-15 00:00:00",
+			attached_to_doctype="Job Applicant",
+			attached_to_name="APP-1",
+			attached_to_field="resume_attachment",
+			custom_cv_sha256="a" * 64,
+		)
+		with (
+			patch.object(frappe.session, "user", "Administrator"),
+			patch.object(frappe.db, "has_column", return_value=True),
+			patch.object(frappe.db, "get_value", return_value=file_record) as get_value,
+			patch("hrms.security.candidate_cv._verified_candidate_cv_sha256", return_value="a" * 64),
+		):
+			validate_job_applicant_cv(doc)
+		self.assertEqual(get_value.call_args.args[1], "FILE-1")
+		self.assertEqual(doc.custom_cv_sha256, "a" * 64)
 
 	def test_verified_hash_rejects_invalid_pdf_signature(self):
 		content = b"not-a-pdf"

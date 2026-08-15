@@ -46,11 +46,18 @@ def _persist_file_cv_sha256(file_name: str, sha256: str) -> None:
 
 
 def read_stored_candidate_cv_bytes(file_doc) -> bytes:
-	"""Read exact stored candidate-CV bytes without File.get_content() text coercion."""
-	_, content = get_file(file_doc.file_url)
-	if not isinstance(content, bytes):
-		raise CandidateCVSecurityError(_("No se pudo leer el CV como contenido binario seguro."))
-	return content
+	"""Recover the exact bytes returned by Frappe's UTF-8-decoding ``get_file`` helper."""
+	_filename, content = get_file(file_doc.file_url)
+	if isinstance(content, bytes):
+		return content
+	if isinstance(content, str):
+		try:
+			return content.encode("utf-8", errors="strict")
+		except UnicodeEncodeError as exc:
+			raise CandidateCVSecurityError(
+				_("No se pudo reconstruir el contenido binario exacto del CV.")
+			) from exc
+	raise CandidateCVSecurityError(_("No se pudo leer el CV como contenido binario seguro."))
 
 
 def _is_candidate_cv_upload() -> bool:
@@ -354,14 +361,18 @@ def validate_job_applicant_cv(doc, method=None) -> None:
 		"attached_to_field",
 		"custom_cv_sha256",
 	]
+	exact_file_name = doc.get("custom_ayp_email_file_name") or getattr(
+		getattr(doc, "flags", None), "ayp_candidate_cv_file_name", None
+	)
 	file_record = frappe.db.get_value(
 		"File",
-		{"file_url": doc.resume_attachment},
+		exact_file_name or {"file_url": doc.resume_attachment},
 		file_fields,
 		as_dict=True,
 	)
 	invalid_attachment = (
 		not file_record
+		or file_record.file_url != doc.resume_attachment
 		or not file_record.is_private
 		or not file_record.file_url.startswith("/private/files/")
 		or not file_record.file_name
@@ -387,7 +398,11 @@ def attach_job_applicant_cv(doc, method=None) -> None:
 	if not doc.resume_attachment:
 		return
 
-	file_name = frappe.db.get_value("File", {"file_url": doc.resume_attachment}, "name")
+	file_name = (
+		doc.get("custom_ayp_email_file_name")
+		or getattr(getattr(doc, "flags", None), "ayp_candidate_cv_file_name", None)
+		or frappe.db.get_value("File", {"file_url": doc.resume_attachment}, "name")
+	)
 	if file_name:
 		frappe.db.set_value(
 			"File",

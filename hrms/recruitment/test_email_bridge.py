@@ -52,6 +52,8 @@ class FakeDB:
 
 	def has_column(self, doctype, fieldname):
 		return doctype == "Job Applicant" and fieldname in {
+			"custom_ayp_email_provenance",
+			"custom_ayp_email_file_name",
 			"custom_ayp_email_message_id",
 			"custom_ayp_email_received_on",
 			"custom_ayp_email_subject",
@@ -94,7 +96,10 @@ class FakeApplicant:
 	def insert(self):
 		if self.owner.fail_applicant_insert:
 			raise FakeValidationError("insert failed")
-		file_content = self.owner.files_by_url[self.values["resume_attachment"]].content
+		file_doc = self.owner.files_by_url[self.values["resume_attachment"]]
+		if self.flags.ayp_candidate_cv_file_name != file_doc.name:
+			raise AssertionError("Applicant must carry the exact scanned File.name")
+		file_content = file_doc.content
 		self.values["custom_cv_sha256"] = hashlib.sha256(file_content).hexdigest()
 		row = FakeRow(self.values)
 		row.name = self.name
@@ -260,6 +265,8 @@ class TestEmailBridge(unittest.TestCase):
 		self.assertEqual(applicant.email_id, "candidate@example.com")
 		self.assertEqual(applicant.source, EMAIL_RECRUITMENT_SOURCE)
 		self.assertEqual(applicant.custom_data_processing_consent, 0)
+		self.assertEqual(applicant.custom_ayp_email_provenance, 1)
+		self.assertEqual(applicant.custom_ayp_email_file_name, "FILE-1")
 		self.assertEqual(applicant.custom_ayp_email_current_vacancy_consent, 1)
 		self.assertEqual(
 			applicant.custom_ayp_email_consent_notice_version,

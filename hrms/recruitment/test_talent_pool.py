@@ -10,6 +10,7 @@ if __package__:
 		EMAIL_RECRUITMENT_SOURCE,
 		candidate_lock_names,
 		choose_profile_match,
+		has_email_recruitment_provenance,
 		names_are_compatible,
 		normalize_email,
 		normalize_name,
@@ -25,6 +26,7 @@ else:
 		EMAIL_RECRUITMENT_SOURCE,
 		candidate_lock_names,
 		choose_profile_match,
+		has_email_recruitment_provenance,
 		names_are_compatible,
 		normalize_email,
 		normalize_name,
@@ -121,10 +123,45 @@ class TestTalentPoolMatching(unittest.TestCase):
 
 	def test_web_form_behavior_is_unchanged_but_email_checkbox_cannot_enroll(self):
 		self.assertTrue(should_enroll_in_talent_pool(source=None, has_data_processing_consent=True))
+		self.assertFalse(should_enroll_in_talent_pool(source=None, has_data_processing_consent=False))
 		self.assertFalse(
 			should_enroll_in_talent_pool(
 				source=EMAIL_RECRUITMENT_SOURCE,
 				has_data_processing_consent=True,
+			)
+		)
+
+	def test_exact_email_file_name_alone_preserves_provenance(self):
+		self.assertTrue(
+			has_email_recruitment_provenance(
+				source="Referral",
+				email_file_name="FILE-0001",
+			)
+		)
+		self.assertFalse(
+			should_enroll_in_talent_pool(
+				source="Referral",
+				has_data_processing_consent=True,
+				email_file_name="FILE-0001",
+			)
+		)
+
+	def test_email_provenance_survives_mutated_source(self):
+		self.assertTrue(
+			has_email_recruitment_provenance(
+				source="Referral",
+				email_provenance=True,
+				graph_message_key="a" * 64,
+				consent_evidence_sha256="b" * 64,
+			)
+		)
+		self.assertFalse(
+			should_enroll_in_talent_pool(
+				source="Referral",
+				has_data_processing_consent=False,
+				email_provenance=True,
+				graph_message_key="a" * 64,
+				consent_evidence_sha256="b" * 64,
 			)
 		)
 

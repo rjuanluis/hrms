@@ -246,6 +246,18 @@ class TestCandidateReviewSecurityContract(unittest.TestCase):
 			).read_text(encoding="utf-8")
 		)
 		self.assertIn("doc.source != 'Email Recursos Humanos'", notification["condition"])
+		self.assertIn("not doc.get('custom_ayp_email_provenance')", notification["condition"])
+		self.assertIn("not doc.get('custom_ayp_email_file_name')", notification["condition"])
+		self.assertIn("not doc.get('custom_ayp_email_message_id')", notification["condition"])
+		self.assertIn("not doc.get('custom_ayp_email_consent_evidence_sha256')", notification["condition"])
+
+	def test_native_recruitment_mailbox_is_authoritatively_disabled(self):
+		setup_source = (ROOT / "deploy" / "configure_standard.py").read_text(encoding="utf-8")
+		self.assertIn("account.enable_incoming = 0", setup_source)
+		self.assertIn("account.enable_auto_reply = 0", setup_source)
+		self.assertIn("account.append_to = None", setup_source)
+		self.assertNotIn('account.append_to = "Job Applicant"', setup_source)
+		self.assertNotIn('folder.append_to = "Job Applicant"', setup_source)
 
 
 if __name__ == "__main__":

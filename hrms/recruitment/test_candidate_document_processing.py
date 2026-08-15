@@ -181,6 +181,22 @@ class TestCandidateDocumentProcessing(unittest.TestCase):
 			candidate_document_service.enqueue_candidate_document(doc)
 		add.assert_not_called()
 
+	def test_email_marker_with_mutated_source_never_registers_post_commit_enqueue(self):
+		doc = SimpleNamespace(
+			resume_attachment="/private/files/cv.pdf",
+			get=lambda key: {
+				"source": "Referral",
+				"custom_ayp_email_provenance": 1,
+				"custom_ayp_email_message_id": "a" * 64,
+				"custom_ayp_email_consent_evidence_sha256": "b" * 64,
+				"custom_cv_processing_status": "Pendiente",
+				"custom_cv_sha256": "c" * 64,
+			}.get(key),
+		)
+		with patch.object(candidate_document_service.frappe.db.after_commit, "add") as add:
+			candidate_document_service.enqueue_candidate_document(doc)
+		add.assert_not_called()
+
 	def test_late_worker_persistence_requires_processing_claim(self):
 		source = inspect.getsource(candidate_document_service._persist_result)
 		self.assertIn('custom_cv_processing_status != "Procesando"', source)

@@ -23,8 +23,9 @@ Do not create a scheduler until all of these are true:
 
 1. PR and immutable production image are audited at the exact SHA.
 2. Exchange RBAC authorizes `Application Mail.Read` for `empleos@aroypedal.com` and denies mail/calendar/settings access outside the approved matrix.
-3. The Frappe endpoint compatibility check passes against the deployed image.
-4. A single synthetic canary and complete cleanup are approved.
+3. The Frappe endpoint compatibility check passes against the deployed image, and the exact `empleos@aroypedal.com` Email Account (if present) has `enable_incoming = 0`, `enable_auto_reply = 0`, and no account/folder `append_to = Job Applicant` route.
+4. The deployed schema includes the unique Graph message key and hidden immutable email-provenance marker; Bench-native tests are green.
+5. A single synthetic canary and complete cleanup are approved.
 
 ## Intended scheduler definition
 

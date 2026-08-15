@@ -11,10 +11,43 @@ DEDUPE_REVIEW = "Revisión requerida"
 EMAIL_RECRUITMENT_SOURCE = "Email Recursos Humanos"
 
 
-def should_enroll_in_talent_pool(*, source: str | None, has_data_processing_consent: bool) -> bool:
-	"""Keep every email application out until a dedicated future-consent flow exists."""
+def has_email_recruitment_provenance(
+	*,
+	source: str | None,
+	email_provenance: bool = False,
+	email_file_name: str | None = None,
+	graph_message_key: str | None = None,
+	consent_evidence_sha256: str | None = None,
+) -> bool:
+	"""Identify quarantined email intake without trusting mutable ``source`` alone."""
 
-	return source != EMAIL_RECRUITMENT_SOURCE
+	return bool(
+		source == EMAIL_RECRUITMENT_SOURCE
+		or email_provenance
+		or str(email_file_name or "").strip()
+		or str(graph_message_key or "").strip()
+		or str(consent_evidence_sha256 or "").strip()
+	)
+
+
+def should_enroll_in_talent_pool(
+	*,
+	source: str | None,
+	has_data_processing_consent: bool,
+	email_provenance: bool = False,
+	email_file_name: str | None = None,
+	graph_message_key: str | None = None,
+	consent_evidence_sha256: str | None = None,
+) -> bool:
+	"""Require affirmative future consent and permanently quarantine email intake."""
+
+	return bool(has_data_processing_consent) and not has_email_recruitment_provenance(
+		source=source,
+		email_provenance=email_provenance,
+		email_file_name=email_file_name,
+		graph_message_key=graph_message_key,
+		consent_evidence_sha256=consent_evidence_sha256,
+	)
 
 
 def candidate_lock_names(*, email: str, phone: str, cv_sha256: str) -> tuple[str, ...]:

@@ -83,13 +83,47 @@ class CandidateMessage:
 	payload: dict[str, Any]
 
 
+SIMPLE_CONSENT_HTML_TAGS = frozenset({"html", "body", "div", "p", "span", "br"})
+SIMPLE_CONSENT_HTML_VOID_TAGS = frozenset({"br"})
+
+
 class _HTMLTextExtractor(HTMLParser):
 	def __init__(self) -> None:
 		super().__init__(convert_charrefs=True)
 		self.parts: list[str] = []
+		self.stack: list[str] = []
+		self.valid = True
+
+	def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+		tag = tag.casefold()
+		if tag not in SIMPLE_CONSENT_HTML_TAGS or attrs:
+			self.valid = False
+			return
+		if tag not in SIMPLE_CONSENT_HTML_VOID_TAGS:
+			self.stack.append(tag)
+
+	def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+		if tag.casefold() not in SIMPLE_CONSENT_HTML_VOID_TAGS or attrs:
+			self.valid = False
+
+	def handle_endtag(self, tag: str) -> None:
+		tag = tag.casefold()
+		if tag in SIMPLE_CONSENT_HTML_VOID_TAGS:
+			return
+		if tag not in SIMPLE_CONSENT_HTML_TAGS or not self.stack or self.stack.pop() != tag:
+			self.valid = False
 
 	def handle_data(self, data: str) -> None:
 		self.parts.append(data)
+
+	def handle_comment(self, data: str) -> None:
+		self.valid = False
+
+	def handle_decl(self, decl: str) -> None:
+		self.valid = False
+
+	def unknown_decl(self, data: str) -> None:
+		self.valid = False
 
 
 def _normalized_words(value: str) -> str:
@@ -226,22 +260,17 @@ def _candidate_extension(filename: str) -> str:
 
 
 def _select_candidate_attachment(rows: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, str]:
-	candidates = []
-	for row in rows:
-		odata_type = str(row.get("@odata.type") or "")
-		if odata_type and not odata_type.endswith("fileAttachment"):
-			continue
-		if bool(row.get("isInline")):
-			continue
-		candidates.append(row)
-	if len(candidates) != 1:
+	non_inline = [row for row in rows if not bool(row.get("isInline"))]
+	if len(non_inline) != 1:
 		return None, "blocked_multiple_or_ambiguous_attachments"
-	filename = str(candidates[0].get("name") or "")
+	row = non_inline[0]
+	if row.get("@odata.type") != "#microsoft.graph.fileAttachment":
+		return None, "blocked_attachment_type"
+	filename = str(row.get("name") or "")
 	if len(filename) > 255:
 		return None, "blocked_candidate_filename"
 	if _candidate_extension(filename) not in ALLOWED_EXTENSIONS:
 		return None, "ignored_no_candidate_cv"
-	row = candidates[0]
 	declared_size = int(row.get("size") or 0)
 	content = str(row.get("contentBytes") or "")
 	if (
@@ -338,13 +367,19 @@ def _has_current_vacancy_consent(request_graph: Callable[..., Any], graph_id: st
 	content = body.get("content")
 	if not isinstance(content, str) or len(content) > 1024 * 1024:
 		raise BridgeError("message_body_invalid")
-	if str(body.get("contentType") or "").casefold() == "html":
+	content_type = str(body.get("contentType") or "").casefold()
+	if content_type == "html":
 		parser = _HTMLTextExtractor()
 		try:
 			parser.feed(content)
-			content = " ".join(parser.parts)
+			parser.close()
 		except Exception as exc:
 			raise BridgeError("message_body_invalid") from exc
+		if not parser.valid or parser.stack:
+			return False
+		content = " ".join(parser.parts)
+	elif content_type != "text":
+		return False
 	return _normalized_words(content) == NORMALIZED_CONSENT_PHRASE
 
 
