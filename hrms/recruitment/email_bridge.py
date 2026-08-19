@@ -31,6 +31,7 @@ JOB_OPENING_LOCK_SQL = """
 	ORDER BY `name`
 	FOR UPDATE
 """
+TRANSACTION_ISOLATION_SQL = "SELECT @@transaction_isolation AS transaction_isolation"
 RECRUITMENT_MAILBOX = "empleos@aroypedal.com"
 JOB_OPENING_CONFIG_KEY = "ayp_email_bridge_job_opening"
 EMAIL_PROVENANCE_FIELD = "custom_ayp_email_provenance"
@@ -194,6 +195,15 @@ def _save_detached_private_file(filename: str, content: bytes):
 	return file_doc
 
 
+def _require_repeatable_read() -> None:
+	rows = frappe.db.sql(TRANSACTION_ISOLATION_SQL, (), as_dict=True)
+	if len(rows) != 1:
+		_fail("No se pudo verificar el aislamiento de la transacción del canal de correo.")
+	value = str(rows[0].get("transaction_isolation") or "").strip().upper().replace("_", "-")
+	if value != "REPEATABLE-READ":
+		_fail("La transacción del canal de correo no usa el aislamiento autorizado.")
+
+
 def _job_opening() -> str:
 	configured = frappe.conf.get(JOB_OPENING_CONFIG_KEY)
 	job_opening = str(configured or DEFAULT_JOB_OPENING).strip()
@@ -202,6 +212,7 @@ def _job_opening() -> str:
 			"blocked_authorized_vacancy_configuration",
 			"La vacante configurada no es la vacante autorizada para el canal de correo.",
 		)
+	_require_repeatable_read()
 	# Lock the complete authoritative set, not only currently-open rows. Under
 	# InnoDB's transaction isolation this prevents an opening from changing
 	# status or being inserted between authorization and applicant insertion.

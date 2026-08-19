@@ -482,6 +482,42 @@ class TestAyPEmailBridge(unittest.TestCase):
 			):
 				bridge._validate_hydrated_attachment(metadata, {**metadata, "contentBytes": content})
 
+	def test_hydrated_identity_types_are_retryable_faults_without_state_or_ingest(self):
+		metadata = {key: value for key, value in self.attachment().items() if key != "contentBytes"}
+		for field, malformed in (("size", 12.0), ("size", True), ("isInline", 0)):
+			with self.subTest(field=field, malformed=malformed), tempfile.TemporaryDirectory() as tmp:
+				hydrated = {**self.attachment(), field: malformed}
+				calls = []
+
+				def request_graph(**kwargs):
+					calls.append(kwargs["url"])
+					base_url = kwargs["url"].split("?", 1)[0]
+					if base_url.endswith("/attachments"):
+						return {"value": [metadata]}
+					if "/attachments/" in base_url:
+						return hydrated
+					if "?$select=body" in kwargs["url"]:
+						return {"body": {"contentType": "text", "content": bridge.CONSENT_PHRASE}}
+					return {"value": [self.message()]}
+
+				graph = types.SimpleNamespace(request_graph=request_graph)
+				with (
+					patch.object(bridge, "_load_graph_client", return_value=graph),
+					patch.object(bridge, "_remote_ingest") as remote,
+					patch.object(bridge, "_exclusive_lock", return_value=contextlib.nullcontext()),
+					contextlib.redirect_stdout(io.StringIO()) as output,
+				):
+					state_path = Path(tmp) / "state.json"
+					with patch.object(sys, "argv", [str(SCRIPT), "--state", str(state_path)]):
+						return_code = bridge.main()
+				self.assertEqual(return_code, 2)
+				self.assertFalse(state_path.exists())
+				self.assertTrue(any("/attachments/ATT-1" in url for url in calls))
+				remote.assert_not_called()
+				self.assertEqual(
+					json.loads(output.getvalue())["reasons"], {"graph_attachment_content_invalid": 1}
+				)
+
 	def test_malformed_attachment_collection_member_is_graph_fault(self):
 		valid = {key: value for key, value in self.attachment().items() if key != "contentBytes"}
 		with self.assertRaisesRegex(bridge.BridgeError, "graph_attachment_metadata_invalid"):

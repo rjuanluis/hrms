@@ -85,6 +85,8 @@ class FakeDB:
 		raise AssertionError(f"Unexpected get_value call: {(doctype, filters, fieldname, as_dict)}")
 
 	def sql(self, query, params, as_dict=False):
+		if "@@transaction_isolation" in query:
+			return [FakeRow({"transaction_isolation": self.owner.transaction_isolation})]
 		if "FOR UPDATE" not in query:
 			raise AssertionError(f"Unexpected SQL: {query}")
 		self.owner.locking_reads += 1
@@ -203,6 +205,7 @@ class FakeFrappe(types.ModuleType):
 		self.db = FakeDB(self)
 		self.job_opening_status = "Open"
 		self.open_job_openings = ["HR-OPN-2026-0001"]
+		self.transaction_isolation = "REPEATABLE-READ"
 		self.files_by_url = {}
 		self.files_by_name = {}
 		self.deleted_files = []
@@ -536,6 +539,13 @@ class TestEmailBridge(unittest.TestCase):
 					self.bridge.ingest_email_payload(email_payload())
 				self.assertEqual(raised.exception.code, "blocked_single_open_vacancy_required")
 				self.assertEqual(self.frappe.saved_files, [])
+
+	def test_non_repeatable_read_session_fails_before_authority_lock_or_file_storage(self):
+		self.frappe.transaction_isolation = "READ-COMMITTED"
+		with self.assertRaisesRegex(self.bridge.EmailBridgeError, "aislamiento autorizado"):
+			self.bridge.ingest_email_payload(email_payload())
+		self.assertEqual(self.frappe.locking_reads, 0)
+		self.assertEqual(self.frappe.saved_files, [])
 
 	def test_vacancy_authority_drift_fails_before_file_storage(self):
 		original = self.bridge._job_opening

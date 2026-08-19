@@ -420,23 +420,7 @@ def _fetch_attachment_metadata(request_graph: Callable[..., Any], graph_id: str)
 	for row in value:
 		if not isinstance(row, dict):
 			raise BridgeError("graph_attachment_metadata_invalid")
-		if (
-			not isinstance(row.get("@odata.type"), str)
-			or not isinstance(row.get("id"), str)
-			or not row.get("id")
-			or len(row["id"]) > 4096
-			or not isinstance(row.get("name"), str)
-			or not row.get("name")
-			or len(row["name"]) > 4096
-			or not isinstance(row.get("contentType"), str)
-			or not row.get("contentType")
-			or len(row["contentType"]) > 512
-			or not isinstance(row.get("size"), int)
-			or isinstance(row.get("size"), bool)
-			or row["size"] < 0
-			or not isinstance(row.get("isInline"), bool)
-		):
-			raise BridgeError("graph_attachment_metadata_invalid")
+		_validate_attachment_identity_fields(row, code="graph_attachment_metadata_invalid")
 	return value
 
 
@@ -462,7 +446,28 @@ def _same_attachment(metadata: dict[str, Any], hydrated: dict[str, Any]) -> bool
 	)
 
 
+def _validate_attachment_identity_fields(value: dict[str, Any], *, code: str) -> None:
+	if (
+		type(value.get("@odata.type")) is not str
+		or type(value.get("id")) is not str
+		or not value.get("id")
+		or len(value["id"]) > 4096
+		or type(value.get("name")) is not str
+		or not value.get("name")
+		or len(value["name"]) > 4096
+		or type(value.get("contentType")) is not str
+		or not value.get("contentType")
+		or len(value["contentType"]) > 512
+		or type(value.get("size")) is not int
+		or value["size"] < 0
+		or type(value.get("isInline")) is not bool
+	):
+		raise BridgeError(code)
+
+
 def _validate_hydrated_attachment(metadata: dict[str, Any], hydrated: dict[str, Any]) -> None:
+	_validate_attachment_identity_fields(metadata, code="graph_attachment_metadata_invalid")
+	_validate_attachment_identity_fields(hydrated, code="graph_attachment_content_invalid")
 	if not _same_attachment(metadata, hydrated):
 		raise BridgeError("graph_attachment_changed_after_preflight")
 	content = hydrated.get("contentBytes")
