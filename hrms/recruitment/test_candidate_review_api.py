@@ -11,6 +11,10 @@ class FakeValidationError(Exception):
 	pass
 
 
+class FakeCandidateCVScanUnavailableError(FakeValidationError):
+	pass
+
+
 def _fixed_now_datetime():
 	return "2026-08-11 20:00:00"
 
@@ -264,6 +268,9 @@ def load_api(fake_frappe):
 	recruitment_package_state = dict(vars(recruitment_package)) if recruitment_package else None
 	candidate_document_service = types.ModuleType("hrms.recruitment.candidate_document_service")
 	candidate_document_service.MANUAL_REVIEWABLE = frozenset({"Revisión manual", "Ilegible"})
+	candidate_document_service.__dict__["CandidateCVScanUnavailableError"] = (
+		FakeCandidateCVScanUnavailableError
+	)
 	candidate_document_service.revalidate_candidate_document = lambda doc: None
 	candidate_document_service.validate_candidate_ready_for_scoring = lambda doc: None
 	try:
@@ -322,6 +329,36 @@ class TestCandidateReviewAPI(unittest.TestCase):
 		for name, module in sys.modules.items():
 			if name.startswith("hrms.recruitment."):
 				self.assertIsNot(getattr(module, "frappe", None), self.frappe, name)
+
+	def test_filtered_cohort_validator_outage_rolls_back_without_terminal_skip(self):
+		run = types.SimpleNamespace(
+			name="RUN-RETRY",
+			frozen_by=self.frappe.session.user,
+			run_status="Frozen",
+			target_status="Shortlisted",
+			job_opening="JOB-1",
+			confirmed_on=None,
+		)
+		applicant = FakeDoc("APP-RETRY", "Open", "JOB-1")
+		applicant.custom_cv_processing_status = "Procesado"
+		self.frappe.docs = {run.name: run, applicant.name: applicant}
+		self.api.__dict__["_pending_run_members_for_update"] = lambda run_name: [
+			{"name": "MEMBER-RETRY", "applicant": applicant.name, "frozen_status": "Open"}
+		]
+
+		def raise_unavailable(doc):
+			raise FakeCandidateCVScanUnavailableError("validator unavailable")
+
+		self.api.__dict__["revalidate_candidate_document"] = raise_unavailable
+
+		with self.assertRaises(FakeCandidateCVScanUnavailableError):
+			self.api.process_filtered_run_chunk(run.name)
+
+		self.assertEqual(applicant.status, "Open")
+		self.assertEqual(self.frappe.events, [])
+		self.assertEqual(self.frappe.db.set_value_calls, [])
+		self.assertEqual(self.frappe.db.savepoints, ["ayp_filtered_run_batch123456"])
+		self.assertEqual(self.frappe.db.rollbacks, ["ayp_filtered_run_batch123456"])
 
 	def test_get_candidates_returns_bounded_page_and_has_more(self):
 		self.frappe.rows = [
