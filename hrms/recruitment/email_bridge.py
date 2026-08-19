@@ -45,6 +45,8 @@ MAX_DATA_LENGTH = 140
 MAX_RAW_MESSAGE_ID_LENGTH = 4096
 MAX_BASE64_LENGTH = ((MAX_CV_BYTES + 2) // 3) * 4
 CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
+
+
 class EmailBridgeError(frappe.ValidationError):
 	pass
 

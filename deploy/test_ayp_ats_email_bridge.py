@@ -38,7 +38,12 @@ class GraphModule:
 		self.calls.append((role, method, url, body, approval_ref, immutable_message_ids))
 		base_url = url.split("?", 1)[0]
 		if base_url.endswith("/attachments"):
-			return {"value": [{key: value for key, value in row.items() if key != "contentBytes"} for row in self.attachments]}
+			return {
+				"value": [
+					{key: value for key, value in row.items() if key != "contentBytes"}
+					for row in self.attachments
+				]
+			}
 		if "/attachments/" in base_url:
 			attachment_id = base_url.rsplit("/", 1)[-1]
 			return next(row for row in self.attachments if row.get("id") == attachment_id)
@@ -229,7 +234,9 @@ class TestAyPEmailBridge(unittest.TestCase):
 		with (
 			tempfile.TemporaryDirectory() as tmp,
 			patch.object(bridge, "_load_graph_client", return_value=graph),
-			patch.object(bridge, "_remote_ingest", side_effect=bridge.BridgeError("remote_ingest_failed:test")),
+			patch.object(
+				bridge, "_remote_ingest", side_effect=bridge.BridgeError("remote_ingest_failed:test")
+			),
 			patch.object(bridge, "_exclusive_lock", return_value=contextlib.nullcontext()),
 			patch.object(sys, "argv", [str(SCRIPT), "--state", str(Path(tmp) / "state.json")]),
 			contextlib.redirect_stdout(io.StringIO()) as output,
