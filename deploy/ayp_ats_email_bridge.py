@@ -257,7 +257,11 @@ def _validate_message_scan_url(value: Any) -> str:
 
 
 def _message_scan_url_digest(value: str) -> str:
-	return hashlib.sha256(value.encode("utf-8")).hexdigest()
+	parsed = urlparse(value)
+	identity = f"https://graph.microsoft.com{unquote(parsed.path).casefold()}"
+	if parsed.query:
+		identity = f"{identity}?{parsed.query}"
+	return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
 def _load_state(path: Path = STATE_PATH) -> dict[str, Any]:
@@ -432,15 +436,16 @@ def _fetch_messages(
 	url = _validate_message_scan_url(start_url) if start_url is not None else initial_url
 	known = known_fingerprints or set()
 	pending: list[dict[str, Any]] = []
-	seen_urls: set[str] = set()
+	seen_url_digests: set[str] = set()
 	history = list(cursor_history or [])
 	history_set = set(history)
 	if start_url is not None and _message_scan_url_digest(url) in history_set:
 		raise BridgeError("graph_message_next_link_cycle")
 	for _ in range(MAX_MESSAGE_PAGES):
-		if url in seen_urls:
+		url_digest = _message_scan_url_digest(url)
+		if url_digest in seen_url_digests:
 			raise BridgeError("graph_message_next_link_cycle")
-		seen_urls.add(url)
+		seen_url_digests.add(url_digest)
 		page_url = url
 		response = _graph_get(request_graph, url)
 		value = response.get("value")
@@ -461,14 +466,14 @@ def _fetch_messages(
 			next_url = None
 		else:
 			next_url = _validate_message_scan_url(response["@odata.nextLink"])
-			if next_url in seen_urls:
+			if _message_scan_url_digest(next_url) in seen_url_digests:
 				raise BridgeError("graph_message_next_link_cycle")
+		if next_url is not None and _message_scan_url_digest(next_url) in history_set:
+			raise BridgeError("graph_message_next_link_cycle")
 		if len(pending) >= limit:
 			return MessageBatch(pending[:limit], page_url, tuple(history))
 		if next_url is None:
 			return MessageBatch(pending, None, ())
-		if _message_scan_url_digest(next_url) in history_set:
-			raise BridgeError("graph_message_next_link_cycle")
 		if len(history) >= MAX_MESSAGE_CURSOR_HISTORY:
 			raise BridgeError("graph_message_cursor_history_exhausted")
 		page_digest = _message_scan_url_digest(page_url)
@@ -529,16 +534,20 @@ def _same_attachment(metadata: dict[str, Any], hydrated: dict[str, Any]) -> bool
 def _validate_attachment_identity_fields(value: dict[str, Any], *, code: str) -> None:
 	if (
 		not isinstance(value.get("@odata.type"), str)
-		or not value.get("@odata.type")
+		or not value["@odata.type"].strip()
+		or value["@odata.type"] != value["@odata.type"].strip()
 		or len(value["@odata.type"]) > 512
 		or not isinstance(value.get("id"), str)
-		or not value.get("id")
+		or not value["id"].strip()
+		or value["id"] != value["id"].strip()
 		or len(value["id"]) > 4096
 		or not isinstance(value.get("name"), str)
-		or not value.get("name")
+		or not value["name"].strip()
+		or value["name"] != value["name"].strip()
 		or len(value["name"]) > 4096
 		or not isinstance(value.get("contentType"), str)
-		or not value.get("contentType")
+		or not value["contentType"].strip()
+		or value["contentType"] != value["contentType"].strip()
 		or len(value["contentType"]) > 512
 		or not isinstance(value.get("size"), int)
 		or isinstance(value.get("size"), bool)

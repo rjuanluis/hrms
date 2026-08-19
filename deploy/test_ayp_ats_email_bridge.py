@@ -744,6 +744,48 @@ class TestAyPEmailBridge(unittest.TestCase):
 			self.assertEqual(state_path.read_bytes(), first_state)
 			self.assertEqual(json.loads(second_output.getvalue())["code"], "graph_message_next_link_cycle")
 
+	def test_cross_run_cycle_is_canonicalized_and_rejected_before_pending_candidate(self):
+		base_path = "/v1.0/users/empleos@aroypedal.com/mailFolders/inbox/messages"
+		current_url = f"https://graph.microsoft.com{base_path}?$skiptoken=current"
+		prior_url = f"https://graph.microsoft.com{base_path}?$skiptoken=prior"
+		case_variant_prior = (
+			"https://GRAPH.MICROSOFT.COM/V1.0/USERS/EMPLEOS@AROYPEDAL.COM/"
+			"MAILFOLDERS/INBOX/MESSAGES?$skiptoken=prior"
+		)
+		self.assertEqual(
+			bridge._message_scan_url_digest(prior_url),
+			bridge._message_scan_url_digest(case_variant_prior),
+		)
+
+		def request_graph(**kwargs):
+			return {"value": [self.message()], "@odata.nextLink": case_variant_prior}
+
+		graph = types.SimpleNamespace(request_graph=request_graph)
+		with (
+			tempfile.TemporaryDirectory() as tmp,
+			patch.object(bridge, "_load_graph_client", return_value=graph),
+			patch.object(bridge, "_remote_ingest") as remote,
+			patch.object(bridge, "_exclusive_lock", return_value=contextlib.nullcontext()),
+			contextlib.redirect_stdout(io.StringIO()) as output,
+		):
+			state_path = Path(tmp) / "state.json"
+			bridge._save_state(
+				{
+					"version": 1,
+					"messages": {},
+					"message_scan_url": current_url,
+					"message_scan_history": [bridge._message_scan_url_digest(prior_url)],
+				},
+				state_path,
+			)
+			state_before = state_path.read_bytes()
+			with patch.object(sys, "argv", [str(SCRIPT), "--limit", "1", "--state", str(state_path)]):
+				return_code = bridge.main()
+			self.assertEqual(return_code, 2)
+			self.assertEqual(state_path.read_bytes(), state_before)
+			remote.assert_not_called()
+			self.assertEqual(json.loads(output.getvalue())["code"], "graph_message_next_link_cycle")
+
 	def test_untrusted_next_link_is_nonzero_fault_and_never_persisted(self):
 		known = self.message()
 		known_fingerprint = bridge._fingerprint(bridge._message_key(known))
@@ -862,23 +904,33 @@ class TestAyPEmailBridge(unittest.TestCase):
 						"GRAPH-ID-1",
 					)
 
-	def test_empty_attachment_type_is_retryable_without_state_or_ingest(self):
-		attachment = {**self.attachment(), "@odata.type": ""}
-		graph = GraphModule(self.message(), [attachment])
-		with (
-			tempfile.TemporaryDirectory() as tmp,
-			patch.object(bridge, "_load_graph_client", return_value=graph),
-			patch.object(bridge, "_remote_ingest") as remote,
-			patch.object(bridge, "_exclusive_lock", return_value=contextlib.nullcontext()),
-			contextlib.redirect_stdout(io.StringIO()) as output,
+	def test_blank_mandatory_attachment_strings_are_retryable_without_state_or_ingest(self):
+		for field, malformed in (
+			("@odata.type", ""),
+			("@odata.type", " "),
+			("id", "	"),
+			("name", "\n"),
+			("contentType", "  "),
 		):
-			state_path = Path(tmp) / "state.json"
-			with patch.object(sys, "argv", [str(SCRIPT), "--state", str(state_path)]):
-				return_code = bridge.main()
-		self.assertEqual(return_code, 2)
-		self.assertFalse(state_path.exists())
-		remote.assert_not_called()
-		self.assertEqual(json.loads(output.getvalue())["reasons"], {"graph_attachment_metadata_invalid": 1})
+			with self.subTest(field=field, malformed=malformed), tempfile.TemporaryDirectory() as tmp:
+				attachment = {**self.attachment(), field: malformed}
+				graph = GraphModule(self.message(), [attachment])
+				with (
+					patch.object(bridge, "_load_graph_client", return_value=graph),
+					patch.object(bridge, "_remote_ingest") as remote,
+					patch.object(bridge, "_exclusive_lock", return_value=contextlib.nullcontext()),
+					contextlib.redirect_stdout(io.StringIO()) as output,
+				):
+					state_path = Path(tmp) / "state.json"
+					with patch.object(sys, "argv", [str(SCRIPT), "--state", str(state_path)]):
+						return_code = bridge.main()
+				self.assertEqual(return_code, 2)
+				self.assertFalse(state_path.exists())
+				remote.assert_not_called()
+				self.assertEqual(
+					json.loads(output.getvalue())["reasons"],
+					{"graph_attachment_metadata_invalid": 1},
+				)
 
 	def test_malformed_body_content_type_is_retryable_without_state_or_ingest(self):
 		metadata = {key: value for key, value in self.attachment().items() if key != "contentBytes"}
