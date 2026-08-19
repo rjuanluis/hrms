@@ -60,6 +60,7 @@ class TestAyPEmailBridge(unittest.TestCase):
 			"subject": "Solicitud sintética HR-OPN-2026-0001",
 			"receivedDateTime": "2026-08-15T12:00:00Z",
 			"sender": {"emailAddress": {"address": "candidate@example.test", "name": "Candidata Sintética"}},
+			"from": {"emailAddress": {"address": "candidate@example.test", "name": "Candidata Sintética"}},
 			"hasAttachments": True,
 		}
 
@@ -71,7 +72,7 @@ class TestAyPEmailBridge(unittest.TestCase):
 			"contentType": "application/pdf",
 			"size": 12,
 			"isInline": False,
-			"contentBytes": "JVBERi0xLjQK",
+			"contentBytes": "JVBERi0xLjQKYWJj",
 		}
 
 	def test_selects_one_candidate_and_ignores_inline_logo(self):
@@ -448,6 +449,65 @@ class TestAyPEmailBridge(unittest.TestCase):
 		metadata = {key: value for key, value in self.attachment().items() if key != "contentBytes"}
 		hydrated = {**self.attachment(), "name": "replaced.pdf"}
 		self.assertFalse(bridge._same_attachment(metadata, hydrated))
+		with self.assertRaisesRegex(bridge.BridgeError, "graph_attachment_changed_after_preflight"):
+			bridge._validate_hydrated_attachment(metadata, hydrated)
+
+	def test_incomplete_graph_hydration_is_retryable_fault_and_not_persisted(self):
+		attachment = self.attachment()
+		attachment.pop("contentBytes")
+		graph = GraphModule(self.message(), [attachment])
+		with (
+			tempfile.TemporaryDirectory() as tmp,
+			patch.object(bridge, "_load_graph_client", return_value=graph),
+			patch.object(bridge, "_remote_ingest") as remote,
+			patch.object(bridge, "_exclusive_lock", return_value=contextlib.nullcontext()),
+			contextlib.redirect_stdout(io.StringIO()) as output,
+		):
+			state_path = Path(tmp) / "state.json"
+			with patch.object(sys, "argv", [str(SCRIPT), "--state", str(state_path)]):
+				return_code = bridge.main()
+			self.assertEqual(return_code, 2)
+			self.assertFalse(state_path.exists())
+			remote.assert_not_called()
+			report = json.loads(output.getvalue())
+			self.assertEqual(report["faults"], 1)
+			self.assertEqual(report["reasons"], {"graph_attachment_content_invalid": 1})
+
+	def test_hydrated_attachment_requires_valid_base64_and_exact_declared_length(self):
+		metadata = {key: value for key, value in self.attachment().items() if key != "contentBytes"}
+		for content in ("not base64!", "JVBERi0xLjQK"):
+			with (
+				self.subTest(content=content),
+				self.assertRaisesRegex(bridge.BridgeError, "graph_attachment_content_invalid"),
+			):
+				bridge._validate_hydrated_attachment(metadata, {**metadata, "contentBytes": content})
+
+	def test_malformed_attachment_collection_member_is_graph_fault(self):
+		valid = {key: value for key, value in self.attachment().items() if key != "contentBytes"}
+		with self.assertRaisesRegex(bridge.BridgeError, "graph_attachment_metadata_invalid"):
+			bridge._fetch_attachment_metadata(lambda **kwargs: {"value": [valid, None]}, "GRAPH-ID")
+
+	def test_sender_from_mismatch_blocks_before_body_or_attachment_reads(self):
+		message = self.message()
+		message["sender"] = {
+			"emailAddress": {"address": "delegate@example.test", "name": "Delegada Sintética"}
+		}
+		graph = GraphModule(message, [self.attachment()])
+		with (
+			tempfile.TemporaryDirectory() as tmp,
+			patch.object(bridge, "_load_graph_client", return_value=graph),
+			patch.object(bridge, "_remote_ingest") as remote,
+			contextlib.redirect_stdout(io.StringIO()),
+		):
+			state_path = Path(tmp) / "state.json"
+			result = bridge.run(dry_run=False, limit=10, report_json=False, state_path=state_path)
+			persisted = json.loads(state_path.read_text())
+		self.assertEqual(result["blocked"], 1)
+		self.assertEqual(result["faults"], 0)
+		self.assertEqual(result["errors"][0]["code"], "blocked_sender_from_mismatch")
+		self.assertEqual(len(graph.calls), 1)
+		self.assertIn("blocked_sender_from_mismatch", persisted["messages"].values())
+		remote.assert_not_called()
 
 	def test_attachment_size_accepts_only_exact_integer_type(self):
 		for malformed in (True, False, 12.0, "12", None, float("inf"), float("nan")):
@@ -478,13 +538,57 @@ class TestAyPEmailBridge(unittest.TestCase):
 			calls.append(kwargs)
 			return next(responses)
 
-		result = bridge._fetch_messages(
+		batch = bridge._fetch_messages(
 			request_graph,
 			1,
 			{bridge._fingerprint(bridge._message_key(known))},
 		)
-		self.assertEqual([row["id"] for row in result], ["GRAPH-ID-2"])
+		self.assertEqual([row["id"] for row in batch.messages], ["GRAPH-ID-2"])
+		self.assertIsNotNone(batch.resume_url)
 		self.assertEqual(len(calls), 2)
+
+	def test_message_pagination_persists_validated_progress_beyond_one_thousand(self):
+		known = self.message()
+		known_set = {bridge._fingerprint(bridge._message_key(known))}
+		mailbox_path = "/v1.0/users/empleos@aroypedal.com/mailFolders/inbox/messages"
+		page_calls = 0
+
+		def first_scan(**kwargs):
+			nonlocal page_calls
+			page_calls += 1
+			return {
+				"value": [known],
+				"@odata.nextLink": f"https://graph.microsoft.com{mailbox_path}?$skiptoken=page-{page_calls + 1}",
+			}
+
+		first = bridge._fetch_messages(first_scan, 1, known_set)
+		self.assertEqual(first.messages, [])
+		self.assertEqual(page_calls, bridge.MAX_MESSAGE_PAGES)
+		self.assertIn("page-11", first.resume_url or "")
+
+		with tempfile.TemporaryDirectory() as tmp:
+			path = Path(tmp) / "state.json"
+			bridge._save_state(
+				{
+					"version": 1,
+					"messages": {next(iter(known_set)): "created"},
+					"message_scan_url": first.resume_url,
+				},
+				path,
+			)
+			persisted = bridge._load_state(path)
+			pending = {
+				**self.message(),
+				"id": "GRAPH-ID-1001",
+				"internetMessageId": "<synthetic-1001@example.test>",
+			}
+			second = bridge._fetch_messages(
+				lambda **kwargs: {"value": [pending]},
+				1,
+				known_set,
+				start_url=persisted["message_scan_url"],
+			)
+		self.assertEqual([row["id"] for row in second.messages], ["GRAPH-ID-1001"])
 
 	def test_identity_uses_full_digest_of_mailbox_and_immutable_graph_id(self):
 		first = self.message()
@@ -523,6 +627,22 @@ class TestAyPEmailBridge(unittest.TestCase):
 			path.write_text('{"version":1,"messages":{}}')
 			path.chmod(0o644)
 			with self.assertRaisesRegex(bridge.BridgeError, "state_permissions_unsafe"):
+				bridge._load_state(path)
+
+	def test_state_rejects_continuation_url_outside_exact_mailbox_collection(self):
+		with tempfile.TemporaryDirectory() as tmp:
+			path = Path(tmp) / "state.json"
+			path.write_text(
+				json.dumps(
+					{
+						"version": 1,
+						"messages": {},
+						"message_scan_url": "https://graph.microsoft.com/v1.0/users/other@example.test/messages",
+					}
+				)
+			)
+			path.chmod(0o600)
+			with self.assertRaisesRegex(bridge.BridgeError, "state_schema_invalid"):
 				bridge._load_state(path)
 
 	def test_process_lock_is_private_and_fails_closed_on_overlap(self):

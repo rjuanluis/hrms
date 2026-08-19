@@ -45,7 +45,7 @@ jobs:
           python-version: "3.14"
       - name: Validate Python, JSON, shell and deployment files
         run: |
-          python -m compileall -q hrms deploy/bootstrap_site.py deploy/configure_standard.py deploy/ayp_ats_email_bridge.py deploy/test_ayp_ats_email_bridge.py
+          python -m compileall -q hrms deploy/bootstrap_site.py deploy/configure_standard.py deploy/ayp_ats_email_bridge.py deploy/test_ayp_ats_email_bridge.py deploy/test_ayp_ats_vacancy_lock.py
           python deploy/test_ayp_ats_email_bridge.py
           runner_sha=$(sha256sum deploy/ayp_ats_email_bridge.py | cut -d ' ' -f 1)
           test_sha=$(sha256sum deploy/test_ayp_ats_email_bridge.py | cut -d ' ' -f 1)
@@ -180,9 +180,47 @@ jobs:
               raise SystemExit('Wrapper must not execute mutable deployment code')
           PY
 
+  authority-lock:
+    name: Verify ATS vacancy authority lock in MariaDB
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: ats-lock-test
+          MARIADB_DATABASE: ats_lock_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Prove insert and status changes wait for the authority transaction
+        env:
+          AYP_ATS_TEST_DB_HOST: 127.0.0.1
+          AYP_ATS_TEST_DB_PORT: "3306"
+          AYP_ATS_TEST_DB_NAME: ats_lock_test
+          AYP_ATS_TEST_DB_USER: root
+          AYP_ATS_TEST_DB_PASSWORD: ats-lock-test
+        run: |
+          python -m pip install --disable-pip-version-check PyMySQL==1.1.1
+          python deploy/test_ayp_ats_vacancy_lock.py
+
   build:
     name: Build and publish Frappe v16 + ERPNext + HRMS
-    needs: validate
+    needs: [validate, authority-lock]
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
     permissions:

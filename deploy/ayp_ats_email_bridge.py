@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import fcntl
 import hashlib
 import importlib.util
@@ -81,6 +82,10 @@ class BridgeError(RuntimeError):
 	"""Sanitized operational failure safe for cron delivery."""
 
 
+class AdmissionBlock(RuntimeError):
+	"""Deterministic message-level rejection safe to persist."""
+
+
 REMOTE_ADMISSION_CODES = frozenset(
 	{
 		"blocked_authorized_vacancy_configuration",
@@ -94,6 +99,12 @@ class CandidateMessage:
 	key: str
 	graph_id: str
 	payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class MessageBatch:
+	messages: list[dict[str, Any]]
+	resume_url: str | None
 
 
 SIMPLE_CONSENT_HTML_TAGS = frozenset({"html", "body", "div", "p", "span", "br"})
@@ -224,6 +235,18 @@ def _load_state(path: Path = STATE_PATH) -> dict[str, Any]:
 		raise BridgeError("state_invalid") from exc
 	if value.get("version") != 1 or not isinstance(value.get("messages"), dict):
 		raise BridgeError("state_schema_invalid")
+	resume_url = value.get("message_scan_url")
+	if resume_url is not None:
+		if not isinstance(resume_url, str) or len(resume_url) > 8192:
+			raise BridgeError("state_schema_invalid")
+		parsed = urlparse(resume_url)
+		expected_path = f"/v1.0/users/{MAILBOX}/mailFolders/inbox/messages"
+		if (
+			parsed.scheme != "https"
+			or parsed.netloc.casefold() != "graph.microsoft.com"
+			or unquote(parsed.path).casefold() != expected_path.casefold()
+		):
+			raise BridgeError("state_schema_invalid")
 	return value
 
 
@@ -299,39 +322,58 @@ def _select_candidate_attachment(
 	return row, "candidate"
 
 
-def _sender(message: dict[str, Any]) -> tuple[str, str]:
-	address = (message.get("sender") or {}).get("emailAddress") or {}
+def _email_identity(message: dict[str, Any], field: str) -> tuple[str, str]:
+	container = message.get(field)
+	if not isinstance(container, dict):
+		raise BridgeError("message_identity_invalid")
+	address = container.get("emailAddress")
+	if not isinstance(address, dict):
+		raise BridgeError("message_identity_invalid")
 	email = str(address.get("address") or "").strip().casefold()
 	name = str(address.get("name") or "").strip()
 	if not email or len(email) > 140 or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
-		raise BridgeError("sender_invalid")
-	if not name:
-		name = email.split("@", 1)[0]
-	return email, name[:140]
+		raise BridgeError("message_identity_invalid")
+	return email, name
+
+
+def _sender(message: dict[str, Any]) -> tuple[str, str]:
+	sender_email, sender_name = _email_identity(message, "sender")
+	from_email, from_name = _email_identity(message, "from")
+	if sender_email != from_email:
+		raise AdmissionBlock("blocked_sender_from_mismatch")
+	name = from_name or sender_name or from_email.split("@", 1)[0]
+	return from_email, name[:140]
 
 
 def _fetch_messages(
 	request_graph: Callable[..., Any],
 	limit: int,
 	known_fingerprints: set[str] | None = None,
-) -> list[dict[str, Any]]:
+	start_url: str | None = None,
+) -> MessageBatch:
 	mailbox = quote(MAILBOX, safe="@")
-	select = "id,internetMessageId,subject,receivedDateTime,sender,hasAttachments"
-	url = (
+	select = "id,internetMessageId,subject,receivedDateTime,sender,from,hasAttachments"
+	initial_url = (
 		f"https://graph.microsoft.com/v1.0/users/{mailbox}/mailFolders/inbox/messages"
 		"?$select="
 		f"{select}&$filter=receivedDateTime%20ge%20{INTAKE_START_UTC}%20and%20hasAttachments%20eq%20true"
 		f"&$orderby=receivedDateTime%20desc&$top={MESSAGE_PAGE_SIZE}"
 	)
+	url = start_url or initial_url
 	known = known_fingerprints or set()
 	pending: list[dict[str, Any]] = []
 	for _ in range(MAX_MESSAGE_PAGES):
+		page_url = url
 		response = _graph_get(request_graph, url)
 		value = response.get("value")
 		if not isinstance(value, list):
 			raise BridgeError("graph_message_list_invalid")
 		for row in value:
-			if not isinstance(row, dict) or not row.get("hasAttachments"):
+			if not isinstance(row, dict):
+				raise BridgeError("graph_message_list_invalid")
+			if not isinstance(row.get("hasAttachments"), bool):
+				raise BridgeError("graph_message_list_invalid")
+			if not row.get("hasAttachments"):
 				continue
 			try:
 				fingerprint = _fingerprint(_message_key(row))
@@ -341,14 +383,14 @@ def _fetch_messages(
 				if fingerprint not in known:
 					pending.append(row)
 			if len(pending) >= limit:
-				return pending
+				return MessageBatch(pending[:limit], page_url)
 		next_link = response.get("@odata.nextLink")
 		if not next_link:
-			return pending
+			return MessageBatch(pending, None)
 		if not isinstance(next_link, str) or not next_link.startswith("https://graph.microsoft.com/v1.0/"):
 			raise BridgeError("graph_message_next_link_invalid")
 		url = next_link
-	raise BridgeError("graph_message_backlog_exceeds_scan_limit")
+	return MessageBatch(pending, url)
 
 
 def _fetch_attachment_metadata(request_graph: Callable[..., Any], graph_id: str) -> list[dict[str, Any]]:
@@ -368,7 +410,27 @@ def _fetch_attachment_metadata(request_graph: Callable[..., Any], graph_id: str)
 	value = response.get("value")
 	if not isinstance(value, list):
 		raise BridgeError("graph_attachment_list_invalid")
-	return [row for row in value if isinstance(row, dict)]
+	for row in value:
+		if not isinstance(row, dict):
+			raise BridgeError("graph_attachment_metadata_invalid")
+		if (
+			not isinstance(row.get("@odata.type"), str)
+			or not isinstance(row.get("id"), str)
+			or not row.get("id")
+			or len(row["id"]) > 4096
+			or not isinstance(row.get("name"), str)
+			or not row.get("name")
+			or len(row["name"]) > 4096
+			or not isinstance(row.get("contentType"), str)
+			or not row.get("contentType")
+			or len(row["contentType"]) > 512
+			or not isinstance(row.get("size"), int)
+			or isinstance(row.get("size"), bool)
+			or row["size"] < 0
+			or not isinstance(row.get("isInline"), bool)
+		):
+			raise BridgeError("graph_attachment_metadata_invalid")
+	return value
 
 
 def _fetch_attachment_content(
@@ -391,6 +453,20 @@ def _same_attachment(metadata: dict[str, Any], hydrated: dict[str, Any]) -> bool
 		metadata.get(field) == hydrated.get(field)
 		for field in ("@odata.type", "id", "name", "contentType", "size", "isInline")
 	)
+
+
+def _validate_hydrated_attachment(metadata: dict[str, Any], hydrated: dict[str, Any]) -> None:
+	if not _same_attachment(metadata, hydrated):
+		raise BridgeError("graph_attachment_changed_after_preflight")
+	content = hydrated.get("contentBytes")
+	if not isinstance(content, str) or not content or len(content) > MAX_GRAPH_CONTENT_CHARS:
+		raise BridgeError("graph_attachment_content_invalid")
+	try:
+		decoded = base64.b64decode(content.encode("ascii"), validate=True)
+	except (UnicodeEncodeError, binascii.Error, ValueError) as exc:
+		raise BridgeError("graph_attachment_content_invalid") from exc
+	if len(decoded) != metadata.get("size"):
+		raise BridgeError("graph_attachment_content_invalid")
 
 
 def _has_current_vacancy_consent(request_graph: Callable[..., Any], graph_id: str) -> bool:
@@ -496,15 +572,25 @@ def run(*, dry_run: bool, limit: int, report_json: bool, state_path: Path = STAT
 		"errors": [],
 	}
 	dirty = False
-	messages = _fetch_messages(graph.request_graph, limit, set(state["messages"]))
+	advance_scan = True
+	batch = _fetch_messages(
+		graph.request_graph,
+		limit,
+		set(state["messages"]),
+		start_url=state.get("message_scan_url"),
+	)
+	messages = batch.messages
 	for message in messages:
 		summary["checked"] += 1
+		fingerprint = _fingerprint(str(message.get("id") or "unknown"))
 		try:
 			key = _message_key(message)
 			fingerprint = _fingerprint(key)
 			if fingerprint in state["messages"]:
 				summary["ignored"] += 1
 				continue
+			# Bind the applicant and consent identity before reading body or CV bytes.
+			_sender(message)
 			attachments = _fetch_attachment_metadata(graph.request_graph, str(message["id"]))
 			selected, outcome = _select_candidate_attachment(attachments, require_content=False)
 			if selected is None:
@@ -528,8 +614,7 @@ def run(*, dry_run: bool, limit: int, report_json: bool, state_path: Path = STAT
 			hydrated = _fetch_attachment_content(
 				graph.request_graph, str(message["id"]), str(selected.get("id") or "")
 			)
-			if not _same_attachment(selected, hydrated):
-				raise BridgeError("graph_attachment_changed_after_preflight")
+			_validate_hydrated_attachment(selected, hydrated)
 			selected, outcome = _select_candidate_attachment([hydrated])
 			if selected is None:
 				summary["blocked"] += 1
@@ -547,15 +632,31 @@ def run(*, dry_run: bool, limit: int, report_json: bool, state_path: Path = STAT
 			if result_status == "blocked":
 				summary["blocked"] += 1
 				summary["errors"].append({"message": fingerprint, "code": str(result["code"])})
+				advance_scan = False
 				continue
 			summary[result_status] += 1
 			state["messages"][fingerprint] = result_status
 			dirty = True
+		except AdmissionBlock as exc:
+			outcome = str(exc)[:80]
+			summary["blocked"] += 1
+			summary["errors"].append({"message": fingerprint, "code": outcome})
+			if not dry_run:
+				state["messages"][fingerprint] = outcome
+				dirty = True
 		except BridgeError as exc:
-			fingerprint = _fingerprint(str(message.get("id") or "unknown"))
 			summary["blocked"] += 1
 			summary["faults"] += 1
 			summary["errors"].append({"message": fingerprint, "code": str(exc)[:80]})
+			advance_scan = False
+	if not dry_run and advance_scan:
+		if batch.resume_url is None:
+			if "message_scan_url" in state:
+				state.pop("message_scan_url")
+				dirty = True
+		elif state.get("message_scan_url") != batch.resume_url:
+			state["message_scan_url"] = batch.resume_url
+			dirty = True
 	if dirty:
 		_save_state(state, state_path)
 	if report_json:

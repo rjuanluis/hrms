@@ -400,6 +400,7 @@ class TestEmailBridge(unittest.TestCase):
 			"receivedDateTime": "2026-08-15T17:14:15Z",
 			"subject": "Solicitud de empleo HR-OPN-2026-0001",
 			"sender": {"emailAddress": {"address": "ats-canary@aroypedal.com", "name": "Candidate Example"}},
+			"from": {"emailAddress": {"address": "ats-canary@aroypedal.com", "name": "Candidate Example"}},
 		}
 		attachment = {
 			"name": "candidate.pdf",

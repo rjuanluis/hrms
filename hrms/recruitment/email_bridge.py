@@ -25,6 +25,12 @@ from hrms.security.candidate_cv import (
 )
 
 DEFAULT_JOB_OPENING = "HR-OPN-2026-0001"
+JOB_OPENING_LOCK_SQL = """
+	SELECT `name`, `status`
+	FROM `tabJob Opening`
+	ORDER BY `name`
+	FOR UPDATE
+"""
 RECRUITMENT_MAILBOX = "empleos@aroypedal.com"
 JOB_OPENING_CONFIG_KEY = "ayp_email_bridge_job_opening"
 EMAIL_PROVENANCE_FIELD = "custom_ayp_email_provenance"
@@ -199,16 +205,7 @@ def _job_opening() -> str:
 	# Lock the complete authoritative set, not only currently-open rows. Under
 	# InnoDB's transaction isolation this prevents an opening from changing
 	# status or being inserted between authorization and applicant insertion.
-	job_opening_rows = frappe.db.sql(
-		"""
-		SELECT `name`, `status`
-		FROM `tabJob Opening`
-		ORDER BY `name`
-		FOR UPDATE
-		""",
-		(),
-		as_dict=True,
-	)
+	job_opening_rows = frappe.db.sql(JOB_OPENING_LOCK_SQL, (), as_dict=True)
 	open_job_openings = sorted(
 		{
 			str(row.get("name") or "").strip()
