@@ -385,6 +385,15 @@ class TestAyPEmailBridge(unittest.TestCase):
 		for body in (
 			{"contentType": "text", "content": bridge.CONSENT_PHRASE},
 			{"contentType": "html", "content": f"<p>{bridge.CONSENT_PHRASE}</p>"},
+			{
+				"contentType": "html",
+				"content": (
+					'<!DOCTYPE html><html><head><meta http-equiv="Content-Type" '
+					'content="text/html; charset=utf-8"></head><body>'
+					f'<div dir="ltr" style="font-family:Arial; font-size:12pt">'
+					f"{bridge.CONSENT_PHRASE}</div></body></html>"
+				),
+			},
 		):
 			graph = GraphModule(self.message(), [self.attachment()], body=body)
 			with self.subTest(body=body):
@@ -481,6 +490,17 @@ class TestAyPEmailBridge(unittest.TestCase):
 		self.assertTrue(any(call[2].split("?", 1)[0].endswith("/attachments") for call in graph.calls))
 		self.assertTrue(any("/attachments/ATT-1" in call[2] for call in graph.calls))
 		remote.assert_not_called()
+
+	def test_full_subject_is_transported_without_splitting_authorized_reference(self):
+		partial_token = " HR-OPN-2026-00"
+		prefix = "A" * (bridge.MAX_STORED_SUBJECT_CHARS - len(partial_token))
+		subject = prefix + " HR-OPN-2026-0001"
+		self.assertTrue(bridge.subject_has_only_authorized_vacancy_references(subject))
+		self.assertFalse(
+			bridge.subject_has_only_authorized_vacancy_references(subject[: bridge.MAX_STORED_SUBJECT_CHARS])
+		)
+		candidate = bridge._build_candidate({**self.message(), "subject": subject}, self.attachment())
+		self.assertEqual(candidate.payload["subject"], subject)
 
 	def test_consent_html_rejects_processing_instruction(self):
 		message = self.message()
@@ -659,6 +679,7 @@ class TestAyPEmailBridge(unittest.TestCase):
 			"cv.pdf\n",
 			f"{'a' * bridge.MAX_CANDIDATE_FILENAME_LENGTH}x.pdf",
 			f"{'a' * 4097}.pdf",
+			"é" * 136 + ".png",
 		):
 			with self.subTest(filename=filename):
 				selected, status = bridge._select_candidate_attachment(
@@ -769,6 +790,65 @@ class TestAyPEmailBridge(unittest.TestCase):
 			self.assertEqual(second["faults"], 0)
 			remote.assert_called_once()
 			self.assertTrue(any("$skiptoken=older-valid" in url for url in calls))
+
+	def test_limit_sized_oversized_bodies_are_terminal_and_cannot_starve_older_mail(self):
+		oversized_messages = [
+			{
+				**self.message(),
+				"id": f"OVERSIZED-{index}",
+				"internetMessageId": f"<oversized-{index}@example.test>",
+			}
+			for index in range(10)
+		]
+		valid = {
+			**self.message(),
+			"id": "VALID-AFTER-OVERSIZED",
+			"internetMessageId": "<valid-after-oversized@example.test>",
+		}
+		older_url = (
+			"https://graph.microsoft.com/v1.0/users/empleos@aroypedal.com/"
+			"mailFolders/inbox/messages?$skiptoken=after-oversized"
+		)
+		metadata = {key: value for key, value in self.attachment().items() if key != "contentBytes"}
+		oversized_body = bridge.CONSENT_PHRASE + ("x" * bridge.MAX_MESSAGE_BODY_CHARS)
+		calls: list[str] = []
+
+		def request_graph(**kwargs):
+			url = kwargs["url"]
+			calls.append(url)
+			base_url = url.split("?", 1)[0]
+			if "/attachments/" in base_url:
+				return self.attachment()
+			if base_url.endswith("/attachments"):
+				return {"value": [metadata]}
+			if "?$select=body" in url:
+				body = oversized_body if "/messages/OVERSIZED-" in url else bridge.CONSENT_PHRASE
+				return {"body": {"contentType": "text", "content": body}}
+			if "$skiptoken=after-oversized" in url:
+				return {"value": [valid]}
+			return {"value": oversized_messages, "@odata.nextLink": older_url}
+
+		graph = types.SimpleNamespace(request_graph=request_graph)
+		with (
+			tempfile.TemporaryDirectory() as tmp,
+			patch.object(bridge, "_load_graph_client", return_value=graph),
+			patch.object(bridge, "_remote_ingest") as remote,
+			contextlib.redirect_stdout(io.StringIO()),
+		):
+			state_path = Path(tmp) / "state.json"
+			first = bridge.run(dry_run=False, limit=10, report_json=False, state_path=state_path)
+			self.assertEqual(first["blocked"], 10)
+			self.assertEqual(first["faults"], 0)
+			remote.assert_not_called()
+			self.assertFalse(any("/attachments/ATT-1" in url for url in calls))
+			self.assertEqual(len(bridge._load_state(state_path)["messages"]), 10)
+
+			remote.return_value = {"status": "created", "applicant": "APP-AFTER-OVERSIZED"}
+			second = bridge.run(dry_run=False, limit=10, report_json=False, state_path=state_path)
+			self.assertEqual(second["created"], 1)
+			self.assertEqual(second["faults"], 0)
+			remote.assert_called_once()
+			self.assertTrue(any("$skiptoken=after-oversized" in url for url in calls))
 
 	def test_message_pagination_persists_validated_progress_beyond_one_thousand(self):
 		known = self.message()
@@ -1007,15 +1087,60 @@ class TestAyPEmailBridge(unittest.TestCase):
 				remote.assert_not_called()
 				self.assertEqual(json.loads(output.getvalue())["code"], expected_code)
 
-	def test_any_present_attachment_continuation_is_provider_fault(self):
+	def test_malformed_present_attachment_continuation_is_provider_fault(self):
 		valid = {key: value for key, value in self.attachment().items() if key != "contentBytes"}
 		for next_link in (None, "", 0, False, [], {}):
 			with self.subTest(next_link=next_link):
-				with self.assertRaisesRegex(bridge.BridgeError, "graph_attachment_list_paginated"):
+				with self.assertRaisesRegex(bridge.BridgeError, "graph_attachment_next_link_invalid"):
 					bridge._fetch_attachment_metadata(
 						lambda **kwargs: {"value": [valid], "@odata.nextLink": next_link},
 						"GRAPH-ID-1",
 					)
+
+	def test_attachment_pagination_accepts_valid_candidate_and_ignores_unsafe_inline_name(self):
+		inline = {
+			**self.attachment("inline.png\n"),
+			"id": "INLINE-1",
+			"isInline": True,
+		}
+		candidate = self.attachment()
+		for row in (inline, candidate):
+			row.pop("contentBytes", None)
+		next_link = (
+			"https://graph.microsoft.com/v1.0/users/empleos@aroypedal.com/"
+			"messages/GRAPH-ID-1/attachments?$skiptoken=next"
+		)
+		responses = iter(({"value": [inline], "@odata.nextLink": next_link}, {"value": [candidate]}))
+		rows = bridge._fetch_attachment_metadata(lambda **kwargs: next(responses), "GRAPH-ID-1")
+		self.assertEqual(rows, [inline, candidate])
+		selected, outcome = bridge._select_candidate_attachment(rows, require_content=False)
+		self.assertEqual(outcome, "candidate")
+		self.assertEqual(selected["id"], "ATT-1")
+
+	def test_attachment_pagination_rejects_cross_message_fragment_and_cycle(self):
+		metadata = {key: value for key, value in self.attachment().items() if key != "contentBytes"}
+		for next_link in (
+			"https://graph.microsoft.com/v1.0/users/empleos@aroypedal.com/messages/OTHER/attachments?$skiptoken=x",
+			"https://graph.microsoft.com/v1.0/users/empleos@aroypedal.com/messages/GRAPH-ID-1/attachments?$skiptoken=x#fragment",
+		):
+			with (
+				self.subTest(next_link=next_link),
+				self.assertRaisesRegex(bridge.BridgeError, "graph_attachment_next_link_invalid"),
+			):
+				bridge._fetch_attachment_metadata(
+					lambda **kwargs: {"value": [metadata], "@odata.nextLink": next_link},
+					"GRAPH-ID-1",
+				)
+
+		cycle_link = (
+			"https://GRAPH.MICROSOFT.COM/v1.0/users/EMPLEOS@AROYPEDAL.COM/"
+			"messages/graph-id-1/attachments?$select=id,name,contentType,size,isInline"
+		)
+		with self.assertRaisesRegex(bridge.BridgeError, "graph_attachment_next_link_cycle"):
+			bridge._fetch_attachment_metadata(
+				lambda **kwargs: {"value": [metadata], "@odata.nextLink": cycle_link},
+				"GRAPH-ID-1",
+			)
 
 	def test_blank_mandatory_attachment_strings_are_retryable_without_state_or_ingest(self):
 		for field, malformed in (

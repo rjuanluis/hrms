@@ -434,6 +434,24 @@ class TestEmailBridge(unittest.TestCase):
 			candidate.payload["consent_evidence_sha256"],
 		)
 
+	def test_full_subject_is_validated_before_storage_truncation(self):
+		partial_token = " HR-OPN-2026-00"
+		prefix = "A" * (self.bridge.MAX_DATA_LENGTH - len(partial_token))
+		subject = prefix + " HR-OPN-2026-0001"
+		self.assertFalse(
+			VACANCY_REFERENCE_MODULE.subject_has_only_authorized_vacancy_references(
+				subject[: self.bridge.MAX_DATA_LENGTH]
+			)
+		)
+		payload = email_payload()
+		payload["subject"] = subject
+		result = self.bridge.ingest_email_payload(payload)
+		self.assertEqual(result["status"], "created")
+		self.assertEqual(
+			self.frappe.inserted_applicants[0].custom_ayp_email_subject,
+			subject[: self.bridge.MAX_DATA_LENGTH],
+		)
+
 	def test_exact_duplicate_returns_existing_without_new_file_or_applicant(self):
 		first = self.bridge.ingest_email_payload(email_payload())
 		self.frappe.locking_read_tables.clear()
@@ -578,6 +596,7 @@ class TestEmailBridge(unittest.TestCase):
 			"folder\\cv.pdf",
 			"cv\x00.pdf",
 			f"{'a' * self.bridge.MAX_DATA_LENGTH}x.pdf",
+			"é" * 136 + ".png",
 		):
 			with self.subTest(filename=filename):
 				payload = email_payload()

@@ -54,6 +54,8 @@ NORMALIZED_CONSENT_PHRASE = (
 	"de mis datos exclusivamente para esta vacante"
 )
 MAX_DATA_LENGTH = 140
+MAX_CANDIDATE_FILENAME_BYTES = 240
+MAX_SUBJECT_LENGTH = 4096
 MAX_RAW_MESSAGE_ID_LENGTH = 4096
 MAX_BASE64_LENGTH = ((MAX_CV_BYTES + 2) // 3) * 4
 CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
@@ -75,6 +77,13 @@ def _fail(message: str) -> NoReturn:
 
 def _block_admission(code: str, message: str) -> NoReturn:
 	raise EmailBridgeAdmissionError(code, message)
+
+
+def _filename_exceeds_storage_bytes(value: str) -> bool:
+	try:
+		return len(value.encode("utf-8")) > MAX_CANDIDATE_FILENAME_BYTES
+	except UnicodeEncodeError:
+		return True
 
 
 def _clean_data(value, *, label: str, required: bool = True, max_length: int = MAX_DATA_LENGTH) -> str:
@@ -172,6 +181,7 @@ def _attachment(payload: dict) -> tuple[str, bytes, str]:
 	raw_filename = attachment.get("name")
 	if isinstance(raw_filename, str) and (
 		len(raw_filename) > MAX_DATA_LENGTH
+		or _filename_exceeds_storage_bytes(raw_filename)
 		or raw_filename in {".", ".."}
 		or "/" in raw_filename
 		or "\\" in raw_filename
@@ -482,8 +492,14 @@ def ingest_email_payload(payload: dict) -> dict:
 	consent_evidence_sha256 = _consent_evidence_sha256(payload)
 	sender_email, sender_name = _sender(payload)
 	received_on = _received_on(payload)
-	subject = _clean_data(payload.get("subject"), label="El asunto", required=False)
-	_require_compatible_subject_vacancy(subject)
+	full_subject = _clean_data(
+		payload.get("subject"),
+		label="El asunto",
+		required=False,
+		max_length=MAX_SUBJECT_LENGTH,
+	)
+	_require_compatible_subject_vacancy(full_subject)
+	subject = full_subject[:MAX_DATA_LENGTH]
 	filename, content, attachment_sha256 = _attachment(payload)
 	job_opening = _job_opening()
 

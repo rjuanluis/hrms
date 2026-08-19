@@ -63,6 +63,12 @@ MESSAGE_PAGE_SIZE = 100
 INTAKE_START_UTC = "2026-08-13T00:00:00Z"
 MAX_CV_BYTES = 5 * 1024 * 1024
 MAX_CANDIDATE_FILENAME_LENGTH = 140
+MAX_CANDIDATE_FILENAME_BYTES = 240
+MAX_MESSAGE_BODY_CHARS = 1024 * 1024
+MAX_ATTACHMENT_PAGES = 100
+MAX_ATTACHMENT_ROWS = 1000
+MAX_SUBJECT_CHARS = 4096
+MAX_STORED_SUBJECT_CHARS = 140
 MAX_GRAPH_CONTENT_CHARS = ((MAX_CV_BYTES + 2) // 3) * 4 + 16
 ALLOWED_EXTENSIONS = frozenset({".pdf", ".docx", ".heic", ".heif", ".jpeg", ".jpg", ".png"})
 CONSENT_NOTICE_VERSION = "AYP-RH-EMAIL-CURRENT-VACANCY-2026-08-15-v1"
@@ -138,8 +144,35 @@ class MessageBatch:
 	cursor_history: tuple[str, ...]
 
 
-SIMPLE_CONSENT_HTML_TAGS = frozenset({"html", "body", "div", "p", "span", "br"})
-SIMPLE_CONSENT_HTML_VOID_TAGS = frozenset({"br"})
+SIMPLE_CONSENT_HTML_TAGS = frozenset(
+	{"html", "head", "body", "div", "p", "span", "br", "strong", "b", "em", "i", "u", "a"}
+)
+SIMPLE_CONSENT_HTML_VOID_TAGS = frozenset({"br", "meta"})
+SAFE_CONSENT_HTML_STYLE_PROPERTIES = frozenset(
+	{
+		"background-color",
+		"color",
+		"font-family",
+		"font-size",
+		"font-style",
+		"font-weight",
+		"letter-spacing",
+		"line-height",
+		"margin",
+		"margin-bottom",
+		"margin-left",
+		"margin-right",
+		"margin-top",
+		"padding",
+		"padding-bottom",
+		"padding-left",
+		"padding-right",
+		"padding-top",
+		"text-align",
+		"text-decoration",
+		"white-space",
+	}
+)
 
 
 class _HTMLTextExtractor(HTMLParser):
@@ -149,16 +182,71 @@ class _HTMLTextExtractor(HTMLParser):
 		self.stack: list[str] = []
 		self.valid = True
 
+	def _attrs_are_safe(self, tag: str, attrs: list[tuple[str, str | None]]) -> bool:
+		lowered: dict[str, str] = {}
+		for raw_name, raw_value in attrs:
+			name = raw_name.casefold()
+			if name in lowered or raw_value is None or len(raw_value) > 2048:
+				return False
+			if any(ord(character) < 32 or ord(character) == 127 for character in raw_value):
+				return False
+			lowered[name] = raw_value
+		if tag == "meta":
+			if not self.stack or self.stack[-1] != "head":
+				return False
+			if not lowered or not set(lowered).issubset({"charset", "content", "http-equiv"}):
+				return False
+			charset = lowered.get("charset", "").casefold().replace("-", "")
+			http_equiv = lowered.get("http-equiv", "").casefold()
+			content = lowered.get("content", "").casefold().replace("-", "")
+			return charset == "utf8" or (
+				http_equiv == "content-type" and "text/html" in content and "charset=utf8" in content
+			)
+		if tag in {"head", "br"}:
+			return not lowered
+		if not set(lowered).issubset({"dir", "lang", "style"}):
+			return False
+		if "dir" in lowered and lowered["dir"].casefold() not in {"auto", "ltr", "rtl"}:
+			return False
+		if "lang" in lowered and not re.fullmatch(r"[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*", lowered["lang"]):
+			return False
+		style = lowered.get("style")
+		if style is None:
+			return True
+		for declaration in style.split(";"):
+			if not declaration.strip():
+				continue
+			if ":" not in declaration:
+				return False
+			property_name, property_value = declaration.split(":", 1)
+			property_name = property_name.strip().casefold()
+			property_value = property_value.strip().casefold()
+			if property_name not in SAFE_CONSENT_HTML_STYLE_PROPERTIES or not property_value:
+				return False
+			if any(marker in property_value for marker in ("expression", "url(", "javascript:")):
+				return False
+			if property_name == "font-size" and re.fullmatch(
+				r"0+(?:\.0+)?(?:px|pt|em|rem|%)?", property_value
+			):
+				return False
+			if property_name == "color" and property_value == "transparent":
+				return False
+		return True
+
 	def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
 		tag = tag.casefold()
-		if tag not in SIMPLE_CONSENT_HTML_TAGS or attrs:
+		if tag not in SIMPLE_CONSENT_HTML_TAGS | SIMPLE_CONSENT_HTML_VOID_TAGS:
+			self.valid = False
+			return
+		if not self._attrs_are_safe(tag, attrs):
 			self.valid = False
 			return
 		if tag not in SIMPLE_CONSENT_HTML_VOID_TAGS:
 			self.stack.append(tag)
 
 	def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-		if tag.casefold() not in SIMPLE_CONSENT_HTML_VOID_TAGS or attrs:
+		tag = tag.casefold()
+		if tag not in SIMPLE_CONSENT_HTML_VOID_TAGS or not self._attrs_are_safe(tag, attrs):
 			self.valid = False
 
 	def handle_endtag(self, tag: str) -> None:
@@ -169,13 +257,15 @@ class _HTMLTextExtractor(HTMLParser):
 			self.valid = False
 
 	def handle_data(self, data: str) -> None:
-		self.parts.append(data)
+		if "head" not in self.stack:
+			self.parts.append(data)
 
 	def handle_comment(self, data: str) -> None:
 		self.valid = False
 
 	def handle_decl(self, decl: str) -> None:
-		self.valid = False
+		if decl.strip().casefold() != "doctype html":
+			self.valid = False
 
 	def unknown_decl(self, data: str) -> None:
 		self.valid = False
@@ -367,8 +457,15 @@ def _candidate_extension(filename: str) -> str:
 
 
 def _unsafe_candidate_filename(value: Any) -> bool:
-	return isinstance(value, str) and (
+	if not isinstance(value, str):
+		return False
+	try:
+		encoded_length = len(value.encode("utf-8"))
+	except UnicodeEncodeError:
+		return True
+	return (
 		len(value) > MAX_CANDIDATE_FILENAME_LENGTH
+		or encoded_length > MAX_CANDIDATE_FILENAME_BYTES
 		or value in {".", ".."}
 		or "/" in value
 		or "\\" in value
@@ -518,32 +615,69 @@ def _fetch_messages(
 	return MessageBatch(pending, url, tuple(history))
 
 
+def _validate_attachment_next_link(value: Any, graph_id: str) -> str:
+	if not isinstance(value, str) or not value or len(value) > 8192:
+		raise BridgeError("graph_attachment_next_link_invalid")
+	parsed = urlparse(value)
+	expected_path = f"/v1.0/users/{MAILBOX}/messages/{graph_id}/attachments"
+	decoded_path = unquote(parsed.path)
+	if (
+		parsed.scheme != "https"
+		or parsed.netloc.casefold() != "graph.microsoft.com"
+		or decoded_path.casefold() != expected_path.casefold()
+		or "\\" in decoded_path
+		or parsed.fragment
+	):
+		raise BridgeError("graph_attachment_next_link_invalid")
+	return value
+
+
+def _attachment_url_digest(value: str) -> str:
+	parsed = urlparse(value)
+	identity = f"https://graph.microsoft.com{unquote(parsed.path).casefold()}"
+	if parsed.query:
+		identity = f"{identity}?{parsed.query}"
+	return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
 def _fetch_attachment_metadata(request_graph: Callable[..., Any], graph_id: str) -> list[dict[str, Any]]:
 	mailbox = quote(MAILBOX, safe="@")
 	message_id = quote(graph_id, safe="")
-	# Read only base attachment metadata until the message passes the exact
-	# current-vacancy consent gate. This avoids downloading unrelated bytes from
-	# the dedicated mailbox now that a vacancy token is no longer required in the
-	# subject.
+	# Read only metadata until identity, vacancy, attachment shape, and consent
+	# gates pass. Follow legitimate Graph collection pages without hydrating bytes.
 	url = (
 		f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments"
 		"?$select=id,name,contentType,size,isInline"
 	)
-	response = _graph_get(request_graph, url)
-	if "@odata.nextLink" in response:
-		raise BridgeError("graph_attachment_list_paginated")
-	value = response.get("value")
-	if not isinstance(value, list):
-		raise BridgeError("graph_attachment_list_invalid")
-	for row in value:
-		if not isinstance(row, dict):
-			raise BridgeError("graph_attachment_metadata_invalid")
-		_validate_attachment_identity_fields(
-			row,
-			code="graph_attachment_metadata_invalid",
-			allow_unsafe_candidate_filename=True,
-		)
-	return value
+	rows: list[dict[str, Any]] = []
+	seen: set[str] = set()
+	pages = 0
+	while True:
+		pages += 1
+		if pages > MAX_ATTACHMENT_PAGES:
+			raise AdmissionBlock("blocked_multiple_or_ambiguous_attachments")
+		page_digest = _attachment_url_digest(url)
+		if page_digest in seen:
+			raise BridgeError("graph_attachment_next_link_cycle")
+		seen.add(page_digest)
+		response = _graph_get(request_graph, url)
+		value = response.get("value")
+		if not isinstance(value, list):
+			raise BridgeError("graph_attachment_list_invalid")
+		for row in value:
+			if not isinstance(row, dict):
+				raise BridgeError("graph_attachment_metadata_invalid")
+			_validate_attachment_identity_fields(
+				row,
+				code="graph_attachment_metadata_invalid",
+				allow_unsafe_candidate_filename=True,
+			)
+		rows.extend(value)
+		if len(rows) > MAX_ATTACHMENT_ROWS:
+			raise AdmissionBlock("blocked_multiple_or_ambiguous_attachments")
+		if "@odata.nextLink" not in response:
+			return rows
+		url = _validate_attachment_next_link(response["@odata.nextLink"], graph_id)
 
 
 def _fetch_attachment_content(
@@ -572,11 +706,7 @@ def _validate_attachment_identity_fields(
 	value: dict[str, Any], *, code: str, allow_unsafe_candidate_filename: bool = False
 ) -> None:
 	name = value.get("name")
-	unsafe_candidate_filename = (
-		allow_unsafe_candidate_filename
-		and value.get("isInline") is False
-		and _unsafe_candidate_filename(name)
-	)
+	unsafe_candidate_filename = allow_unsafe_candidate_filename and _unsafe_candidate_filename(name)
 	if (
 		not isinstance(value.get("@odata.type"), str)
 		or not value["@odata.type"].strip()
@@ -626,8 +756,10 @@ def _has_current_vacancy_consent(request_graph: Callable[..., Any], graph_id: st
 	if not isinstance(body, dict):
 		raise BridgeError("message_body_invalid")
 	content = body.get("content")
-	if not isinstance(content, str) or len(content) > 1024 * 1024:
+	if not isinstance(content, str):
 		raise BridgeError("message_body_invalid")
+	if len(content) > MAX_MESSAGE_BODY_CHARS:
+		return False
 	content_type_value = body.get("contentType")
 	if not isinstance(content_type_value, str):
 		raise BridgeError("message_body_invalid")
@@ -658,7 +790,9 @@ def _build_candidate(message: dict[str, Any], attachment: dict[str, Any]) -> Can
 	received = str(message.get("receivedDateTime") or "").strip()
 	if not received or len(received) > 64:
 		raise BridgeError("received_datetime_invalid")
-	subject = str(message.get("subject") or "").strip()[:140]
+	subject = str(message.get("subject") or "").strip()
+	if len(subject) > MAX_SUBJECT_CHARS:
+		raise BridgeError("graph_message_list_invalid")
 	content = str(attachment.get("contentBytes") or "")
 	payload = {
 		"graph_message_id": str(message["id"]),
@@ -674,7 +808,7 @@ def _build_candidate(message: dict[str, Any], attachment: dict[str, Any]) -> Can
 		),
 		"attachments": [
 			{
-				"name": str(attachment.get("name") or "")[:255],
+				"name": str(attachment.get("name") or ""),
 				"content_type": str(attachment.get("contentType") or "")[:140],
 				"size": int(attachment.get("size") or 0),
 				"content_base64": content,
