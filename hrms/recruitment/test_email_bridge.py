@@ -40,6 +40,10 @@ class FakeCandidateCVSecurityError(FakeValidationError):
 	pass
 
 
+class FakeCandidateCVScanUnavailableError(FakeCandidateCVSecurityError):
+	pass
+
+
 class FakeFlags(dict):
 	__getattr__ = dict.get
 
@@ -283,6 +287,7 @@ def load_email_bridge(fake_frappe):
 	candidate_cv = types.ModuleType("hrms.security.candidate_cv")
 	candidate_cv.MAX_CV_BYTES = 32
 	candidate_cv.CandidateCVSecurityError = FakeCandidateCVSecurityError
+	candidate_cv.CandidateCVScanUnavailableError = FakeCandidateCVScanUnavailableError
 
 	def validate_cv_file(filename, content):
 		if not filename.lower().endswith((".pdf", ".doc", ".docx", ".png", ".jpg", ".jpeg")):
@@ -507,6 +512,21 @@ class TestEmailBridge(unittest.TestCase):
 		self.assertEqual(result["status"], "created")
 		self.assertEqual(self.frappe.inserted_applicants[0].job_title, "HR-OPN-2026-0001")
 
+	def test_explicit_incompatible_vacancy_code_is_terminal_admission_block(self):
+		for subject in (
+			"Solicitud HR-OPN-2026-9999",
+			"HR-OPN-2026-0001 y HR-OPN-2026-9999",
+		):
+			with self.subTest(subject=subject):
+				payload = email_payload()
+				payload["subject"] = subject
+				with self.assertRaisesRegex(
+					self.bridge.EmailBridgeAdmissionError, "distinto de la vacante autorizada"
+				) as raised:
+					self.bridge.ingest_email_payload(payload)
+				self.assertEqual(raised.exception.code, "blocked_explicit_vacancy_mismatch")
+				self.assertEqual(self.frappe.saved_files, [])
+
 	def test_invalid_base64_and_oversize_fail_before_file_storage(self):
 		invalid = email_payload()
 		invalid["attachments"][0]["content_base64"] = "%%%not-base64%%%"
@@ -514,9 +534,38 @@ class TestEmailBridge(unittest.TestCase):
 			self.bridge.ingest_email_payload(invalid)
 
 		oversized = email_payload(b"x" * 33)
-		with self.assertRaises((self.bridge.EmailBridgeError, FakeCandidateCVSecurityError)):
+		with self.assertRaisesRegex(
+			self.bridge.EmailBridgeAdmissionError, "validación determinística"
+		) as raised:
 			self.bridge.ingest_email_payload(oversized)
+		self.assertEqual(raised.exception.code, "blocked_candidate_cv_security")
 		self.assertEqual(self.frappe.saved_files, [])
+
+	def test_stored_cv_security_rejection_is_terminal_but_scanner_outage_is_retryable(self):
+		with (
+			patch.object(
+				self.bridge,
+				"scan_stored_candidate_cv",
+				side_effect=FakeCandidateCVSecurityError("malware found"),
+			),
+			self.assertRaisesRegex(
+				self.bridge.EmailBridgeAdmissionError, "validación determinística"
+			) as rejected,
+		):
+			self.bridge.ingest_email_payload(email_payload())
+		self.assertEqual(rejected.exception.code, "blocked_candidate_cv_security")
+		self.assertEqual(self.frappe.inserted_applicants, [])
+
+		with (
+			patch.object(
+				self.bridge,
+				"scan_stored_candidate_cv",
+				side_effect=FakeCandidateCVScanUnavailableError("scanner unavailable"),
+			),
+			self.assertRaisesRegex(FakeCandidateCVScanUnavailableError, "scanner unavailable"),
+		):
+			self.bridge.ingest_email_payload(email_payload())
+		self.assertEqual(self.frappe.inserted_applicants, [])
 
 	def test_non_open_override_fails_closed(self):
 		self.bridge.frappe.conf[self.bridge.JOB_OPENING_CONFIG_KEY] = "HR-OPN-CLOSED"

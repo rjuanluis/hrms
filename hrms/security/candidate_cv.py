@@ -46,6 +46,10 @@ class CandidateCVSecurityError(frappe.ValidationError):
 	pass
 
 
+class CandidateCVScanUnavailableError(CandidateCVSecurityError):
+	"""Retryable antivirus/configuration failure, not a candidate rejection."""
+
+
 def _is_bound_candidate_cv(file_doc: Any) -> bool:
 	return (
 		file_doc.get("attached_to_doctype") == "Job Applicant"
@@ -276,7 +280,7 @@ def _scan_candidate_cv(content: bytes) -> None:
 			title="Candidate CV antivirus unavailable",
 			message=f"ClamAV validation failed: {type(exc).__name__}: {exc}",
 		)
-		raise CandidateCVSecurityError(
+		raise CandidateCVScanUnavailableError(
 			_("No pudimos validar el CV de forma segura. Intenta nuevamente en unos minutos.")
 		) from exc
 
@@ -286,7 +290,7 @@ def scan_stored_candidate_cv(file_doc) -> str:
 
 	security_fields = ("custom_av_scan_status", "custom_av_scan_engine", "custom_av_scanned_on")
 	if not all(_file_has_column(fieldname) for fieldname in security_fields):
-		raise CandidateCVSecurityError(
+		raise CandidateCVScanUnavailableError(
 			_("El control antivirus todavía no está disponible. Intenta nuevamente en unos minutos.")
 		)
 	if not file_doc.is_private or not (file_doc.file_url or "").startswith("/private/files/"):
@@ -349,7 +353,7 @@ def mark_scanned_candidate_cv_file(file_doc, method=None) -> None:
 
 	av_fields = ("custom_av_scan_status", "custom_av_scan_engine", "custom_av_scanned_on")
 	if not all(_file_has_column(fieldname) for fieldname in av_fields):
-		raise CandidateCVSecurityError(
+		raise CandidateCVScanUnavailableError(
 			_("El control antivirus todavía no está disponible. Intenta nuevamente en unos minutos.")
 		)
 	content = read_stored_candidate_cv_bytes(file_doc)
@@ -397,7 +401,7 @@ def validate_job_applicant_cv(doc, method=None) -> None:
 	if not all(
 		frappe.db.has_column("File", fieldname) for fieldname in file_security_fields
 	) or not frappe.db.has_column("Job Applicant", "custom_cv_sha256"):
-		raise CandidateCVSecurityError(
+		raise CandidateCVScanUnavailableError(
 			_("El control antivirus todavía no está disponible. Intenta nuevamente en unos minutos.")
 		)
 

@@ -18,6 +18,7 @@ from frappe.utils.file_manager import get_content_hash
 from hrms.recruitment.matching import EMAIL_RECRUITMENT_SOURCE, normalize_email
 from hrms.security.candidate_cv import (
 	MAX_CV_BYTES,
+	CandidateCVScanUnavailableError,
 	CandidateCVSecurityError,
 	read_stored_candidate_cv_bytes,
 	scan_stored_candidate_cv,
@@ -52,6 +53,10 @@ MAX_DATA_LENGTH = 140
 MAX_RAW_MESSAGE_ID_LENGTH = 4096
 MAX_BASE64_LENGTH = ((MAX_CV_BYTES + 2) // 3) * 4
 CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
+VACANCY_CODE_PATTERN = re.compile(
+	r"(?<![A-Z0-9])HR-OPN-[A-Z0-9]+(?:-[A-Z0-9]+)+(?![A-Z0-9-])",
+	re.IGNORECASE | re.ASCII,
+)
 
 
 class EmailBridgeError(frappe.ValidationError):
@@ -149,6 +154,15 @@ def _received_on(payload: dict) -> datetime:
 	return parsed.astimezone(timezone.utc).replace(tzinfo=None)
 
 
+def _require_compatible_subject_vacancy(subject: str) -> None:
+	codes = {match.group(0).upper() for match in VACANCY_CODE_PATTERN.finditer(subject)}
+	if codes and codes != {DEFAULT_JOB_OPENING}:
+		_block_admission(
+			"blocked_explicit_vacancy_mismatch",
+			"El asunto contiene un código de vacante distinto de la vacante autorizada.",
+		)
+
+
 def _attachment(payload: dict) -> tuple[str, bytes, str]:
 	attachments = payload.get("attachments")
 	if not isinstance(attachments, list) or len(attachments) != 1:
@@ -167,7 +181,13 @@ def _attachment(payload: dict) -> tuple[str, bytes, str]:
 		content = base64.b64decode(encoded_bytes, validate=True)
 	except (UnicodeEncodeError, binascii.Error, ValueError) as exc:
 		raise EmailBridgeError(_("El contenido base64 del CV no es válido.")) from exc
-	validate_cv_file(filename, content)
+	try:
+		validate_cv_file(filename, content)
+	except CandidateCVSecurityError:
+		_block_admission(
+			"blocked_candidate_cv_security",
+			"El CV no supera la validación determinística de formato y seguridad.",
+		)
 	return filename, content, hashlib.sha256(content).hexdigest()
 
 
@@ -454,6 +474,7 @@ def ingest_email_payload(payload: dict) -> dict:
 	sender_email, sender_name = _sender(payload)
 	received_on = _received_on(payload)
 	subject = _clean_data(payload.get("subject"), label="El asunto", required=False)
+	_require_compatible_subject_vacancy(subject)
 	filename, content, attachment_sha256 = _attachment(payload)
 	job_opening = _job_opening()
 
@@ -493,9 +514,20 @@ def ingest_email_payload(payload: dict) -> dict:
 				"La vacante autorizada cambió durante la admisión del correo.",
 			)
 		file_doc = _save_detached_private_file(filename, content)
-		stored_sha256 = scan_stored_candidate_cv(file_doc)
+		try:
+			stored_sha256 = scan_stored_candidate_cv(file_doc)
+		except CandidateCVScanUnavailableError:
+			raise
+		except CandidateCVSecurityError:
+			_block_admission(
+				"blocked_candidate_cv_security",
+				"El CV almacenado no supera la validación determinística de seguridad.",
+			)
 		if stored_sha256 != attachment_sha256:
-			raise CandidateCVSecurityError(_("No se pudo verificar la integridad del CV almacenado."))
+			_block_admission(
+				"blocked_candidate_cv_security",
+				"La evidencia del CV almacenado no coincide con el contenido validado.",
+			)
 
 		applicant = frappe.get_doc(
 			{

@@ -270,14 +270,32 @@ class TestAyPEmailBridge(unittest.TestCase):
 		report = json.loads(output.getvalue())
 		self.assertEqual(report["ats_email_bridge"], "attention")
 
+	def test_remote_terminal_admission_blocks_are_persisted_without_fault(self):
+		for code in ("blocked_candidate_cv_security", "blocked_explicit_vacancy_mismatch"):
+			with self.subTest(code=code), tempfile.TemporaryDirectory() as tmp:
+				graph = GraphModule(self.message(), [self.attachment()])
+				state_path = Path(tmp) / "state.json"
+				with (
+					patch.object(bridge, "_load_graph_client", return_value=graph),
+					patch.object(bridge, "_remote_ingest", return_value={"status": "blocked", "code": code}),
+					contextlib.redirect_stdout(io.StringIO()) as output,
+				):
+					result = bridge.run(dry_run=False, limit=10, report_json=False, state_path=state_path)
+				persisted = bridge._load_state(state_path)
+				self.assertEqual(result["blocked"], 1)
+				self.assertEqual(result["faults"], 0)
+				self.assertIn(code, persisted["messages"].values())
+				self.assertEqual(json.loads(output.getvalue())["reasons"], {code: 1})
+
 	def test_remote_ingest_accepts_only_allowlisted_admission_codes(self):
-		allowed = types.SimpleNamespace(
-			returncode=0,
-			stdout='{"status":"blocked","code":"blocked_single_open_vacancy_required"}\n',
-			stderr="",
-		)
-		with patch.object(bridge.subprocess, "run", return_value=allowed):
-			self.assertEqual(bridge._remote_ingest({})["status"], "blocked")
+		for code in bridge.REMOTE_ADMISSION_CODES:
+			allowed = types.SimpleNamespace(
+				returncode=0,
+				stdout=json.dumps({"status": "blocked", "code": code}) + "\n",
+				stderr="",
+			)
+			with self.subTest(code=code), patch.object(bridge.subprocess, "run", return_value=allowed):
+				self.assertEqual(bridge._remote_ingest({})["status"], "blocked")
 
 		unknown = types.SimpleNamespace(
 			returncode=0,
@@ -579,6 +597,25 @@ class TestAyPEmailBridge(unittest.TestCase):
 		self.assertEqual(result["errors"][0]["code"], "blocked_sender_from_mismatch")
 		self.assertEqual(len(graph.calls), 1)
 		self.assertIn("blocked_sender_from_mismatch", persisted["messages"].values())
+		remote.assert_not_called()
+
+	def test_explicit_incompatible_vacancy_blocks_before_attachment_metadata(self):
+		message = {**self.message(), "subject": "Solicitud HR-OPN-2026-9999"}
+		graph = GraphModule(message, [self.attachment()])
+		with (
+			tempfile.TemporaryDirectory() as tmp,
+			patch.object(bridge, "_load_graph_client", return_value=graph),
+			patch.object(bridge, "_remote_ingest") as remote,
+			contextlib.redirect_stdout(io.StringIO()),
+		):
+			state_path = Path(tmp) / "state.json"
+			result = bridge.run(dry_run=False, limit=10, report_json=False, state_path=state_path)
+			persisted = bridge._load_state(state_path)
+		self.assertEqual(result["blocked"], 1)
+		self.assertEqual(result["faults"], 0)
+		self.assertEqual(result["errors"][0]["code"], "blocked_explicit_vacancy_mismatch")
+		self.assertEqual(len(graph.calls), 1)
+		self.assertIn("blocked_explicit_vacancy_mismatch", persisted["messages"].values())
 		remote.assert_not_called()
 
 	def test_attachment_size_accepts_only_exact_integer_type(self):

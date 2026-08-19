@@ -90,8 +90,13 @@ class AdmissionBlock(RuntimeError):
 REMOTE_ADMISSION_CODES = frozenset(
 	{
 		"blocked_authorized_vacancy_configuration",
+		"blocked_candidate_cv_security",
+		"blocked_explicit_vacancy_mismatch",
 		"blocked_single_open_vacancy_required",
 	}
+)
+REMOTE_TERMINAL_ADMISSION_CODES = frozenset(
+	{"blocked_candidate_cv_security", "blocked_explicit_vacancy_mismatch"}
 )
 
 
@@ -173,6 +178,10 @@ NORMALIZED_CONSENT_PHRASE = _normalized_words(CONSENT_PHRASE)
 if NORMALIZED_CONSENT_PHRASE is None:  # pragma: no cover - static canonical phrase invariant
 	raise RuntimeError("canonical consent phrase contains unsupported Unicode")
 JOB_OPENING = "HR-OPN-2026-0001"
+VACANCY_CODE_PATTERN = re.compile(
+	r"(?<![A-Z0-9])HR-OPN-[A-Z0-9]+(?:-[A-Z0-9]+)+(?![A-Z0-9-])",
+	re.IGNORECASE | re.ASCII,
+)
 
 
 def _fingerprint(value: str) -> str:
@@ -394,6 +403,15 @@ def _validate_message_header(message: dict[str, Any]) -> None:
 		raise BridgeError("received_datetime_invalid")
 	_email_identity(message, "sender")
 	_email_identity(message, "from")
+
+
+def _require_compatible_subject_vacancy(message: dict[str, Any]) -> None:
+	subject = message.get("subject")
+	if subject is None:
+		return
+	codes = {match.group(0).upper() for match in VACANCY_CODE_PATTERN.finditer(subject)}
+	if codes and codes != {JOB_OPENING}:
+		raise AdmissionBlock("blocked_explicit_vacancy_mismatch")
 
 
 def _fetch_messages(
@@ -677,6 +695,7 @@ def run(*, dry_run: bool, limit: int, report_json: bool, state_path: Path = STAT
 				continue
 			# Bind the applicant and consent identity before reading body or CV bytes.
 			_sender(message)
+			_require_compatible_subject_vacancy(message)
 			attachments = _fetch_attachment_metadata(graph.request_graph, str(message["id"]))
 			selected, outcome = _select_candidate_attachment(attachments, require_content=False)
 			if selected is None:
@@ -716,9 +735,14 @@ def run(*, dry_run: bool, limit: int, report_json: bool, state_path: Path = STAT
 			result = _remote_ingest(candidate.payload)
 			result_status = str(result["status"])
 			if result_status == "blocked":
+				outcome = str(result["code"])
 				summary["blocked"] += 1
-				summary["errors"].append({"message": fingerprint, "code": str(result["code"])})
-				advance_scan = False
+				summary["errors"].append({"message": fingerprint, "code": outcome})
+				if outcome in REMOTE_TERMINAL_ADMISSION_CODES:
+					state["messages"][fingerprint] = outcome
+					dirty = True
+				else:
+					advance_scan = False
 				continue
 			summary[result_status] += 1
 			state["messages"][fingerprint] = result_status
