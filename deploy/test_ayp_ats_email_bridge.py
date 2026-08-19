@@ -324,6 +324,11 @@ class TestAyPEmailBridge(unittest.TestCase):
 					)
 					self.assertEqual(proc.returncode, expected_exit)
 					self.assertIn("Aro y Pedal", proc.stdout)
+					if runner_exit == 0:
+						self.assertIn("Estado: requiere decisión", proc.stdout)
+						self.assertNotIn("revisión de admisión requerida", proc.stdout)
+					else:
+						self.assertIn("Estado: bloqueado", proc.stdout)
 
 			env["AYP_ATS_GRAPH_PYTHON"] = str(home / "missing-python")
 			proc = subprocess.run(

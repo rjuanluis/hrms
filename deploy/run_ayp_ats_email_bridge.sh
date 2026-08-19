@@ -66,7 +66,7 @@ if [ "$runner_rc" -ne 0 ]; then
 else
   {
     printf 'Tema: Aro y Pedal — ATS correo CV\n'
-    printf 'Estado: revisión de admisión requerida\n'
+    printf 'Estado: requiere decisión\n'
     printf 'Evidencia: el bridge terminó correctamente y no creó los mensajes rechazados. Resumen sanitizado: '
     tr '\n' ' ' <"$runner_stdout"
     printf '\n'
