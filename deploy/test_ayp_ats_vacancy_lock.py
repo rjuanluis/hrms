@@ -53,6 +53,7 @@ class TestVacancyAuthorityLockMariaDB(unittest.TestCase):
 
 	def setUp(self):
 		self.admin = self.connect()
+		self.addCleanup(self._cleanup_table)
 		with self.admin.cursor() as cursor:
 			cursor.execute("DROP TABLE IF EXISTS `tabJob Opening`")
 			cursor.execute(
@@ -70,7 +71,7 @@ class TestVacancyAuthorityLockMariaDB(unittest.TestCase):
 			)
 		self.admin.commit()
 
-	def tearDown(self):
+	def _cleanup_table(self):
 		try:
 			with self.admin.cursor() as cursor:
 				cursor.execute("DROP TABLE IF EXISTS `tabJob Opening`")
