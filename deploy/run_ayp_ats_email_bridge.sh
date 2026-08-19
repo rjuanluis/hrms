@@ -27,10 +27,6 @@ if [ ! -r "$runner" ]; then
   blocked "runner_unavailable"
   exit 0
 fi
-if [ ! -r "$stdout_guard" ]; then
-  blocked "decision_ledger_stdout_guard_unavailable"
-  exit 0
-fi
 
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/ayp-ats-email-bridge.XXXXXX") || {
   blocked "output_capture_unavailable"
