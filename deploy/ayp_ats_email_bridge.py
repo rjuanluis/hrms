@@ -56,10 +56,13 @@ frappe.init(site="hr.aroypedal.com", sites_path=SITES)
 frappe.connect()
 frappe.set_user("Administrator")
 try:
-    from hrms.recruitment.email_bridge import ingest_email_payload
+    from hrms.recruitment.email_bridge import EmailBridgeAdmissionError,ingest_email_payload
     result=ingest_email_payload(json.load(sys.stdin))
     frappe.db.commit()
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+except EmailBridgeAdmissionError as exc:
+    frappe.db.rollback()
+    print(json.dumps({"status":"blocked","code":exc.code}, ensure_ascii=False, sort_keys=True))
 except Exception:
     frappe.db.rollback()
     raise
@@ -76,6 +79,14 @@ docker exec -i "$backend" bash -lc 'cd /home/frappe/frappe-bench && ./env/bin/py
 
 class BridgeError(RuntimeError):
 	"""Sanitized operational failure safe for cron delivery."""
+
+
+REMOTE_ADMISSION_CODES = frozenset(
+	{
+		"blocked_authorized_vacancy_configuration",
+		"blocked_single_open_vacancy_required",
+	}
+)
 
 
 @dataclass(frozen=True)
@@ -460,7 +471,11 @@ def _remote_ingest(payload: dict[str, Any]) -> dict[str, Any]:
 		value = json.loads(lines[-1])
 	except json.JSONDecodeError as exc:
 		raise BridgeError("remote_result_invalid") from exc
-	if not isinstance(value, dict) or value.get("status") not in {"created", "already_processed"}:
+	if not isinstance(value, dict):
+		raise BridgeError("remote_result_unexpected")
+	if value.get("status") == "blocked" and value.get("code") in REMOTE_ADMISSION_CODES:
+		return value
+	if value.get("status") not in {"created", "already_processed"}:
 		raise BridgeError("remote_result_unexpected")
 	return value
 
@@ -515,13 +530,22 @@ def run(*, dry_run: bool, limit: int, report_json: bool, state_path: Path = STAT
 				raise BridgeError("graph_attachment_changed_after_preflight")
 			selected, outcome = _select_candidate_attachment([hydrated])
 			if selected is None:
-				raise BridgeError(outcome)
+				summary["blocked"] += 1
+				summary["errors"].append({"message": fingerprint, "code": outcome})
+				if not dry_run:
+					state["messages"][fingerprint] = outcome
+					dirty = True
+				continue
 			candidate = _build_candidate(message, selected)
 			if dry_run:
 				summary["would_create"] += 1
 				continue
 			result = _remote_ingest(candidate.payload)
 			result_status = str(result["status"])
+			if result_status == "blocked":
+				summary["blocked"] += 1
+				summary["errors"].append({"message": fingerprint, "code": str(result["code"])})
+				continue
 			summary[result_status] += 1
 			state["messages"][fingerprint] = result_status
 			dirty = True

@@ -21,16 +21,16 @@ blocked() {
 
 if [ ! -x "$graph_python" ]; then
   blocked "graph_python_unavailable"
-  exit 0
+  exit 78
 fi
 if [ ! -r "$runner" ]; then
   blocked "runner_unavailable"
-  exit 0
+  exit 78
 fi
 
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/ayp-ats-email-bridge.XXXXXX") || {
   blocked "output_capture_unavailable"
-  exit 0
+  exit 73
 }
 trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
 runner_stdout="$tmp_dir/runner.stdout"
@@ -88,4 +88,4 @@ else
   cat "$delivery"
 fi
 
-exit 0
+exit "$runner_rc"

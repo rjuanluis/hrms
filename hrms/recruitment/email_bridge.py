@@ -49,8 +49,18 @@ class EmailBridgeError(frappe.ValidationError):
 	pass
 
 
+class EmailBridgeAdmissionError(EmailBridgeError):
+	def __init__(self, code: str, message: str):
+		super().__init__(_(message))
+		self.code = code
+
+
 def _fail(message: str) -> NoReturn:
 	raise EmailBridgeError(_(message))
+
+
+def _block_admission(code: str, message: str) -> NoReturn:
+	raise EmailBridgeAdmissionError(code, message)
 
 
 def _clean_data(value, *, label: str, required: bool = True, max_length: int = MAX_DATA_LENGTH) -> str:
@@ -180,7 +190,10 @@ def _job_opening() -> str:
 	configured = frappe.conf.get(JOB_OPENING_CONFIG_KEY)
 	job_opening = str(configured or DEFAULT_JOB_OPENING).strip()
 	if job_opening != DEFAULT_JOB_OPENING:
-		_fail("La vacante configurada no es la vacante autorizada para el canal de correo.")
+		_block_admission(
+			"blocked_authorized_vacancy_configuration",
+			"La vacante configurada no es la vacante autorizada para el canal de correo.",
+		)
 	open_job_openings = sorted(
 		{
 			str(name).strip()
@@ -189,7 +202,10 @@ def _job_opening() -> str:
 		}
 	)
 	if open_job_openings != [job_opening]:
-		_fail("El canal de correo requiere exactamente una vacante abierta y autorizada.")
+		_block_admission(
+			"blocked_single_open_vacancy_required",
+			"El canal de correo requiere exactamente una vacante abierta y autorizada.",
+		)
 	return job_opening
 
 

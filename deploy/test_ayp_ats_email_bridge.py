@@ -4,7 +4,9 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import stat
+import subprocess
 import sys
 import tempfile
 import types
@@ -238,6 +240,97 @@ class TestAyPEmailBridge(unittest.TestCase):
 		self.assertEqual(report["ats_email_bridge"], "error")
 		self.assertEqual(report["faults"], 1)
 		self.assertEqual(report["reasons"], {"remote_ingest_failed:test": 1})
+
+	def test_remote_admission_block_is_attention_without_state_commit(self):
+		graph = GraphModule(self.message(), [self.attachment()])
+		with (
+			tempfile.TemporaryDirectory() as tmp,
+			patch.object(bridge, "_load_graph_client", return_value=graph),
+			patch.object(
+				bridge,
+				"_remote_ingest",
+				return_value={"status": "blocked", "code": "blocked_single_open_vacancy_required"},
+			),
+			contextlib.redirect_stdout(io.StringIO()) as output,
+		):
+			state_path = Path(tmp) / "state.json"
+			result = bridge.run(dry_run=False, limit=10, report_json=False, state_path=state_path)
+		self.assertEqual(result["blocked"], 1)
+		self.assertEqual(result["faults"], 0)
+		self.assertEqual(result["errors"][0]["code"], "blocked_single_open_vacancy_required")
+		self.assertFalse(state_path.exists())
+		report = json.loads(output.getvalue())
+		self.assertEqual(report["ats_email_bridge"], "attention")
+
+	def test_remote_ingest_accepts_only_allowlisted_admission_codes(self):
+		allowed = types.SimpleNamespace(
+			returncode=0,
+			stdout='{"status":"blocked","code":"blocked_single_open_vacancy_required"}\n',
+			stderr="",
+		)
+		with patch.object(bridge.subprocess, "run", return_value=allowed):
+			self.assertEqual(bridge._remote_ingest({})["status"], "blocked")
+
+		unknown = types.SimpleNamespace(
+			returncode=0,
+			stdout='{"status":"blocked","code":"blocked_untrusted"}\n',
+			stderr="",
+		)
+		with (
+			patch.object(bridge.subprocess, "run", return_value=unknown),
+			self.assertRaisesRegex(bridge.BridgeError, "remote_result_unexpected"),
+		):
+			bridge._remote_ingest({})
+
+	def test_launcher_preserves_infrastructure_exit_and_keeps_admission_zero(self):
+		launcher = SCRIPT.with_name("run_ayp_ats_email_bridge.sh")
+		with tempfile.TemporaryDirectory() as tmp:
+			home = Path(tmp)
+			guard = home / ".hermes" / "scripts" / "decision_ledger.py"
+			guard.parent.mkdir(parents=True)
+			guard.write_text("import sys\nsys.stdout.write(sys.stdin.read())\n")
+			guard.chmod(0o700)
+			runner = home / "runner.py"
+			env = {
+				**os.environ,
+				"HOME": str(home),
+				"AYP_ATS_GRAPH_PYTHON": sys.executable,
+				"AYP_ATS_BRIDGE_RUNNER": str(runner),
+			}
+
+			for runner_exit, expected_exit in ((0, 0), (2, 2)):
+				report = {
+					"ats_email_bridge": "attention",
+					"blocked": 1,
+					"faults": int(runner_exit != 0),
+					"reasons": {"test": 1},
+				}
+				runner.write_text(
+					"import json\n"
+					+ f"print(json.dumps({report!r}))\n"
+					+ f"raise SystemExit({runner_exit})\n"
+				)
+				with self.subTest(runner_exit=runner_exit):
+					proc = subprocess.run(
+						["bash", str(launcher)], text=True, capture_output=True, env=env, check=False
+					)
+					self.assertEqual(proc.returncode, expected_exit)
+					self.assertIn("Aro y Pedal", proc.stdout)
+
+			env["AYP_ATS_GRAPH_PYTHON"] = str(home / "missing-python")
+			proc = subprocess.run(
+				["bash", str(launcher)], text=True, capture_output=True, env=env, check=False
+			)
+			self.assertEqual(proc.returncode, 78)
+			self.assertIn("graph_python_unavailable", proc.stdout)
+
+			env["AYP_ATS_GRAPH_PYTHON"] = sys.executable
+			env["AYP_ATS_BRIDGE_RUNNER"] = str(home / "missing-runner.py")
+			proc = subprocess.run(
+				["bash", str(launcher)], text=True, capture_output=True, env=env, check=False
+			)
+			self.assertEqual(proc.returncode, 78)
+			self.assertIn("runner_unavailable", proc.stdout)
 
 	def test_consent_rejects_hidden_or_ambiguous_html(self):
 		bodies = (

@@ -518,11 +518,18 @@ class TestEmailBridge(unittest.TestCase):
 		self.assertEqual(self.frappe.saved_files, [])
 
 	def test_zero_or_multiple_open_vacancies_fail_before_file_storage(self):
-		for open_job_openings in ([], ["HR-OPN-2026-0001", "HR-OPN-2026-0002"]):
+		for open_job_openings in (
+			[],
+			["HR-OPN-2026-0002"],
+			["HR-OPN-2026-0001", "HR-OPN-2026-0002"],
+		):
 			with self.subTest(open_job_openings=open_job_openings):
 				self.frappe.open_job_openings = open_job_openings
-				with self.assertRaisesRegex(self.bridge.EmailBridgeError, "exactamente una vacante abierta"):
+				with self.assertRaisesRegex(
+					self.bridge.EmailBridgeAdmissionError, "exactamente una vacante abierta"
+				) as raised:
 					self.bridge.ingest_email_payload(email_payload())
+				self.assertEqual(raised.exception.code, "blocked_single_open_vacancy_required")
 				self.assertEqual(self.frappe.saved_files, [])
 
 	def test_insert_failure_defers_file_cleanup_to_caller_rollback(self):
