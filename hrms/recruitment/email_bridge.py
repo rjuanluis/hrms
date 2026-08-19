@@ -45,12 +45,6 @@ MAX_DATA_LENGTH = 140
 MAX_RAW_MESSAGE_ID_LENGTH = 4096
 MAX_BASE64_LENGTH = ((MAX_CV_BYTES + 2) // 3) * 4
 CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
-JOB_OPENING_SUBJECT_PATTERN = re.compile(
-	rf"(?<![A-Z0-9-]){re.escape(DEFAULT_JOB_OPENING)}(?![A-Z0-9-])",
-	re.IGNORECASE,
-)
-
-
 class EmailBridgeError(frappe.ValidationError):
 	pass
 
@@ -187,15 +181,19 @@ def _job_opening() -> str:
 	job_opening = str(configured or DEFAULT_JOB_OPENING).strip()
 	if job_opening != DEFAULT_JOB_OPENING:
 		_fail("La vacante configurada no es la vacante autorizada para el canal de correo.")
-	if not job_opening or frappe.db.get_value("Job Opening", job_opening, "status") != "Open":
-		_fail("La vacante configurada no está abierta.")
+	open_job_openings = sorted(
+		{
+			str(name).strip()
+			for name in frappe.get_all("Job Opening", filters={"status": "Open"}, pluck="name")
+			if str(name).strip()
+		}
+	)
+	if open_job_openings != [job_opening]:
+		_fail("El canal de correo requiere exactamente una vacante abierta y autorizada.")
 	return job_opening
 
 
 def _require_current_vacancy_consent(payload: dict) -> None:
-	subject = _clean_data(payload.get("subject"), label="El asunto", required=False)
-	if not JOB_OPENING_SUBJECT_PATTERN.search(subject):
-		_fail("El asunto no identifica la vacante autorizada.")
 	if payload.get("consent_current_vacancy") is not True:
 		_fail("Falta el consentimiento explícito para procesar la solicitud de esta vacante.")
 	version = _clean_data(

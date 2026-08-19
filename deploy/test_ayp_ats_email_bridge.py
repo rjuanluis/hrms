@@ -34,8 +34,12 @@ class GraphModule:
 		if immutable_message_ids is not True:
 			raise AssertionError("ATS Graph reads must request immutable message IDs")
 		self.calls.append((role, method, url, body, approval_ref, immutable_message_ids))
-		if url.split("?", 1)[0].endswith("/attachments"):
-			return {"value": self.attachments}
+		base_url = url.split("?", 1)[0]
+		if base_url.endswith("/attachments"):
+			return {"value": [{key: value for key, value in row.items() if key != "contentBytes"} for row in self.attachments]}
+		if "/attachments/" in base_url:
+			attachment_id = base_url.rsplit("/", 1)[-1]
+			return next(row for row in self.attachments if row.get("id") == attachment_id)
 		if "?$select=body" in url:
 			return {"body": self.body}
 		return {"value": [self.message]}
@@ -120,12 +124,13 @@ class TestAyPEmailBridge(unittest.TestCase):
 			message_list_url = graph.calls[0][2]
 			self.assertIn("$orderby=receivedDateTime%20desc", message_list_url)
 			self.assertIn("hasAttachments%20eq%20true", message_list_url)
-			attachment_urls = [
+			attachment_list_urls = [
 				call[2] for call in graph.calls if call[2].split("?", 1)[0].endswith("/attachments")
 			]
-			self.assertEqual(len(attachment_urls), 1)
-			self.assertNotIn("?", attachment_urls[0])
-			self.assertNotIn("$select", attachment_urls[0])
+			self.assertEqual(len(attachment_list_urls), 1)
+			self.assertIn("$select=id,name,contentType,size,isInline", attachment_list_urls[0])
+			attachment_content_urls = [call[2] for call in graph.calls if "/attachments/ATT-1" in call[2]]
+			self.assertEqual(len(attachment_content_urls), 1)
 
 	def test_success_is_silent_and_state_is_private_and_dedupes(self):
 		graph = GraphModule(self.message(), [self.attachment()])
@@ -180,7 +185,57 @@ class TestAyPEmailBridge(unittest.TestCase):
 		self.assertEqual(result["created"], 0)
 		self.assertEqual(result["blocked"], 1)
 		self.assertEqual(result["errors"][0]["code"], "blocked_missing_current_vacancy_consent")
+		self.assertFalse(any("/attachments/ATT-1" in call[2] for call in graph.calls))
 		remote.assert_not_called()
+
+	def test_admission_block_exits_zero_and_reports_only_aggregate_reason(self):
+		graph = GraphModule(
+			self.message(),
+			[self.attachment()],
+			body={"contentType": "text", "content": "Adjunto mi currículum."},
+		)
+		with (
+			tempfile.TemporaryDirectory() as tmp,
+			patch.object(bridge, "_load_graph_client", return_value=graph),
+			patch.object(bridge, "_exclusive_lock", return_value=contextlib.nullcontext()),
+			patch.object(sys, "argv", [str(SCRIPT), "--state", str(Path(tmp) / "state.json")]),
+			contextlib.redirect_stdout(io.StringIO()) as output,
+		):
+			return_code = bridge.main()
+		self.assertEqual(return_code, 0)
+		report = json.loads(output.getvalue())
+		self.assertEqual(report["ats_email_bridge"], "attention")
+		self.assertEqual(report["blocked"], 1)
+		self.assertEqual(report["faults"], 0)
+		self.assertEqual(report["reasons"], {"blocked_missing_current_vacancy_consent": 1})
+		self.assertNotIn("message", report)
+
+	def test_infrastructure_error_still_exits_nonzero(self):
+		with (
+			patch.object(bridge, "_exclusive_lock", side_effect=bridge.BridgeError("graph_unavailable")),
+			patch.object(sys, "argv", [str(SCRIPT)]),
+			contextlib.redirect_stdout(io.StringIO()) as output,
+		):
+			return_code = bridge.main()
+		self.assertEqual(return_code, 2)
+		self.assertEqual(json.loads(output.getvalue())["ats_email_bridge"], "error")
+
+	def test_per_message_remote_failure_still_exits_nonzero(self):
+		graph = GraphModule(self.message(), [self.attachment()])
+		with (
+			tempfile.TemporaryDirectory() as tmp,
+			patch.object(bridge, "_load_graph_client", return_value=graph),
+			patch.object(bridge, "_remote_ingest", side_effect=bridge.BridgeError("remote_ingest_failed:test")),
+			patch.object(bridge, "_exclusive_lock", return_value=contextlib.nullcontext()),
+			patch.object(sys, "argv", [str(SCRIPT), "--state", str(Path(tmp) / "state.json")]),
+			contextlib.redirect_stdout(io.StringIO()) as output,
+		):
+			return_code = bridge.main()
+		self.assertEqual(return_code, 2)
+		report = json.loads(output.getvalue())
+		self.assertEqual(report["ats_email_bridge"], "error")
+		self.assertEqual(report["faults"], 1)
+		self.assertEqual(report["reasons"], {"remote_ingest_failed:test": 1})
 
 	def test_consent_rejects_hidden_or_ambiguous_html(self):
 		bodies = (
@@ -238,7 +293,7 @@ class TestAyPEmailBridge(unittest.TestCase):
 				self.assertEqual(result["blocked"], 1)
 				remote.assert_not_called()
 
-	def test_missing_authoritative_vacancy_blocks_before_attachment_download(self):
+	def test_subject_without_vacancy_code_reaches_authorized_single_vacancy_flow(self):
 		message = self.message()
 		message["subject"] = "Solicitud para otra vacante"
 		graph = GraphModule(message, [self.attachment()])
@@ -254,15 +309,11 @@ class TestAyPEmailBridge(unittest.TestCase):
 				report_json=False,
 				state_path=Path(tmp) / "state.json",
 			)
-		self.assertEqual(result["blocked"], 1)
-		self.assertEqual(result["errors"][0]["code"], "blocked_missing_authoritative_vacancy")
-		self.assertFalse(any(call[2].split("?", 1)[0].endswith("/attachments") for call in graph.calls))
+		self.assertEqual(result["blocked"], 0)
+		self.assertEqual(result["would_create"], 1)
+		self.assertTrue(any(call[2].split("?", 1)[0].endswith("/attachments") for call in graph.calls))
+		self.assertTrue(any("/attachments/ATT-1" in call[2] for call in graph.calls))
 		remote.assert_not_called()
-
-	def test_embedded_vacancy_token_does_not_count_as_authoritative(self):
-		message = self.message()
-		message["subject"] = "Solicitud XHR-OPN-2026-0001-FAKE"
-		self.assertFalse(bridge._has_authoritative_vacancy(message))
 
 	def test_consent_html_rejects_processing_instruction(self):
 		message = self.message()
@@ -280,6 +331,11 @@ class TestAyPEmailBridge(unittest.TestCase):
 		selected, status = bridge._select_candidate_attachment([attachment])
 		self.assertIsNone(selected)
 		self.assertEqual(status, "blocked_candidate_attachment_size")
+
+	def test_attachment_change_between_metadata_and_content_fails_closed(self):
+		metadata = {key: value for key, value in self.attachment().items() if key != "contentBytes"}
+		hydrated = {**self.attachment(), "name": "replaced.pdf"}
+		self.assertFalse(bridge._same_attachment(metadata, hydrated))
 
 	def test_attachment_size_accepts_only_exact_integer_type(self):
 		for malformed in (True, False, 12.0, "12", None, float("inf"), float("nan")):

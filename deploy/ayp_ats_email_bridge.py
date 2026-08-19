@@ -137,10 +137,6 @@ def _normalized_words(value: str) -> str:
 
 NORMALIZED_CONSENT_PHRASE = _normalized_words(CONSENT_PHRASE)
 JOB_OPENING = "HR-OPN-2026-0001"
-JOB_OPENING_SUBJECT_PATTERN = re.compile(
-	rf"(?<![A-Z0-9-]){re.escape(JOB_OPENING)}(?![A-Z0-9-])",
-	re.IGNORECASE,
-)
 
 
 def _fingerprint(value: str) -> str:
@@ -262,7 +258,9 @@ def _candidate_extension(filename: str) -> str:
 	return Path(filename or "").suffix.casefold()
 
 
-def _select_candidate_attachment(rows: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, str]:
+def _select_candidate_attachment(
+	rows: list[dict[str, Any]], *, require_content: bool = True
+) -> tuple[dict[str, Any] | None, str]:
 	non_inline = [row for row in rows if not bool(row.get("isInline"))]
 	if len(non_inline) != 1:
 		return None, "blocked_multiple_or_ambiguous_attachments"
@@ -277,14 +275,12 @@ def _select_candidate_attachment(rows: list[dict[str, Any]]) -> tuple[dict[str, 
 	declared_size = row.get("size")
 	if not isinstance(declared_size, int) or isinstance(declared_size, bool):
 		return None, "blocked_candidate_attachment_size"
-	content = str(row.get("contentBytes") or "")
-	if (
-		declared_size <= 0
-		or declared_size > MAX_CV_BYTES
-		or not content
-		or len(content) > MAX_GRAPH_CONTENT_CHARS
-	):
+	if declared_size <= 0 or declared_size > MAX_CV_BYTES:
 		return None, "blocked_candidate_cv_size"
+	if require_content:
+		content = str(row.get("contentBytes") or "")
+		if not content or len(content) > MAX_GRAPH_CONTENT_CHARS:
+			return None, "blocked_candidate_cv_size"
 	return row, "candidate"
 
 
@@ -340,18 +336,17 @@ def _fetch_messages(
 	raise BridgeError("graph_message_backlog_exceeds_scan_limit")
 
 
-def _has_authoritative_vacancy(message: dict[str, Any]) -> bool:
-	return bool(JOB_OPENING_SUBJECT_PATTERN.search(str(message.get("subject") or "")[:140]))
-
-
-def _fetch_attachments(request_graph: Callable[..., Any], graph_id: str) -> list[dict[str, Any]]:
+def _fetch_attachment_metadata(request_graph: Callable[..., Any], graph_id: str) -> list[dict[str, Any]]:
 	mailbox = quote(MAILBOX, safe="@")
 	message_id = quote(graph_id, safe="")
-	# `attachments` is a heterogeneous base collection. Exchange rejects a
-	# collection-level `$select=contentBytes` because that property belongs only
-	# to fileAttachment. The unfiltered endpoint returns the derived resource,
-	# including contentBytes, as documented by Microsoft Graph.
-	url = f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments"
+	# Read only base attachment metadata until the message passes the exact
+	# current-vacancy consent gate. This avoids downloading unrelated bytes from
+	# the dedicated mailbox now that a vacancy token is no longer required in the
+	# subject.
+	url = (
+		f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments"
+		"?$select=id,name,contentType,size,isInline"
+	)
 	response = _graph_get(request_graph, url)
 	if response.get("@odata.nextLink"):
 		raise BridgeError("graph_attachment_list_paginated")
@@ -359,6 +354,28 @@ def _fetch_attachments(request_graph: Callable[..., Any], graph_id: str) -> list
 	if not isinstance(value, list):
 		raise BridgeError("graph_attachment_list_invalid")
 	return [row for row in value if isinstance(row, dict)]
+
+
+def _fetch_attachment_content(
+	request_graph: Callable[..., Any], graph_id: str, attachment_id: str
+) -> dict[str, Any]:
+	mailbox = quote(MAILBOX, safe="@")
+	message_id = quote(graph_id, safe="")
+	attachment = quote(attachment_id, safe="")
+	value = _graph_get(
+		request_graph,
+		f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments/{attachment}",
+	)
+	if value.get("@odata.type") != "#microsoft.graph.fileAttachment":
+		raise BridgeError("graph_attachment_content_invalid")
+	return value
+
+
+def _same_attachment(metadata: dict[str, Any], hydrated: dict[str, Any]) -> bool:
+	return all(
+		metadata.get(field) == hydrated.get(field)
+		for field in ("@odata.type", "id", "name", "contentType", "size", "isInline")
+	)
 
 
 def _has_current_vacancy_consent(request_graph: Callable[..., Any], graph_id: str) -> bool:
@@ -456,6 +473,7 @@ def run(*, dry_run: bool, limit: int, report_json: bool, state_path: Path = STAT
 		"already_processed": 0,
 		"ignored": 0,
 		"blocked": 0,
+		"faults": 0,
 		"errors": [],
 	}
 	dirty = False
@@ -468,16 +486,8 @@ def run(*, dry_run: bool, limit: int, report_json: bool, state_path: Path = STAT
 			if fingerprint in state["messages"]:
 				summary["ignored"] += 1
 				continue
-			if not _has_authoritative_vacancy(message):
-				outcome = "blocked_missing_authoritative_vacancy"
-				summary["blocked"] += 1
-				summary["errors"].append({"message": fingerprint, "code": outcome})
-				if not dry_run:
-					state["messages"][fingerprint] = outcome
-					dirty = True
-				continue
-			attachments = _fetch_attachments(graph.request_graph, str(message["id"]))
-			selected, outcome = _select_candidate_attachment(attachments)
+			attachments = _fetch_attachment_metadata(graph.request_graph, str(message["id"]))
+			selected, outcome = _select_candidate_attachment(attachments, require_content=False)
 			if selected is None:
 				if outcome.startswith("ignored_"):
 					summary["ignored"] += 1
@@ -496,6 +506,14 @@ def run(*, dry_run: bool, limit: int, report_json: bool, state_path: Path = STAT
 					state["messages"][fingerprint] = outcome
 					dirty = True
 				continue
+			hydrated = _fetch_attachment_content(
+				graph.request_graph, str(message["id"]), str(selected.get("id") or "")
+			)
+			if not _same_attachment(selected, hydrated):
+				raise BridgeError("graph_attachment_changed_after_preflight")
+			selected, outcome = _select_candidate_attachment([hydrated])
+			if selected is None:
+				raise BridgeError(outcome)
 			candidate = _build_candidate(message, selected)
 			if dry_run:
 				summary["would_create"] += 1
@@ -508,15 +526,25 @@ def run(*, dry_run: bool, limit: int, report_json: bool, state_path: Path = STAT
 		except BridgeError as exc:
 			fingerprint = _fingerprint(str(message.get("id") or "unknown"))
 			summary["blocked"] += 1
+			summary["faults"] += 1
 			summary["errors"].append({"message": fingerprint, "code": str(exc)[:80]})
 	if dirty:
 		_save_state(state, state_path)
 	if report_json:
 		print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
-	elif summary["blocked"] or summary["errors"]:
+	elif summary["blocked"]:
+		reasons: dict[str, int] = {}
+		for error in summary["errors"]:
+			code = str(error.get("code") or "blocked_unknown")
+			reasons[code] = reasons.get(code, 0) + 1
 		print(
 			json.dumps(
-				{"ats_email_bridge": "attention", "blocked": summary["blocked"], "errors": summary["errors"]},
+				{
+					"ats_email_bridge": "error" if summary["faults"] else "attention",
+					"blocked": summary["blocked"],
+					"faults": summary["faults"],
+					"reasons": reasons,
+				},
 				ensure_ascii=False,
 				sort_keys=True,
 			)
@@ -541,7 +569,9 @@ def main() -> int:
 	except BridgeError as exc:
 		print(json.dumps({"ats_email_bridge": "error", "code": str(exc)[:100]}, sort_keys=True))
 		return 2
-	return 1 if summary["blocked"] else 0
+	# Deterministic admission blockers are domain outcomes, not runner failures.
+	# They remain visible on stdout but must not be mislabeled as a crashed bridge.
+	return 2 if summary["faults"] else 0
 
 
 if __name__ == "__main__":

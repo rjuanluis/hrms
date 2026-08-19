@@ -198,6 +198,7 @@ class FakeFrappe(types.ModuleType):
 		self.conf = {}
 		self.db = FakeDB(self)
 		self.job_opening_status = "Open"
+		self.open_job_openings = ["HR-OPN-2026-0001"]
 		self.files_by_url = {}
 		self.files_by_name = {}
 		self.deleted_files = []
@@ -229,6 +230,8 @@ class FakeFrappe(types.ModuleType):
 		self.deleted_files.append((doctype, name, kwargs))
 
 	def get_all(self, doctype, filters=None, pluck=None):
+		if doctype == "Job Opening" and filters == {"status": "Open"} and pluck == "name":
+			return list(self.open_job_openings)
 		if doctype != "File" or pluck != "name":
 			raise AssertionError(f"Unexpected get_all call: {(doctype, filters, pluck)}")
 		return sorted(self.preexisting_file_names)
@@ -489,12 +492,12 @@ class TestEmailBridge(unittest.TestCase):
 			self.bridge.ingest_email_payload(payload)
 		self.assertEqual(self.frappe.saved_files, [])
 
-	def test_missing_authoritative_vacancy_fails_before_file_storage(self):
+	def test_subject_without_vacancy_code_uses_only_open_authorized_vacancy(self):
 		payload = email_payload()
 		payload["subject"] = "Solicitud para otra vacante"
-		with self.assertRaisesRegex(self.bridge.EmailBridgeError, "no identifica la vacante autorizada"):
-			self.bridge.ingest_email_payload(payload)
-		self.assertEqual(self.frappe.saved_files, [])
+		result = self.bridge.ingest_email_payload(payload)
+		self.assertEqual(result["status"], "created")
+		self.assertEqual(self.frappe.inserted_applicants[0].job_title, "HR-OPN-2026-0001")
 
 	def test_invalid_base64_and_oversize_fail_before_file_storage(self):
 		invalid = email_payload()
@@ -513,6 +516,14 @@ class TestEmailBridge(unittest.TestCase):
 		with self.assertRaisesRegex(self.bridge.EmailBridgeError, "no es la vacante autorizada"):
 			self.bridge.ingest_email_payload(email_payload())
 		self.assertEqual(self.frappe.saved_files, [])
+
+	def test_zero_or_multiple_open_vacancies_fail_before_file_storage(self):
+		for open_job_openings in ([], ["HR-OPN-2026-0001", "HR-OPN-2026-0002"]):
+			with self.subTest(open_job_openings=open_job_openings):
+				self.frappe.open_job_openings = open_job_openings
+				with self.assertRaisesRegex(self.bridge.EmailBridgeError, "exactamente una vacante abierta"):
+					self.bridge.ingest_email_payload(email_payload())
+				self.assertEqual(self.frappe.saved_files, [])
 
 	def test_insert_failure_defers_file_cleanup_to_caller_rollback(self):
 		self.frappe.fail_applicant_insert = True
