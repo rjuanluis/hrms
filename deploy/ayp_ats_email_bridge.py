@@ -153,8 +153,14 @@ class _HTMLTextExtractor(HTMLParser):
 		self.valid = False
 
 
-def _normalized_words(value: str) -> str:
-	decomposed = unicodedata.normalize("NFKD", value).casefold()
+def _normalized_words(value: str) -> str | None:
+	canonical = unicodedata.normalize("NFC", value).casefold()
+	if any(
+		unicodedata.category(character).startswith("M") or unicodedata.category(character) == "Cf"
+		for character in canonical
+	):
+		return None
+	decomposed = unicodedata.normalize("NFD", canonical)
 	without_marks = "".join(character for character in decomposed if not unicodedata.combining(character))
 	if any(ord(character) > 127 for character in without_marks):
 		return ""
@@ -162,6 +168,8 @@ def _normalized_words(value: str) -> str:
 
 
 NORMALIZED_CONSENT_PHRASE = _normalized_words(CONSENT_PHRASE)
+if NORMALIZED_CONSENT_PHRASE is None:  # pragma: no cover - static canonical phrase invariant
+	raise RuntimeError("canonical consent phrase contains unsupported Unicode")
 JOB_OPENING = "HR-OPN-2026-0001"
 
 
@@ -517,7 +525,10 @@ def _has_current_vacancy_consent(request_graph: Callable[..., Any], graph_id: st
 		content = " ".join(parser.parts)
 	elif content_type != "text":
 		return False
-	return _normalized_words(content) == NORMALIZED_CONSENT_PHRASE
+	normalized = _normalized_words(content)
+	if normalized is None:
+		raise BridgeError("message_body_unicode_invalid")
+	return normalized == NORMALIZED_CONSENT_PHRASE
 
 
 def _build_candidate(message: dict[str, Any], attachment: dict[str, Any]) -> CandidateMessage:

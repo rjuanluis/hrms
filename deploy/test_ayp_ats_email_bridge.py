@@ -367,6 +367,37 @@ class TestAyPEmailBridge(unittest.TestCase):
 			with self.subTest(body=body):
 				self.assertTrue(bridge._has_current_vacancy_consent(graph.request_graph, "MSG-1"))
 
+		decomposed_accent = bridge.CONSENT_PHRASE.replace("í", "i\u0301")
+		graph = GraphModule(
+			self.message(),
+			[self.attachment()],
+			body={"contentType": "text", "content": decomposed_accent},
+		)
+		self.assertTrue(bridge._has_current_vacancy_consent(graph.request_graph, "MSG-1"))
+
+	def test_overlay_marked_consent_is_retryable_without_state_or_ingest(self):
+		overlay = "".join(f"{character}\u0336" for character in "autorizo")
+		body = bridge.CONSENT_PHRASE.replace("autorizo", overlay)
+		graph = GraphModule(
+			self.message(),
+			[self.attachment()],
+			body={"contentType": "text", "content": body},
+		)
+		with (
+			tempfile.TemporaryDirectory() as tmp,
+			patch.object(bridge, "_load_graph_client", return_value=graph),
+			patch.object(bridge, "_remote_ingest") as remote,
+			patch.object(bridge, "_exclusive_lock", return_value=contextlib.nullcontext()),
+			contextlib.redirect_stdout(io.StringIO()) as output,
+		):
+			state_path = Path(tmp) / "state.json"
+			with patch.object(sys, "argv", [str(SCRIPT), "--state", str(state_path)]):
+				return_code = bridge.main()
+		self.assertEqual(return_code, 2)
+		self.assertFalse(state_path.exists())
+		remote.assert_not_called()
+		self.assertEqual(json.loads(output.getvalue())["reasons"], {"message_body_unicode_invalid": 1})
+
 	def test_negated_quoted_or_signed_consent_text_fails_closed(self):
 		bodies = (
 			f"No. {bridge.CONSENT_PHRASE}",
