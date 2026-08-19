@@ -366,6 +366,16 @@ def _candidate_extension(filename: str) -> str:
 	return Path(filename or "").suffix.casefold()
 
 
+def _unsafe_candidate_filename(value: Any) -> bool:
+	return isinstance(value, str) and (
+		len(value) > MAX_CANDIDATE_FILENAME_LENGTH
+		or value in {".", ".."}
+		or "/" in value
+		or "\\" in value
+		or any(ord(character) < 32 or ord(character) == 127 for character in value)
+	)
+
+
 def _select_candidate_attachment(
 	rows: list[dict[str, Any]], *, require_content: bool = True
 ) -> tuple[dict[str, Any] | None, str]:
@@ -376,13 +386,7 @@ def _select_candidate_attachment(
 	if row.get("@odata.type") != "#microsoft.graph.fileAttachment":
 		return None, "blocked_attachment_type"
 	filename = row["name"]
-	if (
-		len(filename) > MAX_CANDIDATE_FILENAME_LENGTH
-		or filename in {".", ".."}
-		or "/" in filename
-		or "\\" in filename
-		or any(ord(character) < 32 or ord(character) == 127 for character in filename)
-	):
+	if _unsafe_candidate_filename(filename):
 		return None, "blocked_candidate_filename"
 	if _candidate_extension(filename) not in ALLOWED_EXTENSIONS:
 		return None, "ignored_no_candidate_cv"
@@ -534,7 +538,11 @@ def _fetch_attachment_metadata(request_graph: Callable[..., Any], graph_id: str)
 	for row in value:
 		if not isinstance(row, dict):
 			raise BridgeError("graph_attachment_metadata_invalid")
-		_validate_attachment_identity_fields(row, code="graph_attachment_metadata_invalid")
+		_validate_attachment_identity_fields(
+			row,
+			code="graph_attachment_metadata_invalid",
+			allow_unsafe_candidate_filename=True,
+		)
 	return value
 
 
@@ -560,7 +568,15 @@ def _same_attachment(metadata: dict[str, Any], hydrated: dict[str, Any]) -> bool
 	)
 
 
-def _validate_attachment_identity_fields(value: dict[str, Any], *, code: str) -> None:
+def _validate_attachment_identity_fields(
+	value: dict[str, Any], *, code: str, allow_unsafe_candidate_filename: bool = False
+) -> None:
+	name = value.get("name")
+	unsafe_candidate_filename = (
+		allow_unsafe_candidate_filename
+		and value.get("isInline") is False
+		and _unsafe_candidate_filename(name)
+	)
 	if (
 		not isinstance(value.get("@odata.type"), str)
 		or not value["@odata.type"].strip()
@@ -570,10 +586,8 @@ def _validate_attachment_identity_fields(value: dict[str, Any], *, code: str) ->
 		or not value["id"].strip()
 		or value["id"] != value["id"].strip()
 		or len(value["id"]) > 4096
-		or not isinstance(value.get("name"), str)
-		or not value["name"].strip()
-		or value["name"] != value["name"].strip()
-		or len(value["name"]) > 4096
+		or not isinstance(name, str)
+		or (not unsafe_candidate_filename and (not name.strip() or name != name.strip() or len(name) > 4096))
 		or not isinstance(value.get("contentType"), str)
 		or not value["contentType"].strip()
 		or value["contentType"] != value["contentType"].strip()

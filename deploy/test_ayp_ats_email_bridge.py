@@ -656,7 +656,9 @@ class TestAyPEmailBridge(unittest.TestCase):
 			"folder/cv.pdf",
 			"folder\\cv.pdf",
 			"cv\x00.pdf",
+			"cv.pdf\n",
 			f"{'a' * bridge.MAX_CANDIDATE_FILENAME_LENGTH}x.pdf",
+			f"{'a' * 4097}.pdf",
 		):
 			with self.subTest(filename=filename):
 				selected, status = bridge._select_candidate_attachment(
@@ -721,7 +723,7 @@ class TestAyPEmailBridge(unittest.TestCase):
 			base_url = url.split("?", 1)[0]
 			if base_url.endswith("/attachments"):
 				message_id = base_url.rsplit("/messages/", 1)[1].split("/", 1)[0]
-				filename = "../cv.pdf" if message_id.startswith("UNSAFE-") else "cv.pdf"
+				filename = "cv.pdf\n" if message_id.startswith("UNSAFE-") else "cv.pdf"
 				return {
 					"value": [
 						{
@@ -1020,7 +1022,7 @@ class TestAyPEmailBridge(unittest.TestCase):
 			("@odata.type", ""),
 			("@odata.type", " "),
 			("id", "	"),
-			("name", "\n"),
+			("name", " "),
 			("contentType", "  "),
 		):
 			with self.subTest(field=field, malformed=malformed), tempfile.TemporaryDirectory() as tmp:
