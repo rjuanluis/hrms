@@ -273,6 +273,7 @@ class TestCandidateDocumentProcessing(unittest.TestCase):
 			patch.object(candidate_document_service.frappe, "db", fake_db),
 			patch.object(candidate_document_service.frappe, "generate_hash", return_value="exact-claim"),
 			patch.object(candidate_document_service.frappe, "get_doc", return_value=applicant),
+			patch.object(candidate_document_service, "now_datetime", return_value="2026-08-19 22:00:00"),
 			patch.object(
 				candidate_document_service,
 				"_load_exact_cv",
