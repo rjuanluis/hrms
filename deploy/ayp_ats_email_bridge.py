@@ -14,6 +14,7 @@ import base64
 import binascii
 import fcntl
 import hashlib
+import importlib
 import importlib.util
 import inspect
 import json
@@ -30,6 +31,27 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
+
+try:
+	_vacancy_reference = importlib.import_module("ayp_ats_vacancy_reference")
+except ModuleNotFoundError as exc:
+	if exc.name != "ayp_ats_vacancy_reference":
+		raise
+	_vacancy_reference_source = (
+		Path(__file__).resolve().parents[1] / "hrms" / "recruitment" / "ats_vacancy_reference.py"
+	)
+	_vacancy_reference_spec = importlib.util.spec_from_file_location(
+		"ayp_ats_vacancy_reference", _vacancy_reference_source
+	)
+	if not _vacancy_reference_spec or not _vacancy_reference_spec.loader:
+		raise RuntimeError("vacancy reference parser is unavailable") from exc
+	_vacancy_reference = importlib.util.module_from_spec(_vacancy_reference_spec)
+	_vacancy_reference_spec.loader.exec_module(_vacancy_reference)
+
+AUTHORIZED_JOB_OPENING = _vacancy_reference.AUTHORIZED_JOB_OPENING
+subject_has_only_authorized_vacancy_references = (
+	_vacancy_reference.subject_has_only_authorized_vacancy_references
+)
 
 MAILBOX = "empleos@aroypedal.com"
 DEFAULT_LIMIT = 10
@@ -177,11 +199,7 @@ def _normalized_words(value: str) -> str | None:
 NORMALIZED_CONSENT_PHRASE = _normalized_words(CONSENT_PHRASE)
 if NORMALIZED_CONSENT_PHRASE is None:  # pragma: no cover - static canonical phrase invariant
 	raise RuntimeError("canonical consent phrase contains unsupported Unicode")
-JOB_OPENING = "HR-OPN-2026-0001"
-VACANCY_CODE_PATTERN = re.compile(
-	r"(?<![A-Z0-9])HR-OPN-[A-Z0-9]+(?:-[A-Z0-9]+)+(?![A-Z0-9-])",
-	re.IGNORECASE | re.ASCII,
-)
+JOB_OPENING = AUTHORIZED_JOB_OPENING
 
 
 def _fingerprint(value: str) -> str:
@@ -413,8 +431,7 @@ def _require_compatible_subject_vacancy(message: dict[str, Any]) -> None:
 	subject = message.get("subject")
 	if subject is None:
 		return
-	codes = {match.group(0).upper() for match in VACANCY_CODE_PATTERN.finditer(subject)}
-	if codes and codes != {JOB_OPENING}:
+	if not subject_has_only_authorized_vacancy_references(subject):
 		raise AdmissionBlock("blocked_explicit_vacancy_mismatch")
 
 

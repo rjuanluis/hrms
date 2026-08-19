@@ -15,6 +15,10 @@ from frappe import _
 from frappe.utils import validate_email_address
 from frappe.utils.file_manager import get_content_hash
 
+from hrms.recruitment.ats_vacancy_reference import (
+	AUTHORIZED_JOB_OPENING,
+	subject_has_only_authorized_vacancy_references,
+)
 from hrms.recruitment.matching import EMAIL_RECRUITMENT_SOURCE, normalize_email
 from hrms.security.candidate_cv import (
 	MAX_CV_BYTES,
@@ -25,7 +29,7 @@ from hrms.security.candidate_cv import (
 	validate_cv_file,
 )
 
-DEFAULT_JOB_OPENING = "HR-OPN-2026-0001"
+DEFAULT_JOB_OPENING = AUTHORIZED_JOB_OPENING
 JOB_OPENING_LOCK_SQL = """
 	SELECT `name`, `status`
 	FROM `tabJob Opening`
@@ -53,10 +57,6 @@ MAX_DATA_LENGTH = 140
 MAX_RAW_MESSAGE_ID_LENGTH = 4096
 MAX_BASE64_LENGTH = ((MAX_CV_BYTES + 2) // 3) * 4
 CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
-VACANCY_CODE_PATTERN = re.compile(
-	r"(?<![A-Z0-9])HR-OPN-[A-Z0-9]+(?:-[A-Z0-9]+)+(?![A-Z0-9-])",
-	re.IGNORECASE | re.ASCII,
-)
 
 
 class EmailBridgeError(frappe.ValidationError):
@@ -155,8 +155,7 @@ def _received_on(payload: dict) -> datetime:
 
 
 def _require_compatible_subject_vacancy(subject: str) -> None:
-	codes = {match.group(0).upper() for match in VACANCY_CODE_PATTERN.finditer(subject)}
-	if codes and codes != {DEFAULT_JOB_OPENING}:
+	if not subject_has_only_authorized_vacancy_references(subject):
 		_block_admission(
 			"blocked_explicit_vacancy_mismatch",
 			"El asunto contiene un código de vacante distinto de la vacante autorizada.",

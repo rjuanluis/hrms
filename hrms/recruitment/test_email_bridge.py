@@ -26,6 +26,14 @@ if MATCHING_SPEC is None or MATCHING_SPEC.loader is None:
 MATCHING_MODULE = importlib.util.module_from_spec(MATCHING_SPEC)
 MATCHING_SPEC.loader.exec_module(MATCHING_MODULE)
 EMAIL_RECRUITMENT_SOURCE = MATCHING_MODULE.EMAIL_RECRUITMENT_SOURCE
+VACANCY_REFERENCE_PATH = ROOT / "hrms" / "recruitment" / "ats_vacancy_reference.py"
+VACANCY_REFERENCE_SPEC = importlib.util.spec_from_file_location(
+	"ats_vacancy_reference_under_test", VACANCY_REFERENCE_PATH
+)
+if VACANCY_REFERENCE_SPEC is None or VACANCY_REFERENCE_SPEC.loader is None:
+	raise ImportError(f"Could not load {VACANCY_REFERENCE_PATH}")
+VACANCY_REFERENCE_MODULE = importlib.util.module_from_spec(VACANCY_REFERENCE_SPEC)
+VACANCY_REFERENCE_SPEC.loader.exec_module(VACANCY_REFERENCE_MODULE)
 
 
 class FakeValidationError(Exception):
@@ -263,6 +271,7 @@ def load_email_bridge(fake_frappe):
 		"frappe.utils",
 		"frappe.utils.file_manager",
 		"hrms.recruitment.matching",
+		"hrms.recruitment.ats_vacancy_reference",
 		"hrms.security.candidate_cv",
 	)
 	original_modules = {name: sys.modules.get(name) for name in module_names}
@@ -313,6 +322,7 @@ def load_email_bridge(fake_frappe):
 		sys.modules["frappe.utils"] = frappe_utils
 		sys.modules["frappe.utils.file_manager"] = file_manager
 		sys.modules["hrms.recruitment.matching"] = MATCHING_MODULE
+		sys.modules["hrms.recruitment.ats_vacancy_reference"] = VACANCY_REFERENCE_MODULE
 		sys.modules["hrms.security.candidate_cv"] = candidate_cv
 		spec = importlib.util.spec_from_file_location("email_bridge_under_test", MODULE_PATH)
 		if spec is None or spec.loader is None:
@@ -516,6 +526,16 @@ class TestEmailBridge(unittest.TestCase):
 		for subject in (
 			"Solicitud HR-OPN-2026-9999",
 			"HR-OPN-2026-0001 y HR-OPN-2026-9999",
+			"Solicitud HR-OPN-9999",
+			"HR-OPN-2026-0001 y HR-OPN-9999",
+			"Solicitud HR-OPN-2026-9999-",
+			"Solicitud HR-OPN-",
+			"Solicitud HR-OPN- 2026-0001",
+			"Solicitud HR-OPN-2026-0001-extra",
+			"Solicitud HR-OPN-2026-0001_",
+			"Solicitud XHR-OPN-2026-0001",
+			"Solicitud HR-OPN-2026-0001–9999",
+			"Solicitud HR-OPN-2026-0001\u0336",
 		):
 			with self.subTest(subject=subject):
 				payload = email_payload()
@@ -526,6 +546,16 @@ class TestEmailBridge(unittest.TestCase):
 					self.bridge.ingest_email_payload(payload)
 				self.assertEqual(raised.exception.code, "blocked_explicit_vacancy_mismatch")
 				self.assertEqual(self.frappe.saved_files, [])
+
+	def test_subject_vacancy_parser_allows_no_code_or_only_exact_authorized_code(self):
+		for subject in (
+			"Solicitud para ventas en línea",
+			"Solicitud HR-OPN-2026-0001",
+			"hr-opn-2026-0001: solicitud",
+			"HR-OPN-2026-0001 y HR-OPN-2026-0001",
+		):
+			with self.subTest(subject=subject):
+				self.bridge._require_compatible_subject_vacancy(subject)
 
 	def test_invalid_base64_and_oversize_fail_before_file_storage(self):
 		invalid = email_payload()

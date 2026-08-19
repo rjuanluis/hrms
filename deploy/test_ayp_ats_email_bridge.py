@@ -599,24 +599,47 @@ class TestAyPEmailBridge(unittest.TestCase):
 		self.assertIn("blocked_sender_from_mismatch", persisted["messages"].values())
 		remote.assert_not_called()
 
-	def test_explicit_incompatible_vacancy_blocks_before_attachment_metadata(self):
-		message = {**self.message(), "subject": "Solicitud HR-OPN-2026-9999"}
-		graph = GraphModule(message, [self.attachment()])
-		with (
-			tempfile.TemporaryDirectory() as tmp,
-			patch.object(bridge, "_load_graph_client", return_value=graph),
-			patch.object(bridge, "_remote_ingest") as remote,
-			contextlib.redirect_stdout(io.StringIO()),
+	def test_explicit_incompatible_or_malformed_vacancy_blocks_before_attachment_metadata(self):
+		for subject in (
+			"Solicitud HR-OPN-2026-9999",
+			"Solicitud HR-OPN-9999",
+			"HR-OPN-2026-0001 y HR-OPN-9999",
+			"Solicitud HR-OPN-2026-9999-",
+			"Solicitud HR-OPN-",
+			"Solicitud HR-OPN- 2026-0001",
+			"Solicitud HR-OPN-2026-0001-extra",
+			"Solicitud HR-OPN-2026-0001_",
+			"Solicitud XHR-OPN-2026-0001",
+			"Solicitud HR-OPN-2026-0001–9999",
+			"Solicitud HR-OPN-2026-0001\u0336",
 		):
-			state_path = Path(tmp) / "state.json"
-			result = bridge.run(dry_run=False, limit=10, report_json=False, state_path=state_path)
-			persisted = bridge._load_state(state_path)
-		self.assertEqual(result["blocked"], 1)
-		self.assertEqual(result["faults"], 0)
-		self.assertEqual(result["errors"][0]["code"], "blocked_explicit_vacancy_mismatch")
-		self.assertEqual(len(graph.calls), 1)
-		self.assertIn("blocked_explicit_vacancy_mismatch", persisted["messages"].values())
-		remote.assert_not_called()
+			with self.subTest(subject=subject), tempfile.TemporaryDirectory() as tmp:
+				message = {**self.message(), "subject": subject}
+				graph = GraphModule(message, [self.attachment()])
+				with (
+					patch.object(bridge, "_load_graph_client", return_value=graph),
+					patch.object(bridge, "_remote_ingest") as remote,
+					contextlib.redirect_stdout(io.StringIO()),
+				):
+					state_path = Path(tmp) / "state.json"
+					result = bridge.run(dry_run=False, limit=10, report_json=False, state_path=state_path)
+					persisted = bridge._load_state(state_path)
+				self.assertEqual(result["blocked"], 1)
+				self.assertEqual(result["faults"], 0)
+				self.assertEqual(result["errors"][0]["code"], "blocked_explicit_vacancy_mismatch")
+				self.assertEqual(len(graph.calls), 1)
+				self.assertIn("blocked_explicit_vacancy_mismatch", persisted["messages"].values())
+				remote.assert_not_called()
+
+	def test_subject_vacancy_parser_allows_no_code_or_only_exact_authorized_code(self):
+		for subject in (
+			"Solicitud para ventas en línea",
+			"Solicitud HR-OPN-2026-0001",
+			"hr-opn-2026-0001: solicitud",
+			"HR-OPN-2026-0001 y HR-OPN-2026-0001",
+		):
+			with self.subTest(subject=subject):
+				bridge._require_compatible_subject_vacancy({**self.message(), "subject": subject})
 
 	def test_attachment_size_accepts_only_exact_integer_type(self):
 		for malformed in (True, False, 12.0, "12", None, float("inf"), float("nan")):
