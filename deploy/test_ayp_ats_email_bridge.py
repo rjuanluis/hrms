@@ -124,6 +124,8 @@ class TestAyPEmailBridge(unittest.TestCase):
 			message_list_url = graph.calls[0][2]
 			self.assertIn("$orderby=receivedDateTime%20desc", message_list_url)
 			self.assertIn("hasAttachments%20eq%20true", message_list_url)
+			self.assertIn("receivedDateTime%20ge%202026-08-13T00:00:00Z", message_list_url)
+			self.assertIn("$top=100", message_list_url)
 			attachment_list_urls = [
 				call[2] for call in graph.calls if call[2].split("?", 1)[0].endswith("/attachments")
 			]

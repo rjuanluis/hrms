@@ -34,6 +34,8 @@ MAILBOX = "empleos@aroypedal.com"
 DEFAULT_LIMIT = 10
 MAX_LIMIT = 20
 MAX_MESSAGE_PAGES = 10
+MESSAGE_PAGE_SIZE = 100
+INTAKE_START_UTC = "2026-08-13T00:00:00Z"
 MAX_CV_BYTES = 5 * 1024 * 1024
 MAX_GRAPH_CONTENT_CHARS = ((MAX_CV_BYTES + 2) // 3) * 4 + 16
 ALLOWED_EXTENSIONS = frozenset({".pdf", ".docx", ".heic", ".heif", ".jpeg", ".jpg", ".png"})
@@ -305,8 +307,8 @@ def _fetch_messages(
 	url = (
 		f"https://graph.microsoft.com/v1.0/users/{mailbox}/mailFolders/inbox/messages"
 		"?$select="
-		f"{select}&$filter=receivedDateTime%20ge%202000-01-01T00:00:00Z%20and%20hasAttachments%20eq%20true"
-		f"&$orderby=receivedDateTime%20desc&$top={limit}"
+		f"{select}&$filter=receivedDateTime%20ge%20{INTAKE_START_UTC}%20and%20hasAttachments%20eq%20true"
+		f"&$orderby=receivedDateTime%20desc&$top={MESSAGE_PAGE_SIZE}"
 	)
 	known = known_fingerprints or set()
 	pending: list[dict[str, Any]] = []
