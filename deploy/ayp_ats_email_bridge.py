@@ -448,19 +448,20 @@ def _same_attachment(metadata: dict[str, Any], hydrated: dict[str, Any]) -> bool
 
 def _validate_attachment_identity_fields(value: dict[str, Any], *, code: str) -> None:
 	if (
-		type(value.get("@odata.type")) is not str
-		or type(value.get("id")) is not str
+		not isinstance(value.get("@odata.type"), str)
+		or not isinstance(value.get("id"), str)
 		or not value.get("id")
 		or len(value["id"]) > 4096
-		or type(value.get("name")) is not str
+		or not isinstance(value.get("name"), str)
 		or not value.get("name")
 		or len(value["name"]) > 4096
-		or type(value.get("contentType")) is not str
+		or not isinstance(value.get("contentType"), str)
 		or not value.get("contentType")
 		or len(value["contentType"]) > 512
-		or type(value.get("size")) is not int
+		or not isinstance(value.get("size"), int)
+		or isinstance(value.get("size"), bool)
 		or value["size"] < 0
-		or type(value.get("isInline")) is not bool
+		or not isinstance(value.get("isInline"), bool)
 	):
 		raise BridgeError(code)
 
