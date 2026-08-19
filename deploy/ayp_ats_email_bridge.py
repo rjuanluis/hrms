@@ -35,6 +35,7 @@ MAILBOX = "empleos@aroypedal.com"
 DEFAULT_LIMIT = 10
 MAX_LIMIT = 20
 MAX_MESSAGE_PAGES = 10
+MAX_MESSAGE_CURSOR_HISTORY = 512
 MESSAGE_PAGE_SIZE = 100
 INTAKE_START_UTC = "2026-08-13T00:00:00Z"
 MAX_CV_BYTES = 5 * 1024 * 1024
@@ -105,6 +106,7 @@ class CandidateMessage:
 class MessageBatch:
 	messages: list[dict[str, Any]]
 	resume_url: str | None
+	cursor_history: tuple[str, ...]
 
 
 SIMPLE_CONSENT_HTML_TAGS = frozenset({"html", "body", "div", "p", "span", "br"})
@@ -245,6 +247,10 @@ def _validate_message_scan_url(value: Any) -> str:
 	return value
 
 
+def _message_scan_url_digest(value: str) -> str:
+	return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 def _load_state(path: Path = STATE_PATH) -> dict[str, Any]:
 	if not path.exists():
 		return {"version": 1, "messages": {}}
@@ -265,6 +271,15 @@ def _load_state(path: Path = STATE_PATH) -> dict[str, Any]:
 			_validate_message_scan_url(resume_url)
 		except BridgeError:
 			raise BridgeError("state_schema_invalid")
+	history = value.get("message_scan_history", [])
+	if (
+		not isinstance(history, list)
+		or len(history) > MAX_MESSAGE_CURSOR_HISTORY
+		or any(not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{64}", item) for item in history)
+		or len(set(history)) != len(history)
+		or (history and resume_url is None)
+	):
+		raise BridgeError("state_schema_invalid")
 	return value
 
 
@@ -386,6 +401,7 @@ def _fetch_messages(
 	limit: int,
 	known_fingerprints: set[str] | None = None,
 	start_url: str | None = None,
+	cursor_history: list[str] | None = None,
 ) -> MessageBatch:
 	mailbox = quote(MAILBOX, safe="@")
 	select = "id,internetMessageId,subject,receivedDateTime,sender,from,hasAttachments"
@@ -399,6 +415,10 @@ def _fetch_messages(
 	known = known_fingerprints or set()
 	pending: list[dict[str, Any]] = []
 	seen_urls: set[str] = set()
+	history = list(cursor_history or [])
+	history_set = set(history)
+	if start_url is not None and _message_scan_url_digest(url) in history_set:
+		raise BridgeError("graph_message_next_link_cycle")
 	for _ in range(MAX_MESSAGE_PAGES):
 		if url in seen_urls:
 			raise BridgeError("graph_message_next_link_cycle")
@@ -426,11 +446,20 @@ def _fetch_messages(
 			if next_url in seen_urls:
 				raise BridgeError("graph_message_next_link_cycle")
 		if len(pending) >= limit:
-			return MessageBatch(pending[:limit], page_url)
+			return MessageBatch(pending[:limit], page_url, tuple(history))
 		if next_url is None:
-			return MessageBatch(pending, None)
+			return MessageBatch(pending, None, ())
+		if _message_scan_url_digest(next_url) in history_set:
+			raise BridgeError("graph_message_next_link_cycle")
+		if len(history) >= MAX_MESSAGE_CURSOR_HISTORY:
+			raise BridgeError("graph_message_cursor_history_exhausted")
+		page_digest = _message_scan_url_digest(page_url)
+		if page_digest in history_set:
+			raise BridgeError("graph_message_next_link_cycle")
+		history.append(page_digest)
+		history_set.add(page_digest)
 		url = next_url
-	return MessageBatch(pending, url)
+	return MessageBatch(pending, url, tuple(history))
 
 
 def _fetch_attachment_metadata(request_graph: Callable[..., Any], graph_id: str) -> list[dict[str, Any]]:
@@ -634,6 +663,7 @@ def run(*, dry_run: bool, limit: int, report_json: bool, state_path: Path = STAT
 		limit,
 		set(state["messages"]),
 		start_url=state.get("message_scan_url"),
+		cursor_history=state.get("message_scan_history", []),
 	)
 	messages = batch.messages
 	for message in messages:
@@ -707,11 +737,15 @@ def run(*, dry_run: bool, limit: int, report_json: bool, state_path: Path = STAT
 			advance_scan = False
 	if not dry_run and advance_scan:
 		if batch.resume_url is None:
-			if "message_scan_url" in state:
-				state.pop("message_scan_url")
+			if "message_scan_url" in state or "message_scan_history" in state:
+				state.pop("message_scan_url", None)
+				state.pop("message_scan_history", None)
 				dirty = True
-		elif state.get("message_scan_url") != batch.resume_url:
+		elif state.get("message_scan_url") != batch.resume_url or state.get(
+			"message_scan_history", []
+		) != list(batch.cursor_history):
 			state["message_scan_url"] = batch.resume_url
+			state["message_scan_history"] = list(batch.cursor_history)
 			dirty = True
 	if dirty:
 		_save_state(state, state_path)

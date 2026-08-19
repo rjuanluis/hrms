@@ -638,6 +638,7 @@ class TestAyPEmailBridge(unittest.TestCase):
 		self.assertEqual(first.messages, [])
 		self.assertEqual(page_calls, bridge.MAX_MESSAGE_PAGES)
 		self.assertIn("page-11", first.resume_url or "")
+		self.assertEqual(len(first.cursor_history), bridge.MAX_MESSAGE_PAGES)
 
 		with tempfile.TemporaryDirectory() as tmp:
 			path = Path(tmp) / "state.json"
@@ -646,6 +647,7 @@ class TestAyPEmailBridge(unittest.TestCase):
 					"version": 1,
 					"messages": {next(iter(known_set)): "created"},
 					"message_scan_url": first.resume_url,
+					"message_scan_history": list(first.cursor_history),
 				},
 				path,
 			)
@@ -660,8 +662,50 @@ class TestAyPEmailBridge(unittest.TestCase):
 				1,
 				known_set,
 				start_url=persisted["message_scan_url"],
+				cursor_history=persisted["message_scan_history"],
 			)
 		self.assertEqual([row["id"] for row in second.messages], ["GRAPH-ID-1001"])
+
+	def test_continuation_cycle_across_page_cap_fails_on_next_run_without_advancing_state(self):
+		mailbox_url = (
+			"https://graph.microsoft.com/v1.0/users/empleos@aroypedal.com/mailFolders/inbox/messages"
+		)
+		cycle_urls = [f"{mailbox_url}?$skiptoken=cycle-{index}" for index in range(11)]
+
+		def request_graph(**kwargs):
+			url = kwargs["url"]
+			if "$skiptoken=cycle-" not in url:
+				next_url = cycle_urls[0]
+			else:
+				index = int(url.rsplit("cycle-", 1)[1])
+				next_url = cycle_urls[(index + 1) % len(cycle_urls)]
+			return {"value": [], "@odata.nextLink": next_url}
+
+		graph = types.SimpleNamespace(request_graph=request_graph)
+		with (
+			tempfile.TemporaryDirectory() as tmp,
+			patch.object(bridge, "_load_graph_client", return_value=graph),
+			patch.object(bridge, "_exclusive_lock", return_value=contextlib.nullcontext()),
+		):
+			state_path = Path(tmp) / "state.json"
+			with (
+				patch.object(sys, "argv", [str(SCRIPT), "--state", str(state_path)]),
+				contextlib.redirect_stdout(io.StringIO()) as first_output,
+			):
+				first_code = bridge.main()
+			first_state = state_path.read_bytes()
+			persisted = bridge._load_state(state_path)
+			self.assertEqual(first_code, 0)
+			self.assertEqual(first_output.getvalue(), "")
+			self.assertEqual(len(persisted["message_scan_history"]), bridge.MAX_MESSAGE_PAGES)
+			with (
+				patch.object(sys, "argv", [str(SCRIPT), "--state", str(state_path)]),
+				contextlib.redirect_stdout(io.StringIO()) as second_output,
+			):
+				second_code = bridge.main()
+			self.assertEqual(second_code, 2)
+			self.assertEqual(state_path.read_bytes(), first_state)
+			self.assertEqual(json.loads(second_output.getvalue())["code"], "graph_message_next_link_cycle")
 
 	def test_untrusted_next_link_is_nonzero_fault_and_never_persisted(self):
 		known = self.message()
@@ -880,6 +924,26 @@ class TestAyPEmailBridge(unittest.TestCase):
 			path.chmod(0o600)
 			with self.assertRaisesRegex(bridge.BridgeError, "state_schema_invalid"):
 				bridge._load_state(path)
+
+	def test_state_rejects_malformed_or_orphaned_cursor_history(self):
+		valid_url = (
+			"https://graph.microsoft.com/v1.0/users/empleos@aroypedal.com/"
+			"mailFolders/inbox/messages?$skiptoken=safe"
+		)
+		for history, include_url in (
+			(["not-a-digest"], True),
+			(["a" * 64, "a" * 64], True),
+			(["a" * 64], False),
+		):
+			with self.subTest(history=history, include_url=include_url), tempfile.TemporaryDirectory() as tmp:
+				path = Path(tmp) / "state.json"
+				state = {"version": 1, "messages": {}, "message_scan_history": history}
+				if include_url:
+					state["message_scan_url"] = valid_url
+				path.write_text(json.dumps(state))
+				path.chmod(0o600)
+				with self.assertRaisesRegex(bridge.BridgeError, "state_schema_invalid"):
+					bridge._load_state(path)
 
 	def test_process_lock_is_private_and_fails_closed_on_overlap(self):
 		with tempfile.TemporaryDirectory() as tmp:
