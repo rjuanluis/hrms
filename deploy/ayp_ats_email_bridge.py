@@ -371,7 +371,11 @@ def _fetch_messages(
 	url = _validate_message_scan_url(start_url) if start_url is not None else initial_url
 	known = known_fingerprints or set()
 	pending: list[dict[str, Any]] = []
+	seen_urls: set[str] = set()
 	for _ in range(MAX_MESSAGE_PAGES):
+		if url in seen_urls:
+			raise BridgeError("graph_message_next_link_cycle")
+		seen_urls.add(url)
 		page_url = url
 		response = _graph_get(request_graph, url)
 		value = response.get("value")
@@ -393,10 +397,11 @@ def _fetch_messages(
 					pending.append(row)
 			if len(pending) >= limit:
 				return MessageBatch(pending[:limit], page_url)
-		next_link = response.get("@odata.nextLink")
-		if not next_link:
+		if "@odata.nextLink" not in response:
 			return MessageBatch(pending, None)
-		url = _validate_message_scan_url(next_link)
+		url = _validate_message_scan_url(response["@odata.nextLink"])
+		if url in seen_urls:
+			raise BridgeError("graph_message_next_link_cycle")
 	return MessageBatch(pending, url)
 
 
@@ -412,7 +417,7 @@ def _fetch_attachment_metadata(request_graph: Callable[..., Any], graph_id: str)
 		"?$select=id,name,contentType,size,isInline"
 	)
 	response = _graph_get(request_graph, url)
-	if response.get("@odata.nextLink"):
+	if "@odata.nextLink" in response:
 		raise BridgeError("graph_attachment_list_paginated")
 	value = response.get("value")
 	if not isinstance(value, list):
@@ -494,7 +499,12 @@ def _has_current_vacancy_consent(request_graph: Callable[..., Any], graph_id: st
 	content = body.get("content")
 	if not isinstance(content, str) or len(content) > 1024 * 1024:
 		raise BridgeError("message_body_invalid")
-	content_type = str(body.get("contentType") or "").casefold()
+	content_type_value = body.get("contentType")
+	if not isinstance(content_type_value, str):
+		raise BridgeError("message_body_invalid")
+	content_type = content_type_value.casefold()
+	if content_type not in {"html", "text"}:
+		raise BridgeError("message_body_invalid")
 	if content_type == "html":
 		parser = _HTMLTextExtractor()
 		try:

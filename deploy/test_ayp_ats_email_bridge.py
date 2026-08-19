@@ -660,6 +660,81 @@ class TestAyPEmailBridge(unittest.TestCase):
 		self.assertEqual(persisted["messages"], {known_fingerprint: "created"})
 		self.assertEqual(json.loads(output.getvalue())["code"], "graph_message_next_link_invalid")
 
+	def test_present_malformed_or_cyclic_message_continuation_never_advances_state(self):
+		for next_link in (None, "", 0, False, [], {}):
+			with self.subTest(next_link=next_link), tempfile.TemporaryDirectory() as tmp:
+
+				def request_graph(**kwargs):
+					return {"value": [], "@odata.nextLink": next_link}
+
+				graph = types.SimpleNamespace(request_graph=request_graph)
+				with (
+					patch.object(bridge, "_load_graph_client", return_value=graph),
+					patch.object(bridge, "_exclusive_lock", return_value=contextlib.nullcontext()),
+					contextlib.redirect_stdout(io.StringIO()) as output,
+				):
+					state_path = Path(tmp) / "state.json"
+					with patch.object(sys, "argv", [str(SCRIPT), "--state", str(state_path)]):
+						return_code = bridge.main()
+				self.assertEqual(return_code, 2)
+				self.assertFalse(state_path.exists())
+				self.assertEqual(json.loads(output.getvalue())["code"], "graph_message_next_link_invalid")
+
+		with tempfile.TemporaryDirectory() as tmp:
+
+			def cyclic_request(**kwargs):
+				return {"value": [], "@odata.nextLink": kwargs["url"]}
+
+			graph = types.SimpleNamespace(request_graph=cyclic_request)
+			with (
+				patch.object(bridge, "_load_graph_client", return_value=graph),
+				patch.object(bridge, "_exclusive_lock", return_value=contextlib.nullcontext()),
+				contextlib.redirect_stdout(io.StringIO()) as output,
+			):
+				state_path = Path(tmp) / "state.json"
+				with patch.object(sys, "argv", [str(SCRIPT), "--state", str(state_path)]):
+					return_code = bridge.main()
+			self.assertEqual(return_code, 2)
+			self.assertFalse(state_path.exists())
+			self.assertEqual(json.loads(output.getvalue())["code"], "graph_message_next_link_cycle")
+
+	def test_any_present_attachment_continuation_is_provider_fault(self):
+		valid = {key: value for key, value in self.attachment().items() if key != "contentBytes"}
+		for next_link in (None, "", 0, False, [], {}):
+			with self.subTest(next_link=next_link):
+				with self.assertRaisesRegex(bridge.BridgeError, "graph_attachment_list_paginated"):
+					bridge._fetch_attachment_metadata(
+						lambda **kwargs: {"value": [valid], "@odata.nextLink": next_link},
+						"GRAPH-ID-1",
+					)
+
+	def test_malformed_body_content_type_is_retryable_without_state_or_ingest(self):
+		metadata = {key: value for key, value in self.attachment().items() if key != "contentBytes"}
+		for content_type in (None, 1, False, [], {}, "markdown"):
+			with self.subTest(content_type=content_type), tempfile.TemporaryDirectory() as tmp:
+
+				def request_graph(**kwargs):
+					if kwargs["url"].split("?", 1)[0].endswith("/attachments"):
+						return {"value": [metadata]}
+					if "?$select=body" in kwargs["url"]:
+						return {"body": {"contentType": content_type, "content": bridge.CONSENT_PHRASE}}
+					return {"value": [self.message()]}
+
+				graph = types.SimpleNamespace(request_graph=request_graph)
+				with (
+					patch.object(bridge, "_load_graph_client", return_value=graph),
+					patch.object(bridge, "_remote_ingest") as remote,
+					patch.object(bridge, "_exclusive_lock", return_value=contextlib.nullcontext()),
+					contextlib.redirect_stdout(io.StringIO()) as output,
+				):
+					state_path = Path(tmp) / "state.json"
+					with patch.object(sys, "argv", [str(SCRIPT), "--state", str(state_path)]):
+						return_code = bridge.main()
+				self.assertEqual(return_code, 2)
+				self.assertFalse(state_path.exists())
+				remote.assert_not_called()
+				self.assertEqual(json.loads(output.getvalue())["reasons"], {"message_body_invalid": 1})
+
 	def test_identity_uses_full_digest_of_mailbox_and_immutable_graph_id(self):
 		first = self.message()
 		second = {**first, "internetMessageId": "<sender-controlled-different@example.test>"}
