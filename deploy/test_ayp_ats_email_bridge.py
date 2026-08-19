@@ -526,7 +526,8 @@ class TestAyPEmailBridge(unittest.TestCase):
 				{
 					"value": [known],
 					"@odata.nextLink": (
-						"https://graph.microsoft.com/v1.0/users/empleos@aroypedal.com/messages?$skiptoken=safe"
+						"https://graph.microsoft.com/v1.0/users/empleos@aroypedal.com/"
+						"mailFolders/inbox/messages?$skiptoken=safe"
 					),
 				},
 				{"value": [pending]},
@@ -589,6 +590,39 @@ class TestAyPEmailBridge(unittest.TestCase):
 				start_url=persisted["message_scan_url"],
 			)
 		self.assertEqual([row["id"] for row in second.messages], ["GRAPH-ID-1001"])
+
+	def test_untrusted_next_link_is_nonzero_fault_and_never_persisted(self):
+		known = self.message()
+		known_fingerprint = bridge._fingerprint(bridge._message_key(known))
+
+		def request_graph(**kwargs):
+			return {
+				"value": [known],
+				"@odata.nextLink": (
+					"https://graph.microsoft.com/v1.0/users/other@example.test/"
+					"mailFolders/inbox/messages?$skiptoken=poison"
+				),
+			}
+
+		graph = types.SimpleNamespace(request_graph=request_graph)
+		with (
+			tempfile.TemporaryDirectory() as tmp,
+			patch.object(bridge, "_load_graph_client", return_value=graph),
+			patch.object(bridge, "_exclusive_lock", return_value=contextlib.nullcontext()),
+			contextlib.redirect_stdout(io.StringIO()) as output,
+		):
+			state_path = Path(tmp) / "state.json"
+			bridge._save_state(
+				{"version": 1, "messages": {known_fingerprint: "created"}},
+				state_path,
+			)
+			with patch.object(sys, "argv", [str(SCRIPT), "--state", str(state_path)]):
+				return_code = bridge.main()
+			persisted = bridge._load_state(state_path)
+		self.assertEqual(return_code, 2)
+		self.assertNotIn("message_scan_url", persisted)
+		self.assertEqual(persisted["messages"], {known_fingerprint: "created"})
+		self.assertEqual(json.loads(output.getvalue())["code"], "graph_message_next_link_invalid")
 
 	def test_identity_uses_full_digest_of_mailbox_and_immutable_graph_id(self):
 		first = self.message()

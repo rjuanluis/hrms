@@ -221,6 +221,21 @@ def _graph_get(request_graph: Callable[..., Any], url: str) -> dict[str, Any]:
 	return value
 
 
+def _validate_message_scan_url(value: Any) -> str:
+	if not isinstance(value, str) or not value or len(value) > 8192:
+		raise BridgeError("graph_message_next_link_invalid")
+	parsed = urlparse(value)
+	expected_path = f"/v1.0/users/{MAILBOX}/mailFolders/inbox/messages"
+	if (
+		parsed.scheme != "https"
+		or parsed.netloc.casefold() != "graph.microsoft.com"
+		or unquote(parsed.path).casefold() != expected_path.casefold()
+		or "\\" in unquote(parsed.path)
+	):
+		raise BridgeError("graph_message_next_link_invalid")
+	return value
+
+
 def _load_state(path: Path = STATE_PATH) -> dict[str, Any]:
 	if not path.exists():
 		return {"version": 1, "messages": {}}
@@ -237,15 +252,9 @@ def _load_state(path: Path = STATE_PATH) -> dict[str, Any]:
 		raise BridgeError("state_schema_invalid")
 	resume_url = value.get("message_scan_url")
 	if resume_url is not None:
-		if not isinstance(resume_url, str) or len(resume_url) > 8192:
-			raise BridgeError("state_schema_invalid")
-		parsed = urlparse(resume_url)
-		expected_path = f"/v1.0/users/{MAILBOX}/mailFolders/inbox/messages"
-		if (
-			parsed.scheme != "https"
-			or parsed.netloc.casefold() != "graph.microsoft.com"
-			or unquote(parsed.path).casefold() != expected_path.casefold()
-		):
+		try:
+			_validate_message_scan_url(resume_url)
+		except BridgeError:
 			raise BridgeError("state_schema_invalid")
 	return value
 
@@ -359,7 +368,7 @@ def _fetch_messages(
 		f"{select}&$filter=receivedDateTime%20ge%20{INTAKE_START_UTC}%20and%20hasAttachments%20eq%20true"
 		f"&$orderby=receivedDateTime%20desc&$top={MESSAGE_PAGE_SIZE}"
 	)
-	url = start_url or initial_url
+	url = _validate_message_scan_url(start_url) if start_url is not None else initial_url
 	known = known_fingerprints or set()
 	pending: list[dict[str, Any]] = []
 	for _ in range(MAX_MESSAGE_PAGES):
@@ -387,9 +396,7 @@ def _fetch_messages(
 		next_link = response.get("@odata.nextLink")
 		if not next_link:
 			return MessageBatch(pending, None)
-		if not isinstance(next_link, str) or not next_link.startswith("https://graph.microsoft.com/v1.0/"):
-			raise BridgeError("graph_message_next_link_invalid")
-		url = next_link
+		url = _validate_message_scan_url(next_link)
 	return MessageBatch(pending, url)
 
 
