@@ -390,7 +390,7 @@ class TestAyPEmailBridge(unittest.TestCase):
 				"content": (
 					'<!DOCTYPE html><html><head><meta http-equiv="Content-Type" '
 					'content="text/html; charset=utf-8"></head><body>'
-					f'<div dir="ltr" style="font-family:Arial">'
+					f'<div dir="ltr">'
 					f"{bridge.CONSENT_PHRASE}</div></body></html>"
 				),
 			},
@@ -423,6 +423,38 @@ class TestAyPEmailBridge(unittest.TestCase):
 					body={"contentType": "html", "content": content},
 				)
 				self.assertFalse(bridge._has_current_vacancy_consent(graph.request_graph, "MSG-1"))
+
+	def test_active_meta_and_symbol_fonts_block_full_flow_before_remote_ingest(self):
+		html_cases = (
+			(
+				'<html><head><meta charset="utf-8" http-equiv="refresh" '
+				'content="0;url=https://example.test"></head><body><p>'
+				f"{bridge.CONSENT_PHRASE}</p></body></html>"
+			),
+			f'<p style="font-family:Wingdings">{bridge.CONSENT_PHRASE}</p>',
+			f'<p style="font-family:Adobe Blank">{bridge.CONSENT_PHRASE}</p>',
+		)
+		for content in html_cases:
+			with self.subTest(content=content), tempfile.TemporaryDirectory() as tmp:
+				graph = GraphModule(
+					self.message(),
+					[self.attachment()],
+					body={"contentType": "html", "content": content},
+				)
+				with (
+					patch.object(bridge, "_load_graph_client", return_value=graph),
+					patch.object(bridge, "_remote_ingest") as remote,
+					contextlib.redirect_stdout(io.StringIO()),
+				):
+					state_path = Path(tmp) / "state.json"
+					result = bridge.run(dry_run=False, limit=10, report_json=False, state_path=state_path)
+				self.assertEqual(result["blocked"], 1)
+				self.assertEqual(result["faults"], 0)
+				remote.assert_not_called()
+				self.assertEqual(
+					set(bridge._load_state(state_path)["messages"].values()),
+					{"blocked_missing_current_vacancy_consent"},
+				)
 
 	def test_overlay_marked_consent_is_retryable_without_state_or_ingest(self):
 		overlay = "".join(f"{character}\u0336" for character in "autorizo")

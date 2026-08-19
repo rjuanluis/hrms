@@ -146,9 +146,7 @@ class MessageBatch:
 
 SIMPLE_CONSENT_HTML_CONTENT_TAGS = frozenset({"div", "p", "span", "strong", "b", "em", "i", "u", "a"})
 SIMPLE_CONSENT_HTML_VOID_TAGS = frozenset({"br", "meta"})
-SAFE_CONSENT_HTML_STYLE_PROPERTIES = frozenset(
-	{"font-family", "font-style", "font-weight", "text-align", "white-space"}
-)
+SAFE_CONSENT_HTML_STYLE_PROPERTIES = frozenset({"font-style", "font-weight", "text-align", "white-space"})
 
 
 class _HTMLTextExtractor(HTMLParser):
@@ -232,13 +230,12 @@ class _HTMLTextExtractor(HTMLParser):
 		if tag == "meta":
 			if self.stack != ["html", "head"]:
 				return False
-			if not lowered or not set(lowered).issubset({"charset", "content", "http-equiv"}):
+			if set(lowered) == {"charset"}:
+				return lowered["charset"].casefold().replace("-", "") == "utf8"
+			if set(lowered) != {"content", "http-equiv"}:
 				return False
-			charset = lowered.get("charset", "").casefold().replace("-", "")
-			http_equiv = lowered.get("http-equiv", "").casefold()
-			content = lowered.get("content", "").casefold().replace("-", "")
-			return charset == "utf8" or (
-				http_equiv == "content-type" and "text/html" in content and "charset=utf8" in content
+			return lowered["http-equiv"].casefold() == "content-type" and bool(
+				re.fullmatch(r"text/html\s*;\s*charset\s*=\s*utf-8", lowered["content"], flags=re.IGNORECASE)
 			)
 		if tag in {"head", "br"}:
 			return not lowered
