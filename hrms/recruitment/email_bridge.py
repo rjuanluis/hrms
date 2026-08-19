@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import re
+import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import NoReturn
@@ -138,6 +139,10 @@ def _consent_evidence_sha256(payload: dict) -> str:
 	return expected
 
 
+def _has_identity_control(value: str) -> bool:
+	return any(unicodedata.category(character) in {"Cc", "Cf", "Cs"} for character in value)
+
+
 def _sender(payload: dict) -> tuple[str, str]:
 	raw_email = payload.get("sender_email")
 	if not isinstance(raw_email, str):
@@ -146,7 +151,7 @@ def _sender(payload: dict) -> tuple[str, str]:
 	if (
 		not email
 		or len(email) > MAX_DATA_LENGTH
-		or CONTROL_CHARACTERS.search(raw_email)
+		or _has_identity_control(raw_email)
 		or any(character in email for character in (",", ";"))
 	):
 		_block_admission(
@@ -166,7 +171,7 @@ def _sender(payload: dict) -> tuple[str, str]:
 	name = " ".join(raw_name.split())
 	if not name:
 		_fail("El nombre del remitente es obligatorio.")
-	if CONTROL_CHARACTERS.search(name):
+	if _has_identity_control(name):
 		_block_admission(
 			"blocked_sender_identity",
 			"El nombre del remitente no cumple la política de admisión.",
@@ -227,6 +232,8 @@ def _attachment(payload: dict) -> tuple[str, bytes, str]:
 		raise EmailBridgeError(_("El contenido base64 del CV no es válido.")) from exc
 	try:
 		validate_cv_file(filename, content)
+	except CandidateCVScanUnavailableError:
+		raise
 	except CandidateCVSecurityError:
 		_block_admission(
 			"blocked_candidate_cv_security",

@@ -76,7 +76,7 @@ def _strict_name_unnumber(raw: bytes) -> bytes:
 
 def _set_memory_limit(limit) -> bool:
 	try:
-		soft, hard = resource.getrlimit(limit)
+		_soft, hard = resource.getrlimit(limit)
 		target = MAX_ADDRESS_SPACE_BYTES
 		if hard != resource.RLIM_INFINITY:
 			target = min(target, hard)
@@ -231,7 +231,7 @@ def main() -> int:
 	try:
 		_load_parser()
 	except Exception:
-		return SELF_TEST_PARSER_IMPORT_FAILED if self_test else 2
+		return SELF_TEST_PARSER_IMPORT_FAILED
 	# The parent validator passes a minimal environment containing only PATH,
 	# so uploaded bytes cannot activate this test-only confinement probe.
 	# Importing pypdf before the verified limit, failing to import it, or failing

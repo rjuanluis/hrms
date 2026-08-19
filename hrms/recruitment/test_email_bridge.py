@@ -456,7 +456,10 @@ class TestEmailBridge(unittest.TestCase):
 		long_email = f"{'a' * 64}@{'b' * 63}.{'c' * 63}.com"
 		for field, value, expected_code in (
 			("sender_email", long_email, "blocked_sender_identity"),
+			("sender_email", "candidate\u200d@example.test", "blocked_sender_identity"),
 			("sender_name", "Bad\x00Name", "blocked_sender_identity"),
+			("sender_name", "Bad\x80Name", "blocked_sender_identity"),
+			("sender_name", "Bad\u200dName", "blocked_sender_identity"),
 			("subject", "S" * (self.bridge.MAX_SUBJECT_LENGTH + 1), "blocked_candidate_subject"),
 			("subject", "Solicitud\nHR-OPN-2026-0001", "blocked_candidate_subject"),
 		):
@@ -474,6 +477,17 @@ class TestEmailBridge(unittest.TestCase):
 		result = self.bridge.ingest_email_payload(payload)
 		self.assertEqual(result["status"], "created")
 		self.assertEqual(self.frappe.saved_files[0].file_name, "candidate.pdf")
+
+	def test_pdf_validator_unavailability_is_retryable_and_stores_nothing(self):
+		with patch.object(
+			self.bridge,
+			"validate_cv_file",
+			side_effect=FakeCandidateCVScanUnavailableError("validator unavailable"),
+		):
+			with self.assertRaises(FakeCandidateCVScanUnavailableError):
+				self.bridge.ingest_email_payload(email_payload())
+		self.assertEqual(self.frappe.saved_files, [])
+		self.assertEqual(self.frappe.inserted_applicants, [])
 
 	def test_exact_duplicate_returns_existing_without_new_file_or_applicant(self):
 		first = self.bridge.ingest_email_payload(email_payload())

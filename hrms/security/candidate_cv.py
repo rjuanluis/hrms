@@ -23,6 +23,7 @@ MAX_CV_BYTES = 5 * 1024 * 1024
 MAX_DOCX_UNCOMPRESSED_BYTES = 20 * 1024 * 1024
 MAX_DOCX_ENTRIES = 1000
 PDF_VALIDATION_TIMEOUT_SECONDS = 7
+PDF_VALIDATOR_INVALID_CONTENT = 2
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".heic", ".heif", ".jpeg", ".jpg", ".png"}
 PDF_NAME_ESCAPE = re.compile(rb"#([0-9a-fA-F]{2})")
 PRIVACY_NOTICE_VERSION = "AYP-RH-2026-07-17-v3"
@@ -165,11 +166,18 @@ def _validate_pdf(content: bytes) -> None:
 			env={"PATH": os.environ.get("PATH", "")},
 		)
 	except (OSError, subprocess.SubprocessError) as exc:
-		raise CandidateCVSecurityError(
-			_("El PDF está dañado o no supera la validación estructural.")
+		raise CandidateCVScanUnavailableError(
+			_("El validador estructural de PDF no está disponible temporalmente.")
 		) from exc
-	if completed.returncode != 0:
+	if completed.returncode == PDF_VALIDATOR_INVALID_CONTENT:
 		raise CandidateCVSecurityError(_("El PDF está dañado, protegido o contiene contenido activo."))
+	if completed.returncode != 0:
+		# The child reserves code 2 for deterministic content rejection. Limit
+		# setup, parser import, signals and unknown process failures are runtime
+		# availability faults and must never become a permanent candidate block.
+		raise CandidateCVScanUnavailableError(
+			_("El validador estructural de PDF no está disponible temporalmente.")
+		)
 
 
 def _validate_docx(content: bytes) -> None:

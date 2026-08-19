@@ -20,6 +20,7 @@ from pypdf.generic import DictionaryObject, IndirectObject, NameObject, TextStri
 import frappe
 
 from hrms.security.candidate_cv import (
+	CandidateCVScanUnavailableError,
 	CandidateCVSecurityError,
 	_decode_pdf_name,
 	_mark_file_clean,
@@ -355,10 +356,33 @@ class TestCandidateCVSecurity(unittest.TestCase):
 	def test_accepts_inert_name_js(self):
 		validate_cv_file("cv.pdf", make_pdf_with_raw_catalog_entry(b"/Resources << /JS 3 0 R >>"))
 
-	def test_pdf_subprocess_failure_is_fail_closed(self):
-		with patch("hrms.security.candidate_cv.subprocess.run", side_effect=TimeoutError("bounded")):
-			with self.assertRaises(CandidateCVSecurityError):
+	def test_pdf_subprocess_availability_failures_are_retryable(self):
+		for failure in (OSError("spawn"), subprocess.TimeoutExpired(["validator"], 7)):
+			with (
+				self.subTest(failure=type(failure).__name__),
+				patch("hrms.security.candidate_cv.subprocess.run", side_effect=failure),
+			):
+				with self.assertRaises(CandidateCVScanUnavailableError):
+					validate_cv_file("cv.pdf", make_pdf())
+
+	def test_pdf_child_reserves_only_exit_two_for_terminal_content_rejection(self):
+		with patch(
+			"hrms.security.candidate_cv.subprocess.run",
+			return_value=subprocess.CompletedProcess(["validator"], 2),
+		):
+			with self.assertRaises(CandidateCVSecurityError) as raised:
 				validate_cv_file("cv.pdf", make_pdf())
+		self.assertNotIsInstance(raised.exception, CandidateCVScanUnavailableError)
+		for returncode in (3, 87, 88, 89, -9):
+			with (
+				self.subTest(returncode=returncode),
+				patch(
+					"hrms.security.candidate_cv.subprocess.run",
+					return_value=subprocess.CompletedProcess(["validator"], returncode),
+				),
+			):
+				with self.assertRaises(CandidateCVScanUnavailableError):
+					validate_cv_file("cv.pdf", make_pdf())
 
 	def test_pdf_parser_child_enforces_memory_ceiling(self):
 		from hrms.security.pdf_cv_validator import SELF_TEST_MEMORY_LIMIT_ENFORCED
@@ -390,6 +414,17 @@ class TestCandidateCVSecurity(unittest.TestCase):
 			result = pdf_cv_validator.main()
 		self.assertEqual(result, pdf_cv_validator.SELF_TEST_LIMIT_SETUP_FAILED)
 		load_parser.assert_not_called()
+
+	def test_pdf_parser_import_failure_has_dedicated_infrastructure_exit_code(self):
+		from hrms.security import pdf_cv_validator
+
+		with (
+			patch.dict(os.environ, {}, clear=True),
+			patch.object(pdf_cv_validator, "_set_limits"),
+			patch.object(pdf_cv_validator, "_load_parser", side_effect=ImportError("missing")),
+		):
+			result = pdf_cv_validator.main()
+		self.assertEqual(result, pdf_cv_validator.SELF_TEST_PARSER_IMPORT_FAILED)
 
 	def test_pdf_parser_self_test_rejects_preloaded_parser(self):
 		from hrms.security import pdf_cv_validator

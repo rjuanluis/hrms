@@ -620,9 +620,14 @@ def _email_identity(message: dict[str, Any], field: str) -> tuple[str, str]:
 	email_value, name_value = _email_identity_values(message, field)
 	email = email_value.strip().casefold()
 	name = " ".join((name_value or "").split())
-	if not email or len(email) > 140 or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+	if (
+		not email
+		or len(email) > 140
+		or any(unicodedata.category(character) in {"Cc", "Cf", "Cs"} for character in email)
+		or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email)
+	):
 		raise AdmissionBlock("blocked_sender_identity")
-	if any(ord(character) < 32 or ord(character) == 127 for character in name):
+	if any(unicodedata.category(character) in {"Cc", "Cf", "Cs"} for character in name):
 		raise AdmissionBlock("blocked_sender_identity")
 	return email, name
 

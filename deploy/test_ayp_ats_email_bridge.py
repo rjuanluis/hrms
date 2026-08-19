@@ -766,13 +766,14 @@ class TestAyPEmailBridge(unittest.TestCase):
 				"id": f"INVALID-HEADER-{index}",
 				"internetMessageId": f"<invalid-header-{index}@example.test>",
 			}
-			if index == 0:
-				message["sender"] = {
-					"emailAddress": {"address": "candidate@example.test", "name": "Bad\x00Name"}
-				}
-				message["from"] = {
-					"emailAddress": {"address": "candidate@example.test", "name": "Bad\x00Name"}
-				}
+			if index in {0, 1, 2}:
+				bad_name = {0: "Bad\x00Name", 1: "Bad\x80Name", 2: "Bad\u200dName"}[index]
+				message["sender"] = {"emailAddress": {"address": "candidate@example.test", "name": bad_name}}
+				message["from"] = {"emailAddress": {"address": "candidate@example.test", "name": bad_name}}
+			elif index == 3:
+				bad_email = "candidate\u200d@example.test"
+				message["sender"] = {"emailAddress": {"address": bad_email, "name": "Synthetic"}}
+				message["from"] = {"emailAddress": {"address": bad_email, "name": "Synthetic"}}
 			elif index < 5:
 				message["sender"] = {"emailAddress": {"address": long_email, "name": "Synthetic"}}
 				message["from"] = {"emailAddress": {"address": long_email, "name": "Synthetic"}}
