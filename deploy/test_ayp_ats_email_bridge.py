@@ -650,6 +650,21 @@ class TestAyPEmailBridge(unittest.TestCase):
 				self.assertIsNone(selected)
 				self.assertEqual(status, "blocked_candidate_attachment_size")
 
+	def test_unsafe_candidate_filenames_are_terminal_before_content_reads(self):
+		for filename in (
+			"../cv.pdf",
+			"folder/cv.pdf",
+			"folder\\cv.pdf",
+			"cv\x00.pdf",
+			f"{'a' * bridge.MAX_CANDIDATE_FILENAME_LENGTH}x.pdf",
+		):
+			with self.subTest(filename=filename):
+				selected, status = bridge._select_candidate_attachment(
+					[self.attachment(filename)], require_content=False
+				)
+				self.assertIsNone(selected)
+				self.assertEqual(status, "blocked_candidate_filename")
+
 	def test_message_pagination_skips_known_page_and_reaches_pending_message(self):
 		known = self.message()
 		pending = {**self.message(), "id": "GRAPH-ID-2", "internetMessageId": "<synthetic-2@example.test>"}
@@ -680,6 +695,79 @@ class TestAyPEmailBridge(unittest.TestCase):
 		self.assertIsNotNone(batch.resume_url)
 		self.assertEqual(len(calls), 2)
 
+	def test_limit_sized_unsafe_filename_batch_cannot_starve_older_valid_candidate(self):
+		unsafe_messages = [
+			{
+				**self.message(),
+				"id": f"UNSAFE-{index}",
+				"internetMessageId": f"<unsafe-{index}@example.test>",
+			}
+			for index in range(10)
+		]
+		valid = {
+			**self.message(),
+			"id": "VALID-OLDER",
+			"internetMessageId": "<valid-older@example.test>",
+		}
+		older_url = (
+			"https://graph.microsoft.com/v1.0/users/empleos@aroypedal.com/"
+			"mailFolders/inbox/messages?$skiptoken=older-valid"
+		)
+		calls: list[str] = []
+
+		def request_graph(**kwargs):
+			url = kwargs["url"]
+			calls.append(url)
+			base_url = url.split("?", 1)[0]
+			if base_url.endswith("/attachments"):
+				message_id = base_url.rsplit("/messages/", 1)[1].split("/", 1)[0]
+				filename = "../cv.pdf" if message_id.startswith("UNSAFE-") else "cv.pdf"
+				return {
+					"value": [
+						{
+							key: value
+							for key, value in self.attachment(filename).items()
+							if key != "contentBytes"
+						}
+					]
+				}
+			if "/attachments/" in base_url:
+				return self.attachment()
+			if "?$select=body" in url:
+				return {
+					"body": {
+						"contentType": "text",
+						"content": bridge.CONSENT_PHRASE,
+					}
+				}
+			if "$skiptoken=older-valid" in url:
+				return {"value": [valid]}
+			return {"value": unsafe_messages, "@odata.nextLink": older_url}
+
+		graph = types.SimpleNamespace(request_graph=request_graph)
+		with (
+			tempfile.TemporaryDirectory() as tmp,
+			patch.object(bridge, "_load_graph_client", return_value=graph),
+			patch.object(bridge, "_remote_ingest") as remote,
+			contextlib.redirect_stdout(io.StringIO()),
+		):
+			state_path = Path(tmp) / "state.json"
+			first = bridge.run(dry_run=False, limit=10, report_json=False, state_path=state_path)
+			self.assertEqual(first["blocked"], 10)
+			self.assertEqual(first["faults"], 0)
+			remote.assert_not_called()
+			self.assertFalse(any("?$select=body" in url for url in calls))
+			self.assertFalse(any("/attachments/" in url for url in calls))
+			persisted = bridge._load_state(state_path)
+			self.assertEqual(len(persisted["messages"]), 10)
+
+			remote.return_value = {"status": "created", "applicant": "APP-OLDER"}
+			second = bridge.run(dry_run=False, limit=10, report_json=False, state_path=state_path)
+			self.assertEqual(second["created"], 1)
+			self.assertEqual(second["faults"], 0)
+			remote.assert_called_once()
+			self.assertTrue(any("$skiptoken=older-valid" in url for url in calls))
+
 	def test_message_pagination_persists_validated_progress_beyond_one_thousand(self):
 		known = self.message()
 		known_set = {bridge._fingerprint(bridge._message_key(known))}
@@ -704,7 +792,7 @@ class TestAyPEmailBridge(unittest.TestCase):
 			path = Path(tmp) / "state.json"
 			bridge._save_state(
 				{
-					"version": 1,
+					"version": bridge.STATE_VERSION,
 					"messages": {next(iter(known_set)): "created"},
 					"message_scan_url": first.resume_url,
 					"message_scan_history": list(first.cursor_history),
@@ -794,7 +882,7 @@ class TestAyPEmailBridge(unittest.TestCase):
 			state_path = Path(tmp) / "state.json"
 			bridge._save_state(
 				{
-					"version": 1,
+					"version": bridge.STATE_VERSION,
 					"messages": {},
 					"message_scan_url": current_url,
 					"message_scan_history": [bridge._message_scan_url_digest(prior_url)],
@@ -831,7 +919,7 @@ class TestAyPEmailBridge(unittest.TestCase):
 		):
 			state_path = Path(tmp) / "state.json"
 			bridge._save_state(
-				{"version": 1, "messages": {known_fingerprint: "created"}},
+				{"version": bridge.STATE_VERSION, "messages": {known_fingerprint: "created"}},
 				state_path,
 			)
 			with patch.object(sys, "argv", [str(SCRIPT), "--state", str(state_path)]):
@@ -1027,7 +1115,7 @@ class TestAyPEmailBridge(unittest.TestCase):
 			path.write_text(
 				json.dumps(
 					{
-						"version": 1,
+						"version": bridge.STATE_VERSION,
 						"messages": {},
 						"message_scan_url": "https://graph.microsoft.com/v1.0/users/other@example.test/messages",
 					}
@@ -1036,6 +1124,31 @@ class TestAyPEmailBridge(unittest.TestCase):
 			path.chmod(0o600)
 			with self.assertRaisesRegex(bridge.BridgeError, "state_schema_invalid"):
 				bridge._load_state(path)
+
+	def test_legacy_state_migrates_only_without_cursor_history(self):
+		valid_url = (
+			"https://graph.microsoft.com/v1.0/users/empleos@aroypedal.com/"
+			"mailFolders/inbox/messages?$skiptoken=legacy"
+		)
+		with tempfile.TemporaryDirectory() as tmp:
+			messages_only = Path(tmp) / "messages-only.json"
+			bridge._save_state({"version": 1, "messages": {"known": "created"}}, messages_only)
+			migrated = bridge._load_state(messages_only)
+			self.assertEqual(migrated["version"], bridge.STATE_VERSION)
+			self.assertEqual(migrated["messages"], {"known": "created"})
+
+			legacy_cursor = Path(tmp) / "legacy-cursor.json"
+			legacy = {
+				"version": 1,
+				"messages": {},
+				"message_scan_url": valid_url,
+				"message_scan_history": [bridge._fingerprint(valid_url)],
+			}
+			bridge._save_state(legacy, legacy_cursor)
+			before = legacy_cursor.read_bytes()
+			with self.assertRaisesRegex(bridge.BridgeError, "state_cursor_digest_version_legacy"):
+				bridge._load_state(legacy_cursor)
+			self.assertEqual(legacy_cursor.read_bytes(), before)
 
 	def test_state_rejects_malformed_or_orphaned_cursor_history(self):
 		valid_url = (
@@ -1049,7 +1162,7 @@ class TestAyPEmailBridge(unittest.TestCase):
 		):
 			with self.subTest(history=history, include_url=include_url), tempfile.TemporaryDirectory() as tmp:
 				path = Path(tmp) / "state.json"
-				state = {"version": 1, "messages": {}, "message_scan_history": history}
+				state = {"version": bridge.STATE_VERSION, "messages": {}, "message_scan_history": history}
 				if include_url:
 					state["message_scan_url"] = valid_url
 				path.write_text(json.dumps(state))

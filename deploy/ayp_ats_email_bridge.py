@@ -58,9 +58,11 @@ DEFAULT_LIMIT = 10
 MAX_LIMIT = 20
 MAX_MESSAGE_PAGES = 10
 MAX_MESSAGE_CURSOR_HISTORY = 512
+STATE_VERSION = 2
 MESSAGE_PAGE_SIZE = 100
 INTAKE_START_UTC = "2026-08-13T00:00:00Z"
 MAX_CV_BYTES = 5 * 1024 * 1024
+MAX_CANDIDATE_FILENAME_LENGTH = 140
 MAX_GRAPH_CONTENT_CHARS = ((MAX_CV_BYTES + 2) // 3) * 4 + 16
 ALLOWED_EXTENSIONS = frozenset({".pdf", ".docx", ".heic", ".heif", ".jpeg", ".jpg", ".png"})
 CONSENT_NOTICE_VERSION = "AYP-RH-EMAIL-CURRENT-VACANCY-2026-08-15-v1"
@@ -284,7 +286,7 @@ def _message_scan_url_digest(value: str) -> str:
 
 def _load_state(path: Path = STATE_PATH) -> dict[str, Any]:
 	if not path.exists():
-		return {"version": 1, "messages": {}}
+		return {"version": STATE_VERSION, "messages": {}}
 	try:
 		mode = stat.S_IMODE(path.stat().st_mode)
 		if mode & 0o077:
@@ -294,7 +296,8 @@ def _load_state(path: Path = STATE_PATH) -> dict[str, Any]:
 		raise
 	except Exception as exc:
 		raise BridgeError("state_invalid") from exc
-	if value.get("version") != 1 or not isinstance(value.get("messages"), dict):
+	state_version = value.get("version")
+	if state_version not in {1, STATE_VERSION} or not isinstance(value.get("messages"), dict):
 		raise BridgeError("state_schema_invalid")
 	resume_url = value.get("message_scan_url")
 	if resume_url is not None:
@@ -311,6 +314,9 @@ def _load_state(path: Path = STATE_PATH) -> dict[str, Any]:
 		or (history and resume_url is None)
 	):
 		raise BridgeError("state_schema_invalid")
+	if state_version == 1 and (resume_url is not None or history):
+		raise BridgeError("state_cursor_digest_version_legacy")
+	value["version"] = STATE_VERSION
 	return value
 
 
@@ -369,8 +375,14 @@ def _select_candidate_attachment(
 	row = non_inline[0]
 	if row.get("@odata.type") != "#microsoft.graph.fileAttachment":
 		return None, "blocked_attachment_type"
-	filename = str(row.get("name") or "")
-	if len(filename) > 255:
+	filename = row["name"]
+	if (
+		len(filename) > MAX_CANDIDATE_FILENAME_LENGTH
+		or filename in {".", ".."}
+		or "/" in filename
+		or "\\" in filename
+		or any(ord(character) < 32 or ord(character) == 127 for character in filename)
+	):
 		return None, "blocked_candidate_filename"
 	if _candidate_extension(filename) not in ALLOWED_EXTENSIONS:
 		return None, "ignored_no_candidate_cv"

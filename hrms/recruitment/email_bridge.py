@@ -169,9 +169,19 @@ def _attachment(payload: dict) -> tuple[str, bytes, str]:
 	attachment = attachments[0]
 	if not isinstance(attachment, dict):
 		_fail("El adjunto no es válido.")
-	filename = _clean_data(attachment.get("name"), label="El nombre del archivo")
-	if "/" in filename or "\\" in filename or filename in {".", ".."}:
-		_fail("El nombre del archivo no es válido.")
+	raw_filename = attachment.get("name")
+	if isinstance(raw_filename, str) and (
+		len(raw_filename) > MAX_DATA_LENGTH
+		or raw_filename in {".", ".."}
+		or "/" in raw_filename
+		or "\\" in raw_filename
+		or CONTROL_CHARACTERS.search(raw_filename)
+	):
+		_block_admission(
+			"blocked_candidate_cv_security",
+			"El nombre del CV no supera la validación determinística de seguridad.",
+		)
+	filename = _clean_data(raw_filename, label="El nombre del archivo")
 	encoded = attachment.get("content_base64")
 	if not isinstance(encoded, str) or not encoded or len(encoded) > MAX_BASE64_LENGTH:
 		_fail("El contenido base64 del CV no es válido o excede 5 MB.")

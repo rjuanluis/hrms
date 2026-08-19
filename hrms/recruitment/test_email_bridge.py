@@ -571,6 +571,24 @@ class TestEmailBridge(unittest.TestCase):
 		self.assertEqual(raised.exception.code, "blocked_candidate_cv_security")
 		self.assertEqual(self.frappe.saved_files, [])
 
+	def test_unsafe_candidate_filename_is_terminal_security_block(self):
+		for filename in (
+			"../cv.pdf",
+			"folder/cv.pdf",
+			"folder\\cv.pdf",
+			"cv\x00.pdf",
+			f"{'a' * self.bridge.MAX_DATA_LENGTH}x.pdf",
+		):
+			with self.subTest(filename=filename):
+				payload = email_payload()
+				payload["attachments"][0]["name"] = filename
+				with self.assertRaisesRegex(
+					self.bridge.EmailBridgeAdmissionError, "validación determinística"
+				) as raised:
+					self.bridge.ingest_email_payload(payload)
+				self.assertEqual(raised.exception.code, "blocked_candidate_cv_security")
+				self.assertEqual(self.frappe.saved_files, [])
+
 	def test_stored_cv_security_rejection_is_terminal_but_scanner_outage_is_retryable(self):
 		with (
 			patch.object(
