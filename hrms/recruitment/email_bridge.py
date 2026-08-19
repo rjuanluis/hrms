@@ -139,14 +139,39 @@ def _consent_evidence_sha256(payload: dict) -> str:
 
 
 def _sender(payload: dict) -> tuple[str, str]:
-	email = _clean_data(payload.get("sender_email"), label="El correo del remitente")
-	if any(character in email for character in (",", ";", "\r", "\n")):
+	raw_email = payload.get("sender_email")
+	if not isinstance(raw_email, str):
 		_fail("El correo del remitente no es válido.")
+	email = " ".join(raw_email.split())
+	if (
+		not email
+		or len(email) > MAX_DATA_LENGTH
+		or CONTROL_CHARACTERS.search(raw_email)
+		or any(character in email for character in (",", ";"))
+	):
+		_block_admission(
+			"blocked_sender_identity",
+			"El correo del remitente no cumple la política de admisión.",
+		)
 	try:
 		validate_email_address(email, throw=True)
 	except Exception as exc:
-		raise EmailBridgeError(_("El correo del remitente no es válido.")) from exc
-	name = _clean_data(payload.get("sender_name"), label="El nombre del remitente")
+		raise EmailBridgeAdmissionError(
+			"blocked_sender_identity",
+			"El correo del remitente no cumple la política de admisión.",
+		) from exc
+	raw_name = payload.get("sender_name")
+	if not isinstance(raw_name, str):
+		_fail("El nombre del remitente no es válido.")
+	name = " ".join(raw_name.split())
+	if not name:
+		_fail("El nombre del remitente es obligatorio.")
+	if CONTROL_CHARACTERS.search(name):
+		_block_admission(
+			"blocked_sender_identity",
+			"El nombre del remitente no cumple la política de admisión.",
+		)
+	name = name[:MAX_DATA_LENGTH]
 	return normalize_email(email), name
 
 
@@ -492,8 +517,16 @@ def ingest_email_payload(payload: dict) -> dict:
 	consent_evidence_sha256 = _consent_evidence_sha256(payload)
 	sender_email, sender_name = _sender(payload)
 	received_on = _received_on(payload)
+	raw_subject = payload.get("subject")
+	if isinstance(raw_subject, str) and (
+		len(raw_subject) > MAX_SUBJECT_LENGTH or CONTROL_CHARACTERS.search(raw_subject)
+	):
+		_block_admission(
+			"blocked_candidate_subject",
+			"El asunto no cumple la política de admisión del canal de correo.",
+		)
 	full_subject = _clean_data(
-		payload.get("subject"),
+		raw_subject,
 		label="El asunto",
 		required=False,
 		max_length=MAX_SUBJECT_LENGTH,

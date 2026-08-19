@@ -452,6 +452,29 @@ class TestEmailBridge(unittest.TestCase):
 			subject[: self.bridge.MAX_DATA_LENGTH],
 		)
 
+	def test_unsupported_exact_sender_and_subject_are_terminal_admission_blocks(self):
+		long_email = f"{'a' * 64}@{'b' * 63}.{'c' * 63}.com"
+		for field, value, expected_code in (
+			("sender_email", long_email, "blocked_sender_identity"),
+			("sender_name", "Bad\x00Name", "blocked_sender_identity"),
+			("subject", "S" * (self.bridge.MAX_SUBJECT_LENGTH + 1), "blocked_candidate_subject"),
+			("subject", "Solicitud\nHR-OPN-2026-0001", "blocked_candidate_subject"),
+		):
+			with self.subTest(field=field):
+				payload = email_payload()
+				payload[field] = value
+				with self.assertRaises(self.bridge.EmailBridgeAdmissionError) as raised:
+					self.bridge.ingest_email_payload(payload)
+				self.assertEqual(raised.exception.code, expected_code)
+		self.assertEqual(self.frappe.saved_files, [])
+
+	def test_padded_filename_is_normalized_before_private_storage(self):
+		payload = email_payload()
+		payload["attachments"][0]["name"] = " candidate.pdf "
+		result = self.bridge.ingest_email_payload(payload)
+		self.assertEqual(result["status"], "created")
+		self.assertEqual(self.frappe.saved_files[0].file_name, "candidate.pdf")
+
 	def test_exact_duplicate_returns_existing_without_new_file_or_applicant(self):
 		first = self.bridge.ingest_email_payload(email_payload())
 		self.frappe.locking_read_tables.clear()

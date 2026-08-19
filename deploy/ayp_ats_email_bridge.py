@@ -120,13 +120,20 @@ class AdmissionBlock(RuntimeError):
 REMOTE_ADMISSION_CODES = frozenset(
 	{
 		"blocked_authorized_vacancy_configuration",
+		"blocked_candidate_subject",
 		"blocked_candidate_cv_security",
 		"blocked_explicit_vacancy_mismatch",
+		"blocked_sender_identity",
 		"blocked_single_open_vacancy_required",
 	}
 )
 REMOTE_TERMINAL_ADMISSION_CODES = frozenset(
-	{"blocked_candidate_cv_security", "blocked_explicit_vacancy_mismatch"}
+	{
+		"blocked_candidate_cv_security",
+		"blocked_candidate_subject",
+		"blocked_explicit_vacancy_mismatch",
+		"blocked_sender_identity",
+	}
 )
 
 
@@ -231,7 +238,7 @@ class _HTMLTextExtractor(HTMLParser):
 			if self.stack != ["html", "head"]:
 				return False
 			if set(lowered) == {"charset"}:
-				return lowered["charset"].casefold().replace("-", "") == "utf8"
+				return lowered["charset"].casefold() == "utf-8"
 			if set(lowered) != {"content", "http-equiv"}:
 				return False
 			return lowered["http-equiv"].casefold() == "content-type" and bool(
@@ -581,7 +588,7 @@ def _select_candidate_attachment(
 	filename = row["name"]
 	if _unsafe_candidate_filename(filename):
 		return None, "blocked_candidate_filename"
-	if _candidate_extension(filename) not in ALLOWED_EXTENSIONS:
+	if _candidate_extension(filename.strip()) not in ALLOWED_EXTENSIONS:
 		return None, "ignored_no_candidate_cv"
 	declared_size = row.get("size")
 	if not isinstance(declared_size, int) or isinstance(declared_size, bool):
@@ -595,7 +602,7 @@ def _select_candidate_attachment(
 	return row, "candidate"
 
 
-def _email_identity(message: dict[str, Any], field: str) -> tuple[str, str]:
+def _email_identity_values(message: dict[str, Any], field: str) -> tuple[str, str | None]:
 	container = message.get(field)
 	if not isinstance(container, dict):
 		raise BridgeError("message_identity_invalid")
@@ -606,10 +613,17 @@ def _email_identity(message: dict[str, Any], field: str) -> tuple[str, str]:
 	name_value = address.get("name")
 	if not isinstance(email_value, str) or (name_value is not None and not isinstance(name_value, str)):
 		raise BridgeError("message_identity_invalid")
+	return email_value, name_value
+
+
+def _email_identity(message: dict[str, Any], field: str) -> tuple[str, str]:
+	email_value, name_value = _email_identity_values(message, field)
 	email = email_value.strip().casefold()
-	name = (name_value or "").strip()
+	name = " ".join((name_value or "").split())
 	if not email or len(email) > 140 or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
-		raise BridgeError("message_identity_invalid")
+		raise AdmissionBlock("blocked_sender_identity")
+	if any(ord(character) < 32 or ord(character) == 127 for character in name):
+		raise AdmissionBlock("blocked_sender_identity")
 	return email, name
 
 
@@ -627,19 +641,23 @@ def _validate_message_header(message: dict[str, Any]) -> None:
 	if not isinstance(message.get("hasAttachments"), bool):
 		raise BridgeError("graph_message_list_invalid")
 	subject = message.get("subject")
-	if subject is not None and (not isinstance(subject, str) or len(subject) > 4096):
+	if subject is not None and not isinstance(subject, str):
 		raise BridgeError("graph_message_list_invalid")
 	received = message.get("receivedDateTime")
 	if not isinstance(received, str) or not received or len(received) > 64:
 		raise BridgeError("received_datetime_invalid")
-	_email_identity(message, "sender")
-	_email_identity(message, "from")
+	_email_identity_values(message, "sender")
+	_email_identity_values(message, "from")
 
 
 def _require_compatible_subject_vacancy(message: dict[str, Any]) -> None:
 	subject = message.get("subject")
 	if subject is None:
 		return
+	if len(subject) > MAX_SUBJECT_CHARS or any(
+		ord(character) < 32 or ord(character) == 127 for character in subject
+	):
+		raise AdmissionBlock("blocked_candidate_subject")
 	if not subject_has_only_authorized_vacancy_references(subject):
 		raise AdmissionBlock("blocked_explicit_vacancy_mismatch")
 
@@ -829,7 +847,7 @@ def _validate_attachment_identity_fields(
 		or value["id"] != value["id"].strip()
 		or len(value["id"]) > 4096
 		or not isinstance(name, str)
-		or (not unsafe_candidate_filename and (not name.strip() or name != name.strip() or len(name) > 4096))
+		or (not unsafe_candidate_filename and (not name.strip() or len(name) > 4096))
 		or not isinstance(value.get("contentType"), str)
 		or not value["contentType"].strip()
 		or value["contentType"] != value["contentType"].strip()
@@ -920,7 +938,7 @@ def _build_candidate(message: dict[str, Any], attachment: dict[str, Any]) -> Can
 		),
 		"attachments": [
 			{
-				"name": str(attachment.get("name") or ""),
+				"name": str(attachment.get("name") or "").strip(),
 				"content_type": str(attachment.get("contentType") or "")[:140],
 				"size": int(attachment.get("size") or 0),
 				"content_base64": content,

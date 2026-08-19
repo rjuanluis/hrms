@@ -433,6 +433,9 @@ class TestAyPEmailBridge(unittest.TestCase):
 			),
 			f'<p style="font-family:Wingdings">{bridge.CONSENT_PHRASE}</p>',
 			f'<p style="font-family:Adobe Blank">{bridge.CONSENT_PHRASE}</p>',
+			f'<html><head><meta charset="utf8"></head><body><p>{bridge.CONSENT_PHRASE}</p></body></html>',
+			f'<html><head><meta charset="u-t-f-8"></head><body><p>{bridge.CONSENT_PHRASE}</p></body></html>',
+			f'<html><head><meta charset="utf--8"></head><body><p>{bridge.CONSENT_PHRASE}</p></body></html>',
 		)
 		for content in html_cases:
 			with self.subTest(content=content), tempfile.TemporaryDirectory() as tmp:
@@ -736,6 +739,90 @@ class TestAyPEmailBridge(unittest.TestCase):
 				)
 				self.assertIsNone(selected)
 				self.assertEqual(status, "blocked_candidate_filename")
+
+	def test_padded_attachment_filename_is_normalized_after_exact_hydration(self):
+		graph = GraphModule(self.message(), [self.attachment(" cv.pdf ")])
+		with (
+			tempfile.TemporaryDirectory() as tmp,
+			patch.object(bridge, "_load_graph_client", return_value=graph),
+			patch.object(bridge, "_remote_ingest", return_value={"status": "created"}) as remote,
+			contextlib.redirect_stdout(io.StringIO()),
+		):
+			result = bridge.run(
+				dry_run=False,
+				limit=10,
+				report_json=False,
+				state_path=Path(tmp) / "state.json",
+			)
+		self.assertEqual(result["created"], 1)
+		self.assertEqual(remote.call_args.args[0]["attachments"][0]["name"], "cv.pdf")
+
+	def test_limit_sized_unsupported_headers_cannot_starve_older_valid_candidate(self):
+		long_email = f"{'a' * 64}@{'b' * 63}.{'c' * 63}.com"
+		invalid_messages = []
+		for index in range(10):
+			message = {
+				**self.message(),
+				"id": f"INVALID-HEADER-{index}",
+				"internetMessageId": f"<invalid-header-{index}@example.test>",
+			}
+			if index == 0:
+				message["sender"] = {
+					"emailAddress": {"address": "candidate@example.test", "name": "Bad\x00Name"}
+				}
+				message["from"] = {
+					"emailAddress": {"address": "candidate@example.test", "name": "Bad\x00Name"}
+				}
+			elif index < 5:
+				message["sender"] = {"emailAddress": {"address": long_email, "name": "Synthetic"}}
+				message["from"] = {"emailAddress": {"address": long_email, "name": "Synthetic"}}
+			else:
+				message["subject"] = "S" * (bridge.MAX_SUBJECT_CHARS + 1)
+			invalid_messages.append(message)
+		valid = {
+			**self.message(),
+			"id": "VALID-OLDER-HEADER",
+			"internetMessageId": "<valid-older-header@example.test>",
+		}
+		older_url = (
+			"https://graph.microsoft.com/v1.0/users/empleos@aroypedal.com/"
+			"mailFolders/inbox/messages?$skiptoken=older-header-valid"
+		)
+
+		def request_graph(**kwargs):
+			url = kwargs["url"]
+			base_url = url.split("?", 1)[0]
+			if base_url.endswith("/attachments"):
+				return {
+					"value": [
+						{key: value for key, value in self.attachment().items() if key != "contentBytes"}
+					]
+				}
+			if "/attachments/" in base_url:
+				return self.attachment()
+			if "?$select=body" in url:
+				return {"body": {"contentType": "text", "content": bridge.CONSENT_PHRASE}}
+			if "$skiptoken=older-header-valid" in url:
+				return {"value": [valid]}
+			return {"value": invalid_messages, "@odata.nextLink": older_url}
+
+		graph = types.SimpleNamespace(request_graph=request_graph)
+		with (
+			tempfile.TemporaryDirectory() as tmp,
+			patch.object(bridge, "_load_graph_client", return_value=graph),
+			patch.object(bridge, "_remote_ingest", return_value={"status": "created"}) as remote,
+			contextlib.redirect_stdout(io.StringIO()),
+		):
+			state_path = Path(tmp) / "state.json"
+			first = bridge.run(dry_run=False, limit=10, report_json=False, state_path=state_path)
+			second = bridge.run(dry_run=False, limit=10, report_json=False, state_path=state_path)
+		self.assertEqual((first["blocked"], first["faults"]), (10, 0))
+		self.assertEqual(
+			{item["code"] for item in first["errors"]},
+			{"blocked_sender_identity", "blocked_candidate_subject"},
+		)
+		self.assertEqual(second["created"], 1)
+		remote.assert_called_once()
 
 	def test_message_pagination_skips_known_page_and_reaches_pending_message(self):
 		known = self.message()
