@@ -9,6 +9,7 @@ import types
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER_PATH = ROOT / "deploy" / "ayp_ats_email_bridge.py"
@@ -87,6 +88,9 @@ class FakeDB:
 		if "FOR UPDATE" not in query:
 			raise AssertionError(f"Unexpected SQL: {query}")
 		self.owner.locking_reads += 1
+		if "FROM `tabJob Opening`" in query:
+			self.owner.locking_read_tables.append("Job Opening")
+			return [FakeRow({"name": name, "status": "Open"}) for name in self.owner.open_job_openings]
 		if "FROM `tabJob Applicant`" in query:
 			self.owner.locking_read_tables.append("Job Applicant")
 			row = self.owner.applicants_by_message.get(params[0])
@@ -420,7 +424,7 @@ class TestEmailBridge(unittest.TestCase):
 		self.assertEqual(second["status"], "already_processed")
 		self.assertEqual(len(self.frappe.saved_files), 1)
 		self.assertEqual(len(self.frappe.inserted_applicants), 1)
-		self.assertEqual(self.frappe.locking_read_tables, ["Job Applicant", "File"])
+		self.assertEqual(self.frappe.locking_read_tables, ["Job Opening", "Job Applicant", "File"])
 
 	def test_duplicate_fails_closed_when_exact_file_is_missing(self):
 		self.bridge.ingest_email_payload(email_payload())
@@ -449,10 +453,10 @@ class TestEmailBridge(unittest.TestCase):
 		)
 		self.assertEqual(self.frappe.deleted_files, [])
 		self.assertEqual(self.frappe.direct_db_deletes, [("File", "FILE-1")])
-		self.assertEqual(self.frappe.locking_reads, 3)
+		self.assertEqual(self.frappe.locking_reads, 5)
 		self.assertEqual(
 			self.frappe.locking_read_tables,
-			["Job Applicant", "Job Applicant", "File"],
+			["Job Opening", "Job Applicant", "Job Opening", "Job Applicant", "File"],
 		)
 		self.assertIn("FILE-WINNER", self.frappe.files_by_name)
 
@@ -531,6 +535,25 @@ class TestEmailBridge(unittest.TestCase):
 					self.bridge.ingest_email_payload(email_payload())
 				self.assertEqual(raised.exception.code, "blocked_single_open_vacancy_required")
 				self.assertEqual(self.frappe.saved_files, [])
+
+	def test_vacancy_authority_drift_fails_before_file_storage(self):
+		original = self.bridge._job_opening
+		calls = 0
+
+		def mutate_after_first_authorization():
+			nonlocal calls
+			calls += 1
+			result = original()
+			if calls == 1:
+				self.frappe.open_job_openings.append("HR-OPN-2026-0002")
+			return result
+
+		with (
+			patch.object(self.bridge, "_job_opening", side_effect=mutate_after_first_authorization),
+			self.assertRaisesRegex(self.bridge.EmailBridgeAdmissionError, "exactamente una vacante abierta"),
+		):
+			self.bridge.ingest_email_payload(email_payload())
+		self.assertEqual(self.frappe.saved_files, [])
 
 	def test_insert_failure_defers_file_cleanup_to_caller_rollback(self):
 		self.frappe.fail_applicant_insert = True

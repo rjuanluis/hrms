@@ -145,6 +145,8 @@ class _HTMLTextExtractor(HTMLParser):
 def _normalized_words(value: str) -> str:
 	decomposed = unicodedata.normalize("NFKD", value).casefold()
 	without_marks = "".join(character for character in decomposed if not unicodedata.combining(character))
+	if any(ord(character) > 127 for character in without_marks):
+		return ""
 	return " ".join(re.findall(r"[a-z0-9]+", without_marks))
 
 

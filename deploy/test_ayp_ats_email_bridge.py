@@ -395,6 +395,16 @@ class TestAyPEmailBridge(unittest.TestCase):
 				self.assertEqual(result["blocked"], 1)
 				remote.assert_not_called()
 
+	def test_consent_rejects_unconsumed_unicode_text(self):
+		for extra in (" 我不同意处理我的个人资料", " 🚫"):
+			with self.subTest(extra=extra):
+				graph = GraphModule(
+					self.message(),
+					[self.attachment()],
+					body={"contentType": "text", "content": bridge.CONSENT_PHRASE + extra},
+				)
+				self.assertFalse(bridge._has_current_vacancy_consent(graph.request_graph, "MSG-1"))
+
 	def test_subject_without_vacancy_code_reaches_authorized_single_vacancy_flow(self):
 		message = self.message()
 		message["subject"] = "Solicitud para otra vacante"

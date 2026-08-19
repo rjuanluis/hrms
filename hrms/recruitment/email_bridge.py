@@ -196,11 +196,24 @@ def _job_opening() -> str:
 			"blocked_authorized_vacancy_configuration",
 			"La vacante configurada no es la vacante autorizada para el canal de correo.",
 		)
+	# Lock the complete authoritative set, not only currently-open rows. Under
+	# InnoDB's transaction isolation this prevents an opening from changing
+	# status or being inserted between authorization and applicant insertion.
+	job_opening_rows = frappe.db.sql(
+		"""
+		SELECT `name`, `status`
+		FROM `tabJob Opening`
+		ORDER BY `name`
+		FOR UPDATE
+		""",
+		(),
+		as_dict=True,
+	)
 	open_job_openings = sorted(
 		{
-			str(name).strip()
-			for name in frappe.get_all("Job Opening", filters={"status": "Open"}, pluck="name")
-			if str(name).strip()
+			str(row.get("name") or "").strip()
+			for row in job_opening_rows
+			if row.get("status") == "Open" and str(row.get("name") or "").strip()
 		}
 	)
 	if open_job_openings != [job_opening]:
@@ -464,6 +477,13 @@ def ingest_email_payload(payload: dict) -> dict:
 		)
 	)
 	try:
+		# Re-read under the same transaction lock immediately before any private
+		# file is stored. This also detects unexpected in-process authority drift.
+		if _job_opening() != job_opening:
+			_block_admission(
+				"blocked_single_open_vacancy_required",
+				"La vacante autorizada cambió durante la admisión del correo.",
+			)
 		file_doc = _save_detached_private_file(filename, content)
 		stored_sha256 = scan_stored_candidate_cv(file_doc)
 		if stored_sha256 != attachment_sha256:
