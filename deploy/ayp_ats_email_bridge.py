@@ -144,34 +144,10 @@ class MessageBatch:
 	cursor_history: tuple[str, ...]
 
 
-SIMPLE_CONSENT_HTML_TAGS = frozenset(
-	{"html", "head", "body", "div", "p", "span", "br", "strong", "b", "em", "i", "u", "a"}
-)
+SIMPLE_CONSENT_HTML_CONTENT_TAGS = frozenset({"div", "p", "span", "strong", "b", "em", "i", "u", "a"})
 SIMPLE_CONSENT_HTML_VOID_TAGS = frozenset({"br", "meta"})
 SAFE_CONSENT_HTML_STYLE_PROPERTIES = frozenset(
-	{
-		"background-color",
-		"color",
-		"font-family",
-		"font-size",
-		"font-style",
-		"font-weight",
-		"letter-spacing",
-		"line-height",
-		"margin",
-		"margin-bottom",
-		"margin-left",
-		"margin-right",
-		"margin-top",
-		"padding",
-		"padding-bottom",
-		"padding-left",
-		"padding-right",
-		"padding-top",
-		"text-align",
-		"text-decoration",
-		"white-space",
-	}
+	{"font-family", "font-style", "font-weight", "text-align", "white-space"}
 )
 
 
@@ -180,7 +156,69 @@ class _HTMLTextExtractor(HTMLParser):
 		super().__init__(convert_charrefs=True)
 		self.parts: list[str] = []
 		self.stack: list[str] = []
+		self.mode: str | None = None
+		self.saw_decl = False
+		self.saw_html = False
+		self.saw_head = False
+		self.saw_body = False
+		self.closed_body = False
+		self.closed_html = False
 		self.valid = True
+
+	def _style_is_safe(self, style: str) -> bool:
+		for declaration in style.split(";"):
+			if not declaration.strip():
+				continue
+			if ":" not in declaration:
+				return False
+			property_name, property_value = declaration.split(":", 1)
+			property_name = property_name.strip().casefold()
+			property_value = property_value.strip()
+			folded_value = property_value.casefold()
+			if property_name not in SAFE_CONSENT_HTML_STYLE_PROPERTIES or not property_value:
+				return False
+			if "!important" in folded_value:
+				return False
+			if property_name == "font-family" and not re.fullmatch(
+				r"[A-Za-z0-9 ,.'\"_-]{1,200}", property_value
+			):
+				return False
+			if property_name == "font-style" and folded_value not in {"normal", "italic", "oblique"}:
+				return False
+			if property_name == "font-weight" and folded_value not in {
+				"normal",
+				"bold",
+				"bolder",
+				"lighter",
+				"100",
+				"200",
+				"300",
+				"400",
+				"500",
+				"600",
+				"700",
+				"800",
+				"900",
+			}:
+				return False
+			if property_name == "text-align" and folded_value not in {
+				"start",
+				"end",
+				"left",
+				"right",
+				"center",
+				"justify",
+			}:
+				return False
+			if property_name == "white-space" and folded_value not in {
+				"normal",
+				"nowrap",
+				"pre",
+				"pre-line",
+				"pre-wrap",
+			}:
+				return False
+		return True
 
 	def _attrs_are_safe(self, tag: str, attrs: list[tuple[str, str | None]]) -> bool:
 		lowered: dict[str, str] = {}
@@ -192,7 +230,7 @@ class _HTMLTextExtractor(HTMLParser):
 				return False
 			lowered[name] = raw_value
 		if tag == "meta":
-			if not self.stack or self.stack[-1] != "head":
+			if self.stack != ["html", "head"]:
 				return False
 			if not lowered or not set(lowered).issubset({"charset", "content", "http-equiv"}):
 				return False
@@ -211,67 +249,128 @@ class _HTMLTextExtractor(HTMLParser):
 		if "lang" in lowered and not re.fullmatch(r"[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*", lowered["lang"]):
 			return False
 		style = lowered.get("style")
-		if style is None:
-			return True
-		for declaration in style.split(";"):
-			if not declaration.strip():
-				continue
-			if ":" not in declaration:
-				return False
-			property_name, property_value = declaration.split(":", 1)
-			property_name = property_name.strip().casefold()
-			property_value = property_value.strip().casefold()
-			if property_name not in SAFE_CONSENT_HTML_STYLE_PROPERTIES or not property_value:
-				return False
-			if any(marker in property_value for marker in ("expression", "url(", "javascript:")):
-				return False
-			if property_name == "font-size" and re.fullmatch(
-				r"0+(?:\.0+)?(?:px|pt|em|rem|%)?", property_value
-			):
-				return False
-			if property_name == "color" and property_value == "transparent":
-				return False
-		return True
+		return style is None or self._style_is_safe(style)
 
-	def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-		tag = tag.casefold()
-		if tag not in SIMPLE_CONSENT_HTML_TAGS | SIMPLE_CONSENT_HTML_VOID_TAGS:
+	def _start_content(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+		if self.mode is None:
+			self.mode = "fragment"
+		if self.mode == "wrapper" and (not self.stack or "body" not in self.stack):
+			self.valid = False
+			return
+		if self.mode == "fragment" and any(item in {"html", "head", "body"} for item in self.stack):
 			self.valid = False
 			return
 		if not self._attrs_are_safe(tag, attrs):
 			self.valid = False
 			return
-		if tag not in SIMPLE_CONSENT_HTML_VOID_TAGS:
+		if tag != "br":
 			self.stack.append(tag)
+
+	def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+		tag = tag.casefold()
+		if tag == "html":
+			if self.mode is not None or self.stack or self.saw_html:
+				self.valid = False
+				return
+			self.mode = "wrapper"
+			self.saw_html = True
+			if not self._attrs_are_safe(tag, attrs):
+				self.valid = False
+				return
+			self.stack.append(tag)
+			return
+		if tag == "head":
+			if self.mode != "wrapper" or self.stack != ["html"] or self.saw_head or self.saw_body:
+				self.valid = False
+				return
+			self.saw_head = True
+			if not self._attrs_are_safe(tag, attrs):
+				self.valid = False
+				return
+			self.stack.append(tag)
+			return
+		if tag == "meta":
+			if not self._attrs_are_safe(tag, attrs):
+				self.valid = False
+			return
+		if tag == "body":
+			if self.mode != "wrapper" or self.stack != ["html"] or self.saw_body:
+				self.valid = False
+				return
+			self.saw_body = True
+			if not self._attrs_are_safe(tag, attrs):
+				self.valid = False
+				return
+			self.stack.append(tag)
+			return
+		if tag in SIMPLE_CONSENT_HTML_CONTENT_TAGS or tag == "br":
+			self._start_content(tag, attrs)
+			return
+		self.valid = False
 
 	def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
 		tag = tag.casefold()
-		if tag not in SIMPLE_CONSENT_HTML_VOID_TAGS or not self._attrs_are_safe(tag, attrs):
+		if tag == "meta":
+			if not self._attrs_are_safe(tag, attrs):
+				self.valid = False
+		elif tag == "br":
+			self._start_content(tag, attrs)
+		else:
 			self.valid = False
 
 	def handle_endtag(self, tag: str) -> None:
 		tag = tag.casefold()
 		if tag in SIMPLE_CONSENT_HTML_VOID_TAGS:
-			return
-		if tag not in SIMPLE_CONSENT_HTML_TAGS or not self.stack or self.stack.pop() != tag:
 			self.valid = False
+			return
+		if not self.stack or self.stack[-1] != tag:
+			self.valid = False
+			return
+		self.stack.pop()
+		if tag == "body":
+			self.closed_body = True
+		elif tag == "html":
+			self.closed_html = True
 
 	def handle_data(self, data: str) -> None:
-		if "head" not in self.stack:
+		if self.mode is None:
+			if data.strip():
+				self.mode = "fragment"
+				self.parts.append(data)
+			return
+		if self.mode == "fragment":
 			self.parts.append(data)
+			return
+		if "head" in self.stack:
+			if data.strip():
+				self.valid = False
+			return
+		if "body" in self.stack:
+			self.parts.append(data)
+		elif data.strip():
+			self.valid = False
 
 	def handle_comment(self, data: str) -> None:
 		self.valid = False
 
 	def handle_decl(self, decl: str) -> None:
-		if decl.strip().casefold() != "doctype html":
+		if self.saw_decl or self.mode is not None or self.stack or decl.strip().casefold() != "doctype html":
 			self.valid = False
+			return
+		self.saw_decl = True
 
 	def unknown_decl(self, data: str) -> None:
 		self.valid = False
 
 	def handle_pi(self, data: str) -> None:
 		self.valid = False
+
+	def is_complete(self) -> bool:
+		if not self.valid or self.stack or self.mode is None:
+			return False
+		if self.mode == "wrapper":
+			return self.saw_html and self.saw_body and self.closed_body and self.closed_html
+		return not self.saw_decl and not any((self.saw_html, self.saw_head, self.saw_body))
 
 
 def _normalized_words(value: str) -> str | None:
@@ -615,28 +714,41 @@ def _fetch_messages(
 	return MessageBatch(pending, url, tuple(history))
 
 
-def _validate_attachment_next_link(value: Any, graph_id: str) -> str:
+def _attachment_url_identity(value: Any, graph_id: str) -> str:
 	if not isinstance(value, str) or not value or len(value) > 8192:
 		raise BridgeError("graph_attachment_next_link_invalid")
 	parsed = urlparse(value)
-	expected_path = f"/v1.0/users/{MAILBOX}/messages/{graph_id}/attachments"
 	decoded_path = unquote(parsed.path)
+	segments = decoded_path.split("/")
 	if (
 		parsed.scheme != "https"
 		or parsed.netloc.casefold() != "graph.microsoft.com"
-		or decoded_path.casefold() != expected_path.casefold()
+		or len(segments) != 7
+		or segments[0] != ""
+		or segments[1].casefold() != "v1.0"
+		or segments[2].casefold() != "users"
+		or segments[3].casefold() != MAILBOX.casefold()
+		or segments[4].casefold() != "messages"
+		or segments[5] != graph_id
+		or segments[6].casefold() != "attachments"
 		or "\\" in decoded_path
 		or parsed.fragment
 	):
 		raise BridgeError("graph_attachment_next_link_invalid")
+	normalized_path = f"/v1.0/users/{MAILBOX.casefold()}/messages/{graph_id}/attachments"
+	identity = f"https://graph.microsoft.com{normalized_path}"
+	if parsed.query:
+		identity = f"{identity}?{parsed.query}"
+	return identity
+
+
+def _validate_attachment_next_link(value: Any, graph_id: str) -> str:
+	_attachment_url_identity(value, graph_id)
 	return value
 
 
-def _attachment_url_digest(value: str) -> str:
-	parsed = urlparse(value)
-	identity = f"https://graph.microsoft.com{unquote(parsed.path).casefold()}"
-	if parsed.query:
-		identity = f"{identity}?{parsed.query}"
+def _attachment_url_digest(value: str, graph_id: str) -> str:
+	identity = _attachment_url_identity(value, graph_id)
 	return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
@@ -653,12 +765,12 @@ def _fetch_attachment_metadata(request_graph: Callable[..., Any], graph_id: str)
 	seen: set[str] = set()
 	pages = 0
 	while True:
+		page_digest = _attachment_url_digest(url, graph_id)
+		if page_digest in seen:
+			raise BridgeError("graph_attachment_next_link_cycle")
 		pages += 1
 		if pages > MAX_ATTACHMENT_PAGES:
 			raise AdmissionBlock("blocked_multiple_or_ambiguous_attachments")
-		page_digest = _attachment_url_digest(url)
-		if page_digest in seen:
-			raise BridgeError("graph_attachment_next_link_cycle")
 		seen.add(page_digest)
 		response = _graph_get(request_graph, url)
 		value = response.get("value")
@@ -677,7 +789,10 @@ def _fetch_attachment_metadata(request_graph: Callable[..., Any], graph_id: str)
 			raise AdmissionBlock("blocked_multiple_or_ambiguous_attachments")
 		if "@odata.nextLink" not in response:
 			return rows
-		url = _validate_attachment_next_link(response["@odata.nextLink"], graph_id)
+		next_url = _validate_attachment_next_link(response["@odata.nextLink"], graph_id)
+		if _attachment_url_digest(next_url, graph_id) in seen:
+			raise BridgeError("graph_attachment_next_link_cycle")
+		url = next_url
 
 
 def _fetch_attachment_content(
@@ -773,7 +888,7 @@ def _has_current_vacancy_consent(request_graph: Callable[..., Any], graph_id: st
 			parser.close()
 		except Exception as exc:
 			raise BridgeError("message_body_invalid") from exc
-		if not parser.valid or parser.stack:
+		if not parser.is_complete():
 			return False
 		content = " ".join(parser.parts)
 	elif content_type != "text":

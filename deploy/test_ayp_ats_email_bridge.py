@@ -390,7 +390,7 @@ class TestAyPEmailBridge(unittest.TestCase):
 				"content": (
 					'<!DOCTYPE html><html><head><meta http-equiv="Content-Type" '
 					'content="text/html; charset=utf-8"></head><body>'
-					f'<div dir="ltr" style="font-family:Arial; font-size:12pt">'
+					f'<div dir="ltr" style="font-family:Arial">'
 					f"{bridge.CONSENT_PHRASE}</div></body></html>"
 				),
 			},
@@ -406,6 +406,23 @@ class TestAyPEmailBridge(unittest.TestCase):
 			body={"contentType": "text", "content": decomposed_accent},
 		)
 		self.assertTrue(bridge._has_current_vacancy_consent(graph.request_graph, "MSG-1"))
+
+	def test_consent_rejects_visibility_css_and_invalid_wrapper_nesting(self):
+		html_cases = (
+			f'<p style="text-decoration:line-through">{bridge.CONSENT_PHRASE}</p>',
+			f'<p style="color:rgba(0,0,0,0)">{bridge.CONSENT_PHRASE}</p>',
+			f'<p style="font-size:0px!important">{bridge.CONSENT_PHRASE}</p>',
+			f'<p style="color:white; background-color:white">{bridge.CONSENT_PHRASE}</p>',
+			f"<html><body><head>VISIBLE EXTRA</head><p>{bridge.CONSENT_PHRASE}</p></body></html>",
+		)
+		for content in html_cases:
+			with self.subTest(content=content):
+				graph = GraphModule(
+					self.message(),
+					[self.attachment()],
+					body={"contentType": "html", "content": content},
+				)
+				self.assertFalse(bridge._has_current_vacancy_consent(graph.request_graph, "MSG-1"))
 
 	def test_overlay_marked_consent_is_retryable_without_state_or_ingest(self):
 		overlay = "".join(f"{character}\u0336" for character in "autorizo")
@@ -1121,6 +1138,7 @@ class TestAyPEmailBridge(unittest.TestCase):
 		metadata = {key: value for key, value in self.attachment().items() if key != "contentBytes"}
 		for next_link in (
 			"https://graph.microsoft.com/v1.0/users/empleos@aroypedal.com/messages/OTHER/attachments?$skiptoken=x",
+			"https://graph.microsoft.com/v1.0/users/empleos@aroypedal.com/messages/graph-id-1/attachments?$skiptoken=x",
 			"https://graph.microsoft.com/v1.0/users/empleos@aroypedal.com/messages/GRAPH-ID-1/attachments?$skiptoken=x#fragment",
 		):
 			with (
@@ -1134,13 +1152,52 @@ class TestAyPEmailBridge(unittest.TestCase):
 
 		cycle_link = (
 			"https://GRAPH.MICROSOFT.COM/v1.0/users/EMPLEOS@AROYPEDAL.COM/"
-			"messages/graph-id-1/attachments?$select=id,name,contentType,size,isInline"
+			"messages/GRAPH-ID-1/attachments?$select=id,name,contentType,size,isInline"
 		)
 		with self.assertRaisesRegex(bridge.BridgeError, "graph_attachment_next_link_cycle"):
 			bridge._fetch_attachment_metadata(
 				lambda **kwargs: {"value": [metadata], "@odata.nextLink": cycle_link},
 				"GRAPH-ID-1",
 			)
+
+	def test_attachment_page_bound_back_edge_is_retryable_and_not_persisted(self):
+		metadata = {key: value for key, value in self.attachment().items() if key != "contentBytes"}
+		attachment_calls = 0
+		initial_attachment_url = (
+			"https://graph.microsoft.com/v1.0/users/empleos@aroypedal.com/"
+			"messages/GRAPH-ID-1/attachments?$select=id,name,contentType,size,isInline"
+		)
+
+		def request_graph(**kwargs):
+			nonlocal attachment_calls
+			url = kwargs["url"]
+			if "/attachments" not in url:
+				return {"value": [self.message()]}
+			attachment_calls += 1
+			next_url = (
+				initial_attachment_url
+				if attachment_calls == bridge.MAX_ATTACHMENT_PAGES
+				else (
+					"https://graph.microsoft.com/v1.0/users/empleos@aroypedal.com/"
+					f"messages/GRAPH-ID-1/attachments?$skiptoken=page-{attachment_calls + 1}"
+				)
+			)
+			return {"value": [metadata], "@odata.nextLink": next_url}
+
+		graph = types.SimpleNamespace(request_graph=request_graph)
+		with (
+			tempfile.TemporaryDirectory() as tmp,
+			patch.object(bridge, "_load_graph_client", return_value=graph),
+			patch.object(bridge, "_remote_ingest") as remote,
+			contextlib.redirect_stdout(io.StringIO()),
+		):
+			state_path = Path(tmp) / "state.json"
+			result = bridge.run(dry_run=False, limit=10, report_json=False, state_path=state_path)
+			self.assertEqual(result["faults"], 1)
+			self.assertEqual(result["blocked"], 1)
+			self.assertEqual(attachment_calls, bridge.MAX_ATTACHMENT_PAGES)
+			self.assertFalse(state_path.exists())
+			remote.assert_not_called()
 
 	def test_blank_mandatory_attachment_strings_are_retryable_without_state_or_ingest(self):
 		for field, malformed in (
