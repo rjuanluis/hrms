@@ -239,6 +239,7 @@ def _validate_message_scan_url(value: Any) -> str:
 		or parsed.netloc.casefold() != "graph.microsoft.com"
 		or unquote(parsed.path).casefold() != expected_path.casefold()
 		or "\\" in unquote(parsed.path)
+		or parsed.fragment
 	):
 		raise BridgeError("graph_message_next_link_invalid")
 	return value
@@ -303,8 +304,8 @@ def _exclusive_lock(path: Path = LOCK_PATH):
 
 
 def _message_key(message: dict[str, Any]) -> str:
-	graph_id = str(message.get("id") or "").strip()
-	if not graph_id or len(graph_id) > 4096:
+	graph_id = message.get("id")
+	if not isinstance(graph_id, str) or not graph_id or len(graph_id) > 4096 or graph_id != graph_id.strip():
 		raise BridgeError("message_identity_invalid")
 	return f"{MAILBOX}\n{graph_id}"
 
@@ -346,8 +347,12 @@ def _email_identity(message: dict[str, Any], field: str) -> tuple[str, str]:
 	address = container.get("emailAddress")
 	if not isinstance(address, dict):
 		raise BridgeError("message_identity_invalid")
-	email = str(address.get("address") or "").strip().casefold()
-	name = str(address.get("name") or "").strip()
+	email_value = address.get("address")
+	name_value = address.get("name")
+	if not isinstance(email_value, str) or (name_value is not None and not isinstance(name_value, str)):
+		raise BridgeError("message_identity_invalid")
+	email = email_value.strip().casefold()
+	name = (name_value or "").strip()
 	if not email or len(email) > 140 or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
 		raise BridgeError("message_identity_invalid")
 	return email, name
@@ -360,6 +365,20 @@ def _sender(message: dict[str, Any]) -> tuple[str, str]:
 		raise AdmissionBlock("blocked_sender_from_mismatch")
 	name = from_name or sender_name or from_email.split("@", 1)[0]
 	return from_email, name[:140]
+
+
+def _validate_message_header(message: dict[str, Any]) -> None:
+	_message_key(message)
+	if not isinstance(message.get("hasAttachments"), bool):
+		raise BridgeError("graph_message_list_invalid")
+	subject = message.get("subject")
+	if subject is not None and (not isinstance(subject, str) or len(subject) > 4096):
+		raise BridgeError("graph_message_list_invalid")
+	received = message.get("receivedDateTime")
+	if not isinstance(received, str) or not received or len(received) > 64:
+		raise BridgeError("received_datetime_invalid")
+	_email_identity(message, "sender")
+	_email_identity(message, "from")
 
 
 def _fetch_messages(
@@ -392,24 +411,25 @@ def _fetch_messages(
 		for row in value:
 			if not isinstance(row, dict):
 				raise BridgeError("graph_message_list_invalid")
-			if not isinstance(row.get("hasAttachments"), bool):
-				raise BridgeError("graph_message_list_invalid")
+			_validate_message_header(row)
+		for row in value:
 			if not row.get("hasAttachments"):
 				continue
-			try:
-				fingerprint = _fingerprint(_message_key(row))
-			except BridgeError:
+			fingerprint = _fingerprint(_message_key(row))
+			if fingerprint not in known:
 				pending.append(row)
-			else:
-				if fingerprint not in known:
-					pending.append(row)
-			if len(pending) >= limit:
-				return MessageBatch(pending[:limit], page_url)
+		next_url: str | None = None
 		if "@odata.nextLink" not in response:
+			next_url = None
+		else:
+			next_url = _validate_message_scan_url(response["@odata.nextLink"])
+			if next_url in seen_urls:
+				raise BridgeError("graph_message_next_link_cycle")
+		if len(pending) >= limit:
+			return MessageBatch(pending[:limit], page_url)
+		if next_url is None:
 			return MessageBatch(pending, None)
-		url = _validate_message_scan_url(response["@odata.nextLink"])
-		if url in seen_urls:
-			raise BridgeError("graph_message_next_link_cycle")
+		url = next_url
 	return MessageBatch(pending, url)
 
 
@@ -462,6 +482,8 @@ def _same_attachment(metadata: dict[str, Any], hydrated: dict[str, Any]) -> bool
 def _validate_attachment_identity_fields(value: dict[str, Any], *, code: str) -> None:
 	if (
 		not isinstance(value.get("@odata.type"), str)
+		or not value.get("@odata.type")
+		or len(value["@odata.type"]) > 512
 		or not isinstance(value.get("id"), str)
 		or not value.get("id")
 		or len(value["id"]) > 4096
