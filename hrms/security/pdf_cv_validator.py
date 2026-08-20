@@ -223,6 +223,15 @@ def validate_pdf_bytes(content: bytes) -> None:
 		raise PDFSecurityError("no-pages")
 
 
+def _parser_content_error_is_deterministic(exc: Exception) -> bool:
+	current = exc.__cause__ or exc.__context__
+	while current is not None:
+		if not isinstance(current, (PDFSecurityError, *PARSER_CONTENT_ERRORS)):
+			return False
+		current = current.__cause__ or current.__context__
+	return True
+
+
 def main() -> int:
 	parser_was_preloaded = any(name == "pypdf" or name.startswith("pypdf.") for name in sys.modules)
 	try:
@@ -254,11 +263,12 @@ def main() -> int:
 		validate_pdf_bytes(content)
 	except PDFSecurityError:
 		return 2
-	except PARSER_CONTENT_ERRORS:
+	except PARSER_CONTENT_ERRORS as exc:
 		# pypdf's documented read-error family represents deterministic malformed
-		# content (missing EOF, broken xref, invalid streams). Keep only this
-		# explicit parser contract terminal; resource and unknown failures retry.
-		return 2
+		# content unless it wrapped a resource or unknown runtime exception.
+		# Strict-mode pypdf may wrap arbitrary exceptions as PdfReadError while
+		# preserving the original in the exception chain.
+		return 2 if _parser_content_error_is_deterministic(exc) else PARSER_RUNTIME_FAILED
 	except Exception:
 		# Unknown parser/runtime failures, including MemoryError, are
 		# infrastructure faults. Only our explicit PDFSecurityError contract is

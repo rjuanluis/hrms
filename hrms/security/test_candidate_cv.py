@@ -435,6 +435,43 @@ class TestCandidateCVSecurity(unittest.TestCase):
 			):
 				self.assertEqual(pdf_cv_validator.main(), 2)
 
+	def test_pdf_child_preserves_wrapped_resource_and_unknown_failures_as_retryable(self):
+		from pypdf.generic import _data_structures
+
+		from hrms.security import pdf_cv_validator
+
+		pdf_cv_validator._load_parser()
+		for failure, expected in (
+			(MemoryError("resource"), pdf_cv_validator.PARSER_RUNTIME_FAILED),
+			(RuntimeError("unknown-runtime"), pdf_cv_validator.PARSER_RUNTIME_FAILED),
+			(pdf_cv_validator.PARSER_CONTENT_ERRORS[0]("inner-content"), 2),
+		):
+			values = iter((pdf_cv_validator.NameObject("/K"), failure))
+
+			def read_object(*_args, **_kwargs):
+				value = next(values)
+				if isinstance(value, BaseException):
+					raise value
+				return value
+
+			with self.subTest(failure=type(failure).__name__):
+				with (
+					patch.object(_data_structures, "read_object", side_effect=read_object),
+					self.assertRaises(pdf_cv_validator.PARSER_CONTENT_ERRORS) as raised,
+				):
+					pdf_cv_validator.DictionaryObject.read_from_stream(
+						io.BytesIO(b"<< /K 1 >>"), SimpleNamespace(strict=True)
+					)
+				self.assertIs(raised.exception.__context__, failure)
+				with (
+					patch.dict(os.environ, {}, clear=True),
+					patch.object(pdf_cv_validator, "_set_limits"),
+					patch.object(pdf_cv_validator, "_load_parser"),
+					patch.object(pdf_cv_validator, "validate_pdf_bytes", side_effect=raised.exception),
+					patch.object(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(b"%PDF-1.4"))),
+				):
+					self.assertEqual(pdf_cv_validator.main(), expected)
+
 	def test_pdf_parser_child_enforces_memory_ceiling(self):
 		from hrms.security.pdf_cv_validator import SELF_TEST_MEMORY_LIMIT_ENFORCED
 
