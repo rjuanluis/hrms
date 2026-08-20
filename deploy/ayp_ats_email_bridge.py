@@ -457,12 +457,16 @@ def _validate_message_scan_url(value: Any) -> str:
 	if not isinstance(value, str) or not value or len(value) > 8192:
 		raise BridgeError("graph_message_next_link_invalid")
 	parsed = urlparse(value)
-	expected_path = f"/v1.0/users/{MAILBOX}/mailFolders/inbox/messages"
+	decoded_path = unquote(parsed.path)
+	expected_paths = {
+		f"/v1.0/users/{MAILBOX}/mailFolders/inbox/messages".casefold(),
+		f"/v1.0/users/{MAILBOX}/mailFolders('inbox')/messages".casefold(),
+	}
 	if (
 		parsed.scheme != "https"
 		or parsed.netloc.casefold() != "graph.microsoft.com"
-		or unquote(parsed.path).casefold() != expected_path.casefold()
-		or "\\" in unquote(parsed.path)
+		or decoded_path.casefold() not in expected_paths
+		or "\\" in decoded_path
 		or parsed.fragment
 	):
 		raise BridgeError("graph_message_next_link_invalid")

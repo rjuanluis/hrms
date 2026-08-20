@@ -855,6 +855,33 @@ class TestAyPEmailBridge(unittest.TestCase):
 		self.assertIsNotNone(batch.resume_url)
 		self.assertEqual(len(calls), 2)
 
+	def test_message_pagination_accepts_graph_parenthesized_inbox_next_link(self):
+		known = self.message()
+		pending = {**self.message(), "id": "GRAPH-ID-2", "internetMessageId": "<synthetic-2@example.test>"}
+		parenthesized_next_link = (
+			"https://graph.microsoft.com/v1.0/users/empleos%40aroypedal.com/"
+			"mailFolders('inbox')/messages?$skip=100&$top=100"
+		)
+		responses = iter(
+			(
+				{"value": [known], "@odata.nextLink": parenthesized_next_link},
+				{"value": [pending]},
+			)
+		)
+		calls: list[str] = []
+
+		def request_graph(**kwargs):
+			calls.append(kwargs["url"])
+			return next(responses)
+
+		batch = bridge._fetch_messages(
+			request_graph,
+			1,
+			{bridge._fingerprint(bridge._message_key(known))},
+		)
+		self.assertEqual([row["id"] for row in batch.messages], ["GRAPH-ID-2"])
+		self.assertEqual(calls, [calls[0], parenthesized_next_link])
+
 	def test_limit_sized_unsafe_filename_batch_cannot_starve_older_valid_candidate(self):
 		unsafe_messages = [
 			{
