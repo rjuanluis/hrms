@@ -68,6 +68,16 @@ def make_docx(extra_files: dict[str, bytes] | None = None) -> bytes:
 	return buffer.getvalue()
 
 
+def make_docx_with_unsupported_compression() -> bytes:
+	content = bytearray(make_docx())
+	for signature, method_offset in ((b"PK\x03\x04", 8), (b"PK\x01\x02", 10)):
+		start = 0
+		while (index := content.find(signature, start)) >= 0:
+			content[index + method_offset : index + method_offset + 2] = (99).to_bytes(2, "little")
+			start = index + len(signature)
+	return bytes(content)
+
+
 def make_pdf(*, active: bool = False) -> bytes:
 	buffer = io.BytesIO()
 	writer = PdfWriter()
@@ -373,7 +383,7 @@ class TestCandidateCVSecurity(unittest.TestCase):
 			with self.assertRaises(CandidateCVSecurityError) as raised:
 				validate_cv_file("cv.pdf", make_pdf())
 		self.assertNotIsInstance(raised.exception, CandidateCVScanUnavailableError)
-		for returncode in (3, 87, 88, 89, -9):
+		for returncode in (3, 87, 88, 89, 90, -9):
 			with (
 				self.subTest(returncode=returncode),
 				patch(
@@ -383,6 +393,32 @@ class TestCandidateCVSecurity(unittest.TestCase):
 			):
 				with self.assertRaises(CandidateCVScanUnavailableError):
 					validate_cv_file("cv.pdf", make_pdf())
+
+	def test_pdf_child_unknown_runtime_failures_are_not_terminal_content_rejections(self):
+		from hrms.security import pdf_cv_validator
+
+		for failure in (MemoryError(), RuntimeError("parser-runtime")):
+			with (
+				self.subTest(failure=type(failure).__name__),
+				patch.dict(os.environ, {}, clear=True),
+				patch.object(pdf_cv_validator, "_set_limits"),
+				patch.object(pdf_cv_validator, "_load_parser"),
+				patch.object(pdf_cv_validator, "validate_pdf_bytes", side_effect=failure),
+				patch.object(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(b"%PDF-1.4"))),
+			):
+				self.assertEqual(pdf_cv_validator.main(), pdf_cv_validator.PARSER_RUNTIME_FAILED)
+		with (
+			patch.dict(os.environ, {}, clear=True),
+			patch.object(pdf_cv_validator, "_set_limits"),
+			patch.object(pdf_cv_validator, "_load_parser"),
+			patch.object(
+				pdf_cv_validator,
+				"validate_pdf_bytes",
+				side_effect=pdf_cv_validator.PDFSecurityError("deterministic"),
+			),
+			patch.object(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(b"%PDF-1.4"))),
+		):
+			self.assertEqual(pdf_cv_validator.main(), 2)
 
 	def test_pdf_parser_child_enforces_memory_ceiling(self):
 		from hrms.security.pdf_cv_validator import SELF_TEST_MEMORY_LIMIT_ENFORCED
@@ -457,6 +493,11 @@ class TestCandidateCVSecurity(unittest.TestCase):
 
 	def test_accepts_simple_docx(self):
 		validate_cv_file("cv.docx", make_docx())
+
+	def test_rejects_docx_with_unsupported_zip_compression_deterministically(self):
+		with self.assertRaises(CandidateCVSecurityError) as raised:
+			validate_cv_file("cv.docx", make_docx_with_unsupported_compression())
+		self.assertNotIsInstance(raised.exception, CandidateCVScanUnavailableError)
 
 	def test_accepts_supported_images(self):
 		validate_cv_file("cv.jpg", b"\xff\xd8\xff\xe0synthetic")

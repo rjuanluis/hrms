@@ -353,10 +353,20 @@ def _select_candidate_attachment(
 	if declared_size <= 0 or declared_size > MAX_GRAPH_ATTACHMENT_DECLARED_BYTES:
 		return None, "blocked_candidate_cv_size"
 	if require_content:
-		content = str(row.get("contentBytes") or "")
-		if not content or len(content) > MAX_GRAPH_CONTENT_CHARS:
+		content = row.get("contentBytes")
+		if not isinstance(content, str):
+			raise BridgeError("graph_attachment_content_invalid")
+		if not content:
+			return None, "blocked_candidate_cv_size"
+		if not _has_strict_base64_syntax(content):
+			raise BridgeError("graph_attachment_content_invalid")
+		if len(content) > MAX_GRAPH_CONTENT_CHARS:
 			return None, "blocked_candidate_cv_size"
 	return row, "candidate"
+
+
+def _has_strict_base64_syntax(content: str) -> bool:
+	return len(content) % 4 == 0 and re.fullmatch(r"[A-Za-z0-9+/]*={0,2}", content) is not None
 
 
 def _email_identity_values(message: dict[str, Any], field: str) -> tuple[str, str | None]:
@@ -375,10 +385,13 @@ def _email_identity_values(message: dict[str, Any], field: str) -> tuple[str, st
 
 def _email_identity(message: dict[str, Any], field: str) -> tuple[str, str]:
 	email_value, name_value = _email_identity_values(message, field)
-	email = email_value.strip().casefold()
+	# Validate the provider's raw identity before canonicalizing it. Trimming
+	# first would launder malformed addresses and could hide sender/from drift.
+	email = email_value.casefold()
 	name = " ".join((name_value or "").split())
 	if (
 		not email
+		or email_value != email_value.strip()
 		or len(email) > 140
 		or any(unicodedata.category(character) in {"Cc", "Cf", "Cs"} for character in email)
 		or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email)
@@ -390,6 +403,10 @@ def _email_identity(message: dict[str, Any], field: str) -> tuple[str, str]:
 
 
 def _sender(message: dict[str, Any]) -> tuple[str, str]:
+	raw_sender_email, _ = _email_identity_values(message, "sender")
+	raw_from_email, _ = _email_identity_values(message, "from")
+	if raw_sender_email != raw_from_email:
+		raise AdmissionBlock("blocked_sender_from_mismatch")
 	sender_email, sender_name = _email_identity(message, "sender")
 	from_email, from_name = _email_identity(message, "from")
 	if sender_email != from_email:
@@ -629,7 +646,14 @@ def _validate_hydrated_attachment(metadata: dict[str, Any], hydrated: dict[str, 
 	content = hydrated.get("contentBytes")
 	if not isinstance(content, str):
 		raise BridgeError("graph_attachment_content_invalid")
-	if not content or len(content) > MAX_GRAPH_CONTENT_CHARS:
+	if not content:
+		raise AdmissionBlock("blocked_candidate_cv_size")
+	# Validate provider syntax before using encoded length as proof of an
+	# oversized file. This keeps malformed provider data retryable without
+	# decoding arbitrarily large strings.
+	if not _has_strict_base64_syntax(content):
+		raise BridgeError("graph_attachment_content_invalid")
+	if len(content) > MAX_GRAPH_CONTENT_CHARS:
 		raise AdmissionBlock("blocked_candidate_cv_size")
 	try:
 		decoded = base64.b64decode(content.encode("ascii"), validate=True)

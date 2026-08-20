@@ -13,6 +13,7 @@ SELF_TEST_MEMORY_LIMIT_ENFORCED = 86
 SELF_TEST_LIMIT_SETUP_FAILED = 87
 SELF_TEST_PARSER_PRELOADED = 88
 SELF_TEST_PARSER_IMPORT_FAILED = 89
+PARSER_RUNTIME_FAILED = 90
 
 # These are intentionally loaded only after the child process has installed
 # its hard limits. Importing pypdf before RLIMIT_AS leaves parser import and
@@ -248,8 +249,13 @@ def main() -> int:
 	content = sys.stdin.buffer.read()
 	try:
 		validate_pdf_bytes(content)
-	except Exception:
+	except PDFSecurityError:
 		return 2
+	except Exception:
+		# Unknown parser/runtime failures, including MemoryError, are
+		# infrastructure faults. Only our explicit PDFSecurityError contract is
+		# a deterministic content rejection that the parent may persist.
+		return PARSER_RUNTIME_FAILED
 	return 0
 
 

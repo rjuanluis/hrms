@@ -440,8 +440,18 @@ class TestAyPEmailBridge(unittest.TestCase):
 
 	def test_hydrated_attachment_requires_valid_base64(self):
 		metadata = {key: value for key, value in self.attachment().items() if key != "contentBytes"}
-		with self.assertRaisesRegex(bridge.BridgeError, "graph_attachment_content_invalid"):
-			bridge._validate_hydrated_attachment(metadata, {**metadata, "contentBytes": "not base64!"})
+		for malformed in ("not base64!", "A" * (bridge.MAX_GRAPH_CONTENT_CHARS + 1), "AA==="):
+			with self.subTest(length=len(malformed)):
+				with self.assertRaisesRegex(bridge.BridgeError, "graph_attachment_content_invalid"):
+					bridge._validate_hydrated_attachment(metadata, {**metadata, "contentBytes": malformed})
+				with self.assertRaisesRegex(bridge.BridgeError, "graph_attachment_content_invalid"):
+					bridge._select_candidate_attachment([{**metadata, "contentBytes": malformed}])
+
+	def test_syntactically_valid_overlength_base64_is_terminal_size_rejection(self):
+		metadata = {key: value for key, value in self.attachment().items() if key != "contentBytes"}
+		content = "A" * ((bridge.MAX_GRAPH_CONTENT_CHARS + 4) // 4 * 4)
+		with self.assertRaisesRegex(bridge.AdmissionBlock, "blocked_candidate_cv_size"):
+			bridge._validate_hydrated_attachment(metadata, {**metadata, "contentBytes": content})
 
 	def test_graph_size_overhead_does_not_replace_actual_byte_validation(self):
 		overhead = 294
@@ -541,6 +551,20 @@ class TestAyPEmailBridge(unittest.TestCase):
 		self.assertEqual(len(graph.calls), 1)
 		self.assertIn("blocked_sender_from_mismatch", persisted["messages"].values())
 		remote.assert_not_called()
+
+	def test_raw_sender_identity_is_not_trimmed_or_casefolded_before_comparison(self):
+		for sender_address, from_address, expected in (
+			(" candidate@example.test ", " candidate@example.test ", "blocked_sender_identity"),
+			("Candidate@example.test", "candidate@example.test", "blocked_sender_from_mismatch"),
+		):
+			with self.subTest(sender=sender_address, from_address=from_address):
+				message = self.message()
+				message["sender"] = {
+					"emailAddress": {"address": sender_address, "name": "Synthetic Candidate"}
+				}
+				message["from"] = {"emailAddress": {"address": from_address, "name": "Synthetic Candidate"}}
+				with self.assertRaisesRegex(bridge.AdmissionBlock, expected):
+					bridge._sender(message)
 
 	def test_explicit_incompatible_or_malformed_vacancy_blocks_before_attachment_metadata(self):
 		for subject in (

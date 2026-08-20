@@ -214,7 +214,7 @@ def _validate_docx(content: bytes) -> None:
 					relationship_type = relationship.attrib.get("Type", "").lower()
 					if not relationship_type.endswith("/hyperlink"):
 						raise CandidateCVSecurityError(_("El DOCX contiene recursos externos no permitidos."))
-	except zipfile.BadZipFile as exc:
+	except (zipfile.BadZipFile, NotImplementedError) as exc:
 		raise CandidateCVSecurityError(_("El archivo no es un DOCX válido.")) from exc
 
 
