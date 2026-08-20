@@ -48,12 +48,9 @@ SUBJECT_FIELD = "custom_ayp_email_subject"
 CURRENT_VACANCY_CONSENT_FIELD = "custom_ayp_email_current_vacancy_consent"
 CONSENT_NOTICE_FIELD = "custom_ayp_email_consent_notice_version"
 CONSENT_EVIDENCE_FIELD = "custom_ayp_email_consent_evidence_sha256"
-EMAIL_CONSENT_NOTICE_VERSION = "AYP-RH-EMAIL-CURRENT-VACANCY-2026-08-15-v1"
-CONSENT_EVIDENCE_FORMAT = "AYP-EMAIL-CONSENT-EVIDENCE-V1"
-NORMALIZED_CONSENT_PHRASE = (
-	"he leido el aviso de privacidad de aro y pedal y autorizo el tratamiento "
-	"de mis datos exclusivamente para esta vacante"
-)
+EMAIL_CONSENT_NOTICE_VERSION = "AYP-RH-EMAIL-DIRECT-SUBMISSION-2026-08-19-v1"
+CONSENT_EVIDENCE_FORMAT = "AYP-EMAIL-DIRECT-SUBMISSION-EVIDENCE-V1"
+CONSENT_BASIS = "direct_email_submission_to_recruitment_mailbox"
 MAX_DATA_LENGTH = 140
 MAX_CANDIDATE_FILENAME_BYTES = 240
 MAX_SUBJECT_LENGTH = 4096
@@ -120,7 +117,7 @@ def _consent_evidence_sha256(payload: dict) -> str:
 	if not isinstance(received_on, str) or not received_on.strip() or len(received_on) > 64:
 		_fail("La fecha de recepción no es válida.")
 	evidence = {
-		"canonical_consent": NORMALIZED_CONSENT_PHRASE,
+		"basis": CONSENT_BASIS,
 		"format": CONSENT_EVIDENCE_FORMAT,
 		"graph_message_id": graph_id,
 		"mailbox": RECRUITMENT_MAILBOX,
@@ -303,15 +300,21 @@ def _job_opening() -> str:
 	return job_opening
 
 
-def _require_current_vacancy_consent(payload: dict) -> None:
+def _require_direct_submission_consent(payload: dict) -> None:
 	if payload.get("consent_current_vacancy") is not True:
-		_fail("Falta el consentimiento explícito para procesar la solicitud de esta vacante.")
+		_fail("Falta la constancia de envío directo para procesar la solicitud de esta vacante.")
+	basis = _clean_data(
+		payload.get("consent_basis"),
+		label="La base del consentimiento por correo",
+	)
+	if basis != CONSENT_BASIS:
+		_fail("La base del consentimiento por correo no está autorizada.")
 	version = _clean_data(
 		payload.get("consent_notice_version"),
-		label="La versión del aviso de consentimiento",
+		label="La versión de la política de consentimiento por envío",
 	)
 	if version != EMAIL_CONSENT_NOTICE_VERSION:
-		_fail("La versión del aviso de consentimiento no está autorizada.")
+		_fail("La versión de la política de consentimiento por envío no está autorizada.")
 
 
 def _require_configuration() -> None:
@@ -520,7 +523,7 @@ def ingest_email_payload(payload: dict) -> dict:
 
 	_require_configuration()
 	message_key = _message_key(payload)
-	_require_current_vacancy_consent(payload)
+	_require_direct_submission_consent(payload)
 	consent_evidence_sha256 = _consent_evidence_sha256(payload)
 	sender_email, sender_name = _sender(payload)
 	received_on = _received_on(payload)
@@ -603,8 +606,8 @@ def ingest_email_payload(payload: dict) -> dict:
 				"job_title": job_opening,
 				"source": EMAIL_RECRUITMENT_SOURCE,
 				"resume_attachment": file_doc.file_url,
-				# This existing field includes future-opportunity consent. Email
-				# applicants never receive that status from the current-vacancy phrase.
+				# This existing field covers future-opportunity consent. A direct
+				# submission grants processing only for the current hiring process.
 				"custom_data_processing_consent": 0,
 				"custom_privacy_notice_version": EMAIL_CONSENT_NOTICE_VERSION,
 				"custom_candidate_profile": None,

@@ -27,7 +27,6 @@ import unicodedata
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
-from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
@@ -62,21 +61,18 @@ STATE_VERSION = 2
 MESSAGE_PAGE_SIZE = 100
 INTAKE_START_UTC = "2026-08-13T00:00:00Z"
 MAX_CV_BYTES = 5 * 1024 * 1024
+MAX_GRAPH_ATTACHMENT_DECLARED_BYTES = MAX_CV_BYTES + (64 * 1024)
 MAX_CANDIDATE_FILENAME_LENGTH = 140
 MAX_CANDIDATE_FILENAME_BYTES = 240
-MAX_MESSAGE_BODY_CHARS = 1024 * 1024
 MAX_ATTACHMENT_PAGES = 100
 MAX_ATTACHMENT_ROWS = 1000
 MAX_SUBJECT_CHARS = 4096
 MAX_STORED_SUBJECT_CHARS = 140
 MAX_GRAPH_CONTENT_CHARS = ((MAX_CV_BYTES + 2) // 3) * 4 + 16
 ALLOWED_EXTENSIONS = frozenset({".pdf", ".docx", ".heic", ".heif", ".jpeg", ".jpg", ".png"})
-CONSENT_NOTICE_VERSION = "AYP-RH-EMAIL-CURRENT-VACANCY-2026-08-15-v1"
-CONSENT_EVIDENCE_FORMAT = "AYP-EMAIL-CONSENT-EVIDENCE-V1"
-CONSENT_PHRASE = (
-	"He leído el aviso de privacidad de Aro y Pedal y autorizo el tratamiento "
-	"de mis datos exclusivamente para esta vacante."
-)
+CONSENT_NOTICE_VERSION = "AYP-RH-EMAIL-DIRECT-SUBMISSION-2026-08-19-v1"
+CONSENT_EVIDENCE_FORMAT = "AYP-EMAIL-DIRECT-SUBMISSION-EVIDENCE-V1"
+CONSENT_BASIS = "direct_email_submission_to_recruitment_mailbox"
 STATE_PATH = Path.home() / ".hermes" / "state" / "ayp-ats-email-bridge.json"
 LOCK_PATH = Path.home() / ".hermes" / "state" / "ayp-ats-email-bridge.lock"
 GRAPH_CLIENT_PATH = Path.home() / ".hermes" / "scripts" / "msgraph_app_cli.py"
@@ -151,249 +147,6 @@ class MessageBatch:
 	cursor_history: tuple[str, ...]
 
 
-SIMPLE_CONSENT_HTML_CONTENT_TAGS = frozenset({"div", "p", "span", "strong", "b", "em", "i", "u", "a"})
-SIMPLE_CONSENT_HTML_VOID_TAGS = frozenset({"br", "meta"})
-SAFE_CONSENT_HTML_STYLE_PROPERTIES = frozenset({"font-style", "font-weight", "text-align", "white-space"})
-
-
-class _HTMLTextExtractor(HTMLParser):
-	def __init__(self) -> None:
-		super().__init__(convert_charrefs=True)
-		self.parts: list[str] = []
-		self.stack: list[str] = []
-		self.mode: str | None = None
-		self.saw_decl = False
-		self.saw_html = False
-		self.saw_head = False
-		self.saw_body = False
-		self.closed_body = False
-		self.closed_html = False
-		self.valid = True
-
-	def _style_is_safe(self, style: str) -> bool:
-		for declaration in style.split(";"):
-			if not declaration.strip():
-				continue
-			if ":" not in declaration:
-				return False
-			property_name, property_value = declaration.split(":", 1)
-			property_name = property_name.strip().casefold()
-			property_value = property_value.strip()
-			folded_value = property_value.casefold()
-			if property_name not in SAFE_CONSENT_HTML_STYLE_PROPERTIES or not property_value:
-				return False
-			if "!important" in folded_value:
-				return False
-			if property_name == "font-family" and not re.fullmatch(
-				r"[A-Za-z0-9 ,.'\"_-]{1,200}", property_value
-			):
-				return False
-			if property_name == "font-style" and folded_value not in {"normal", "italic", "oblique"}:
-				return False
-			if property_name == "font-weight" and folded_value not in {
-				"normal",
-				"bold",
-				"bolder",
-				"lighter",
-				"100",
-				"200",
-				"300",
-				"400",
-				"500",
-				"600",
-				"700",
-				"800",
-				"900",
-			}:
-				return False
-			if property_name == "text-align" and folded_value not in {
-				"start",
-				"end",
-				"left",
-				"right",
-				"center",
-				"justify",
-			}:
-				return False
-			if property_name == "white-space" and folded_value not in {
-				"normal",
-				"nowrap",
-				"pre",
-				"pre-line",
-				"pre-wrap",
-			}:
-				return False
-		return True
-
-	def _attrs_are_safe(self, tag: str, attrs: list[tuple[str, str | None]]) -> bool:
-		lowered: dict[str, str] = {}
-		for raw_name, raw_value in attrs:
-			name = raw_name.casefold()
-			if name in lowered or raw_value is None or len(raw_value) > 2048:
-				return False
-			if any(ord(character) < 32 or ord(character) == 127 for character in raw_value):
-				return False
-			lowered[name] = raw_value
-		if tag == "meta":
-			if self.stack != ["html", "head"]:
-				return False
-			if set(lowered) == {"charset"}:
-				return lowered["charset"].casefold() == "utf-8"
-			if set(lowered) != {"content", "http-equiv"}:
-				return False
-			return lowered["http-equiv"].casefold() == "content-type" and bool(
-				re.fullmatch(r"text/html\s*;\s*charset\s*=\s*utf-8", lowered["content"], flags=re.IGNORECASE)
-			)
-		if tag in {"head", "br"}:
-			return not lowered
-		if not set(lowered).issubset({"dir", "lang", "style"}):
-			return False
-		if "dir" in lowered and lowered["dir"].casefold() not in {"auto", "ltr", "rtl"}:
-			return False
-		if "lang" in lowered and not re.fullmatch(r"[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*", lowered["lang"]):
-			return False
-		style = lowered.get("style")
-		return style is None or self._style_is_safe(style)
-
-	def _start_content(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-		if self.mode is None:
-			self.mode = "fragment"
-		if self.mode == "wrapper" and (not self.stack or "body" not in self.stack):
-			self.valid = False
-			return
-		if self.mode == "fragment" and any(item in {"html", "head", "body"} for item in self.stack):
-			self.valid = False
-			return
-		if not self._attrs_are_safe(tag, attrs):
-			self.valid = False
-			return
-		if tag != "br":
-			self.stack.append(tag)
-
-	def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-		tag = tag.casefold()
-		if tag == "html":
-			if self.mode is not None or self.stack or self.saw_html:
-				self.valid = False
-				return
-			self.mode = "wrapper"
-			self.saw_html = True
-			if not self._attrs_are_safe(tag, attrs):
-				self.valid = False
-				return
-			self.stack.append(tag)
-			return
-		if tag == "head":
-			if self.mode != "wrapper" or self.stack != ["html"] or self.saw_head or self.saw_body:
-				self.valid = False
-				return
-			self.saw_head = True
-			if not self._attrs_are_safe(tag, attrs):
-				self.valid = False
-				return
-			self.stack.append(tag)
-			return
-		if tag == "meta":
-			if not self._attrs_are_safe(tag, attrs):
-				self.valid = False
-			return
-		if tag == "body":
-			if self.mode != "wrapper" or self.stack != ["html"] or self.saw_body:
-				self.valid = False
-				return
-			self.saw_body = True
-			if not self._attrs_are_safe(tag, attrs):
-				self.valid = False
-				return
-			self.stack.append(tag)
-			return
-		if tag in SIMPLE_CONSENT_HTML_CONTENT_TAGS or tag == "br":
-			self._start_content(tag, attrs)
-			return
-		self.valid = False
-
-	def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-		tag = tag.casefold()
-		if tag == "meta":
-			if not self._attrs_are_safe(tag, attrs):
-				self.valid = False
-		elif tag == "br":
-			self._start_content(tag, attrs)
-		else:
-			self.valid = False
-
-	def handle_endtag(self, tag: str) -> None:
-		tag = tag.casefold()
-		if tag in SIMPLE_CONSENT_HTML_VOID_TAGS:
-			self.valid = False
-			return
-		if not self.stack or self.stack[-1] != tag:
-			self.valid = False
-			return
-		self.stack.pop()
-		if tag == "body":
-			self.closed_body = True
-		elif tag == "html":
-			self.closed_html = True
-
-	def handle_data(self, data: str) -> None:
-		if self.mode is None:
-			if data.strip():
-				self.mode = "fragment"
-				self.parts.append(data)
-			return
-		if self.mode == "fragment":
-			self.parts.append(data)
-			return
-		if "head" in self.stack:
-			if data.strip():
-				self.valid = False
-			return
-		if "body" in self.stack:
-			self.parts.append(data)
-		elif data.strip():
-			self.valid = False
-
-	def handle_comment(self, data: str) -> None:
-		self.valid = False
-
-	def handle_decl(self, decl: str) -> None:
-		if self.saw_decl or self.mode is not None or self.stack or decl.strip().casefold() != "doctype html":
-			self.valid = False
-			return
-		self.saw_decl = True
-
-	def unknown_decl(self, data: str) -> None:
-		self.valid = False
-
-	def handle_pi(self, data: str) -> None:
-		self.valid = False
-
-	def is_complete(self) -> bool:
-		if not self.valid or self.stack or self.mode is None:
-			return False
-		if self.mode == "wrapper":
-			return self.saw_html and self.saw_body and self.closed_body and self.closed_html
-		return not self.saw_decl and not any((self.saw_html, self.saw_head, self.saw_body))
-
-
-def _normalized_words(value: str) -> str | None:
-	canonical = unicodedata.normalize("NFC", value).casefold()
-	if any(
-		unicodedata.category(character).startswith("M") or unicodedata.category(character) == "Cf"
-		for character in canonical
-	):
-		return None
-	decomposed = unicodedata.normalize("NFD", canonical)
-	without_marks = "".join(character for character in decomposed if not unicodedata.combining(character))
-	if any(ord(character) > 127 for character in without_marks):
-		return ""
-	return " ".join(re.findall(r"[a-z0-9]+", without_marks))
-
-
-NORMALIZED_CONSENT_PHRASE = _normalized_words(CONSENT_PHRASE)
-if NORMALIZED_CONSENT_PHRASE is None:  # pragma: no cover - static canonical phrase invariant
-	raise RuntimeError("canonical consent phrase contains unsupported Unicode")
 JOB_OPENING = AUTHORIZED_JOB_OPENING
 
 
@@ -403,7 +156,7 @@ def _fingerprint(value: str) -> str:
 
 def _consent_evidence_sha256(*, graph_id: str, received_on: str) -> str:
 	evidence = {
-		"canonical_consent": NORMALIZED_CONSENT_PHRASE,
+		"basis": CONSENT_BASIS,
 		"format": CONSENT_EVIDENCE_FORMAT,
 		"graph_message_id": graph_id,
 		"mailbox": MAILBOX,
@@ -597,7 +350,7 @@ def _select_candidate_attachment(
 	declared_size = row.get("size")
 	if not isinstance(declared_size, int) or isinstance(declared_size, bool):
 		return None, "blocked_candidate_attachment_size"
-	if declared_size <= 0 or declared_size > MAX_CV_BYTES:
+	if declared_size <= 0 or declared_size > MAX_GRAPH_ATTACHMENT_DECLARED_BYTES:
 		return None, "blocked_candidate_cv_size"
 	if require_content:
 		content = str(row.get("contentBytes") or "")
@@ -779,8 +532,7 @@ def _attachment_url_digest(value: str, graph_id: str) -> str:
 def _fetch_attachment_metadata(request_graph: Callable[..., Any], graph_id: str) -> list[dict[str, Any]]:
 	mailbox = quote(MAILBOX, safe="@")
 	message_id = quote(graph_id, safe="")
-	# Read only metadata until identity, vacancy, attachment shape, and consent
-	# gates pass. Follow legitimate Graph collection pages without hydrating bytes.
+	# Read only metadata until identity, vacancy, and attachment-shape gates pass.
 	url = (
 		f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments"
 		"?$select=id,name,contentType,size,isInline"
@@ -875,52 +627,19 @@ def _validate_hydrated_attachment(metadata: dict[str, Any], hydrated: dict[str, 
 	if not _same_attachment(metadata, hydrated):
 		raise BridgeError("graph_attachment_changed_after_preflight")
 	content = hydrated.get("contentBytes")
-	if not isinstance(content, str) or not content or len(content) > MAX_GRAPH_CONTENT_CHARS:
+	if not isinstance(content, str):
 		raise BridgeError("graph_attachment_content_invalid")
+	if not content or len(content) > MAX_GRAPH_CONTENT_CHARS:
+		raise AdmissionBlock("blocked_candidate_cv_size")
 	try:
 		decoded = base64.b64decode(content.encode("ascii"), validate=True)
 	except (UnicodeEncodeError, binascii.Error, ValueError) as exc:
 		raise BridgeError("graph_attachment_content_invalid") from exc
-	if len(decoded) != metadata.get("size"):
-		raise BridgeError("graph_attachment_content_invalid")
-
-
-def _has_current_vacancy_consent(request_graph: Callable[..., Any], graph_id: str) -> bool:
-	mailbox = quote(MAILBOX, safe="@")
-	message_id = quote(graph_id, safe="")
-	body = _graph_get(
-		request_graph,
-		f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}?$select=body",
-	).get("body")
-	if not isinstance(body, dict):
-		raise BridgeError("message_body_invalid")
-	content = body.get("content")
-	if not isinstance(content, str):
-		raise BridgeError("message_body_invalid")
-	if len(content) > MAX_MESSAGE_BODY_CHARS:
-		return False
-	content_type_value = body.get("contentType")
-	if not isinstance(content_type_value, str):
-		raise BridgeError("message_body_invalid")
-	content_type = content_type_value.casefold()
-	if content_type not in {"html", "text"}:
-		raise BridgeError("message_body_invalid")
-	if content_type == "html":
-		parser = _HTMLTextExtractor()
-		try:
-			parser.feed(content)
-			parser.close()
-		except Exception as exc:
-			raise BridgeError("message_body_invalid") from exc
-		if not parser.is_complete():
-			return False
-		content = " ".join(parser.parts)
-	elif content_type != "text":
-		return False
-	normalized = _normalized_words(content)
-	if normalized is None:
-		raise BridgeError("message_body_unicode_invalid")
-	return normalized == NORMALIZED_CONSENT_PHRASE
+	# Graph's attachment `size` includes provider overhead and is not the exact
+	# decoded file length. Keep metadata/hydration identity exact, but enforce
+	# the security boundary against the actual bytes.
+	if not decoded or len(decoded) > MAX_CV_BYTES:
+		raise AdmissionBlock("blocked_candidate_cv_size")
 
 
 def _build_candidate(message: dict[str, Any], attachment: dict[str, Any]) -> CandidateMessage:
@@ -940,6 +659,7 @@ def _build_candidate(message: dict[str, Any], attachment: dict[str, Any]) -> Can
 		"sender_name": name,
 		"subject": subject,
 		"consent_current_vacancy": True,
+		"consent_basis": CONSENT_BASIS,
 		"consent_notice_version": CONSENT_NOTICE_VERSION,
 		"consent_evidence_sha256": _consent_evidence_sha256(
 			graph_id=str(message["id"]),
@@ -949,7 +669,6 @@ def _build_candidate(message: dict[str, Any], attachment: dict[str, Any]) -> Can
 			{
 				"name": str(attachment.get("name") or "").strip(),
 				"content_type": str(attachment.get("contentType") or "")[:140],
-				"size": int(attachment.get("size") or 0),
 				"content_base64": content,
 			}
 		],
@@ -1018,7 +737,7 @@ def run(*, dry_run: bool, limit: int, report_json: bool, state_path: Path = STAT
 			if fingerprint in state["messages"]:
 				summary["ignored"] += 1
 				continue
-			# Bind the applicant and consent identity before reading body or CV bytes.
+			# Bind the applicant identity before reading CV bytes.
 			_sender(message)
 			_require_compatible_subject_vacancy(message)
 			attachments = _fetch_attachment_metadata(graph.request_graph, str(message["id"]))
@@ -1029,14 +748,6 @@ def run(*, dry_run: bool, limit: int, report_json: bool, state_path: Path = STAT
 				else:
 					summary["blocked"] += 1
 					summary["errors"].append({"message": fingerprint, "code": outcome})
-				if not dry_run:
-					state["messages"][fingerprint] = outcome
-					dirty = True
-				continue
-			if not _has_current_vacancy_consent(graph.request_graph, str(message["id"])):
-				outcome = "blocked_missing_current_vacancy_consent"
-				summary["blocked"] += 1
-				summary["errors"].append({"message": fingerprint, "code": outcome})
 				if not dry_run:
 					state["messages"][fingerprint] = outcome
 					dirty = True

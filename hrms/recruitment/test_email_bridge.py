@@ -346,7 +346,8 @@ def email_payload(content=b"synthetic cv"):
 		"sender_email": "Candidate@Example.com",
 		"sender_name": "Candidate Example",
 		"consent_current_vacancy": True,
-		"consent_notice_version": "AYP-RH-EMAIL-CURRENT-VACANCY-2026-08-15-v1",
+		"consent_basis": "direct_email_submission_to_recruitment_mailbox",
+		"consent_notice_version": "AYP-RH-EMAIL-DIRECT-SUBMISSION-2026-08-19-v1",
 		"attachments": [
 			{
 				"name": "candidate.pdf",
@@ -355,11 +356,8 @@ def email_payload(content=b"synthetic cv"):
 		],
 	}
 	evidence = {
-		"canonical_consent": (
-			"he leido el aviso de privacidad de aro y pedal y autorizo el tratamiento "
-			"de mis datos exclusivamente para esta vacante"
-		),
-		"format": "AYP-EMAIL-CONSENT-EVIDENCE-V1",
+		"basis": payload["consent_basis"],
+		"format": "AYP-EMAIL-DIRECT-SUBMISSION-EVIDENCE-V1",
 		"graph_message_id": payload["graph_message_id"],
 		"mailbox": "empleos@aroypedal.com",
 		"notice_version": payload["consent_notice_version"],
@@ -551,11 +549,18 @@ class TestEmailBridge(unittest.TestCase):
 			self.bridge.ingest_email_payload(payload)
 		self.assertEqual(self.frappe.saved_files, [])
 
-	def test_missing_or_wrong_current_vacancy_consent_fails_before_file_storage(self):
+	def test_missing_or_wrong_direct_submission_consent_fails_before_file_storage(self):
 		missing = email_payload()
 		missing["consent_current_vacancy"] = False
-		with self.assertRaisesRegex(self.bridge.EmailBridgeError, "consentimiento explícito"):
+		with self.assertRaisesRegex(self.bridge.EmailBridgeError, "constancia de envío directo"):
 			self.bridge.ingest_email_payload(missing)
+
+		wrong_basis = email_payload()
+		wrong_basis["consent_basis"] = "untrusted-basis"
+		with self.assertRaisesRegex(
+			self.bridge.EmailBridgeError, "base del consentimiento.*no está autorizada"
+		):
+			self.bridge.ingest_email_payload(wrong_basis)
 
 		wrong_version = email_payload()
 		wrong_version["consent_notice_version"] = "untrusted-version"

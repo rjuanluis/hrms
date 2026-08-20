@@ -426,7 +426,7 @@ def ensure_recruitment_security_fields() -> None:
 				},
 				{
 					"fieldname": "custom_ayp_email_current_vacancy_consent",
-					"label": "Consentimiento por correo para vacante actual",
+					"label": "Envío directo autoriza tratamiento actual",
 					"fieldtype": "Check",
 					"default": "0",
 					"read_only": 1,
@@ -436,7 +436,7 @@ def ensure_recruitment_security_fields() -> None:
 				},
 				{
 					"fieldname": "custom_ayp_email_consent_notice_version",
-					"label": "Versión del consentimiento por correo",
+					"label": "Versión de política de consentimiento por envío",
 					"fieldtype": "Data",
 					"length": 140,
 					"read_only": 1,
@@ -446,7 +446,7 @@ def ensure_recruitment_security_fields() -> None:
 				},
 				{
 					"fieldname": "custom_ayp_email_consent_evidence_sha256",
-					"label": "Huella de evidencia del consentimiento por correo",
+					"label": "Huella de evidencia de envío directo",
 					"fieldtype": "Data",
 					"length": 64,
 					"read_only": 1,

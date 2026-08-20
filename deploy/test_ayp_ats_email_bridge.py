@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import contextlib
 import importlib.util
 import io
@@ -26,10 +27,7 @@ class GraphModule:
 	def __init__(self, message, attachments, body=None):
 		self.message = message
 		self.attachments = attachments
-		self.body = body or {
-			"contentType": "html",
-			"content": f"<p>{bridge.CONSENT_PHRASE}</p>",
-		}
+		self.body = body or {"contentType": "text", "content": "Cuerpo no leído por el ATS."}
 		self.calls = []
 
 	def request_graph(self, *, role, method, url, body, approval_ref, immutable_message_ids=False):
@@ -164,17 +162,18 @@ class TestAyPEmailBridge(unittest.TestCase):
 			self.assertEqual(remote.call_count, 1)
 			payload = remote.call_args.args[0]
 			self.assertIs(payload["consent_current_vacancy"], True)
+			self.assertEqual(payload["consent_basis"], bridge.CONSENT_BASIS)
 			self.assertEqual(payload["consent_notice_version"], bridge.CONSENT_NOTICE_VERSION)
 			self.assertRegex(payload["consent_evidence_sha256"], r"^[0-9a-f]{64}$")
 			self.assertNotIn("body", payload)
-			self.assertNotIn(bridge.CONSENT_PHRASE, json.dumps(payload, ensure_ascii=False))
+			self.assertFalse(any("?$select=body" in call[2] for call in graph.calls))
 			self.assertEqual(output.getvalue(), "")
 			self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 			persisted = json.loads(path.read_text())
 			self.assertNotIn("candidate@example.test", json.dumps(persisted))
 			self.assertNotIn("synthetic-1", json.dumps(persisted))
 
-	def test_missing_current_vacancy_consent_blocks_without_remote_write(self):
+	def test_direct_submission_needs_no_explicit_body_phrase(self):
 		graph = GraphModule(
 			self.message(),
 			[self.attachment()],
@@ -183,27 +182,30 @@ class TestAyPEmailBridge(unittest.TestCase):
 		with (
 			tempfile.TemporaryDirectory() as tmp,
 			patch.object(bridge, "_load_graph_client", return_value=graph),
-			patch.object(bridge, "_remote_ingest") as remote,
+			patch.object(
+				bridge,
+				"_remote_ingest",
+				return_value={"status": "created", "applicant": "APP-1"},
+			) as remote,
 			contextlib.redirect_stdout(io.StringIO()),
 		):
 			result = bridge.run(
-				dry_run=True,
+				dry_run=False,
 				limit=10,
 				report_json=False,
 				state_path=Path(tmp) / "state.json",
 			)
-		self.assertEqual(result["created"], 0)
-		self.assertEqual(result["blocked"], 1)
-		self.assertEqual(result["errors"][0]["code"], "blocked_missing_current_vacancy_consent")
-		self.assertFalse(any("/attachments/ATT-1" in call[2] for call in graph.calls))
-		remote.assert_not_called()
+		self.assertEqual(result["created"], 1)
+		self.assertEqual(result["blocked"], 0)
+		self.assertFalse(any("?$select=body" in call[2] for call in graph.calls))
+		remote.assert_called_once()
 
 	def test_admission_block_exits_zero_and_reports_only_aggregate_reason(self):
-		graph = GraphModule(
-			self.message(),
-			[self.attachment()],
-			body={"contentType": "text", "content": "Adjunto mi currículum."},
-		)
+		message = self.message()
+		message["from"] = {
+			"emailAddress": {"address": "different@example.test", "name": "Identidad distinta"}
+		}
+		graph = GraphModule(message, [self.attachment()])
 		with (
 			tempfile.TemporaryDirectory() as tmp,
 			patch.object(bridge, "_load_graph_client", return_value=graph),
@@ -217,7 +219,7 @@ class TestAyPEmailBridge(unittest.TestCase):
 		self.assertEqual(report["ats_email_bridge"], "attention")
 		self.assertEqual(report["blocked"], 1)
 		self.assertEqual(report["faults"], 0)
-		self.assertEqual(report["reasons"], {"blocked_missing_current_vacancy_consent": 1})
+		self.assertEqual(report["reasons"], {"blocked_sender_from_mismatch": 1})
 		self.assertNotIn("message", report)
 
 	def test_infrastructure_error_still_exits_nonzero(self):
@@ -363,164 +365,6 @@ class TestAyPEmailBridge(unittest.TestCase):
 			self.assertEqual(proc.returncode, 78)
 			self.assertIn("runner_unavailable", proc.stdout)
 
-	def test_consent_rejects_hidden_or_ambiguous_html(self):
-		bodies = (
-			f'<span style="display:none">{bridge.CONSENT_PHRASE}</span>',
-			f"<script>{bridge.CONSENT_PHRASE}</script>",
-			f"<template>{bridge.CONSENT_PHRASE}</template>",
-			f"<blockquote>{bridge.CONSENT_PHRASE}</blockquote>",
-			f'<p class="hidden">{bridge.CONSENT_PHRASE}</p>',
-			f"<!-- {bridge.CONSENT_PHRASE} -->",
-		)
-		for content in bodies:
-			graph = GraphModule(
-				self.message(),
-				[self.attachment()],
-				body={"contentType": "html", "content": content},
-			)
-			with self.subTest(content=content):
-				self.assertFalse(bridge._has_current_vacancy_consent(graph.request_graph, "MSG-1"))
-
-	def test_consent_accepts_only_exact_plain_text_or_simple_visible_html(self):
-		for body in (
-			{"contentType": "text", "content": bridge.CONSENT_PHRASE},
-			{"contentType": "html", "content": f"<p>{bridge.CONSENT_PHRASE}</p>"},
-			{
-				"contentType": "html",
-				"content": (
-					'<!DOCTYPE html><html><head><meta http-equiv="Content-Type" '
-					'content="text/html; charset=utf-8"></head><body>'
-					f'<div dir="ltr">'
-					f"{bridge.CONSENT_PHRASE}</div></body></html>"
-				),
-			},
-		):
-			graph = GraphModule(self.message(), [self.attachment()], body=body)
-			with self.subTest(body=body):
-				self.assertTrue(bridge._has_current_vacancy_consent(graph.request_graph, "MSG-1"))
-
-		decomposed_accent = bridge.CONSENT_PHRASE.replace("í", "i\u0301")
-		graph = GraphModule(
-			self.message(),
-			[self.attachment()],
-			body={"contentType": "text", "content": decomposed_accent},
-		)
-		self.assertTrue(bridge._has_current_vacancy_consent(graph.request_graph, "MSG-1"))
-
-	def test_consent_rejects_visibility_css_and_invalid_wrapper_nesting(self):
-		html_cases = (
-			f'<p style="text-decoration:line-through">{bridge.CONSENT_PHRASE}</p>',
-			f'<p style="color:rgba(0,0,0,0)">{bridge.CONSENT_PHRASE}</p>',
-			f'<p style="font-size:0px!important">{bridge.CONSENT_PHRASE}</p>',
-			f'<p style="color:white; background-color:white">{bridge.CONSENT_PHRASE}</p>',
-			f"<html><body><head>VISIBLE EXTRA</head><p>{bridge.CONSENT_PHRASE}</p></body></html>",
-		)
-		for content in html_cases:
-			with self.subTest(content=content):
-				graph = GraphModule(
-					self.message(),
-					[self.attachment()],
-					body={"contentType": "html", "content": content},
-				)
-				self.assertFalse(bridge._has_current_vacancy_consent(graph.request_graph, "MSG-1"))
-
-	def test_active_meta_and_symbol_fonts_block_full_flow_before_remote_ingest(self):
-		html_cases = (
-			(
-				'<html><head><meta charset="utf-8" http-equiv="refresh" '
-				'content="0;url=https://example.test"></head><body><p>'
-				f"{bridge.CONSENT_PHRASE}</p></body></html>"
-			),
-			f'<p style="font-family:Wingdings">{bridge.CONSENT_PHRASE}</p>',
-			f'<p style="font-family:Adobe Blank">{bridge.CONSENT_PHRASE}</p>',
-			f'<html><head><meta charset="utf8"></head><body><p>{bridge.CONSENT_PHRASE}</p></body></html>',
-			f'<html><head><meta charset="u-t-f-8"></head><body><p>{bridge.CONSENT_PHRASE}</p></body></html>',
-			f'<html><head><meta charset="utf--8"></head><body><p>{bridge.CONSENT_PHRASE}</p></body></html>',
-		)
-		for content in html_cases:
-			with self.subTest(content=content), tempfile.TemporaryDirectory() as tmp:
-				graph = GraphModule(
-					self.message(),
-					[self.attachment()],
-					body={"contentType": "html", "content": content},
-				)
-				with (
-					patch.object(bridge, "_load_graph_client", return_value=graph),
-					patch.object(bridge, "_remote_ingest") as remote,
-					contextlib.redirect_stdout(io.StringIO()),
-				):
-					state_path = Path(tmp) / "state.json"
-					result = bridge.run(dry_run=False, limit=10, report_json=False, state_path=state_path)
-				self.assertEqual(result["blocked"], 1)
-				self.assertEqual(result["faults"], 0)
-				remote.assert_not_called()
-				self.assertEqual(
-					set(bridge._load_state(state_path)["messages"].values()),
-					{"blocked_missing_current_vacancy_consent"},
-				)
-
-	def test_overlay_marked_consent_is_retryable_without_state_or_ingest(self):
-		overlay = "".join(f"{character}\u0336" for character in "autorizo")
-		body = bridge.CONSENT_PHRASE.replace("autorizo", overlay)
-		graph = GraphModule(
-			self.message(),
-			[self.attachment()],
-			body={"contentType": "text", "content": body},
-		)
-		with (
-			tempfile.TemporaryDirectory() as tmp,
-			patch.object(bridge, "_load_graph_client", return_value=graph),
-			patch.object(bridge, "_remote_ingest") as remote,
-			patch.object(bridge, "_exclusive_lock", return_value=contextlib.nullcontext()),
-			contextlib.redirect_stdout(io.StringIO()) as output,
-		):
-			state_path = Path(tmp) / "state.json"
-			with patch.object(sys, "argv", [str(SCRIPT), "--state", str(state_path)]):
-				return_code = bridge.main()
-		self.assertEqual(return_code, 2)
-		self.assertFalse(state_path.exists())
-		remote.assert_not_called()
-		self.assertEqual(json.loads(output.getvalue())["reasons"], {"message_body_unicode_invalid": 1})
-
-	def test_negated_quoted_or_signed_consent_text_fails_closed(self):
-		bodies = (
-			f"No. {bridge.CONSENT_PHRASE}",
-			f"---------- Forwarded message ----------\n{bridge.CONSENT_PHRASE}",
-			f"{bridge.CONSENT_PHRASE}\nNo autorizo el tratamiento.",
-			f"{bridge.CONSENT_PHRASE}\nFirma automática",
-		)
-		for body in bodies:
-			with self.subTest(body=body), tempfile.TemporaryDirectory() as tmp:
-				graph = GraphModule(
-					self.message(),
-					[self.attachment()],
-					body={"contentType": "text", "content": body},
-				)
-				with (
-					patch.object(bridge, "_load_graph_client", return_value=graph),
-					patch.object(bridge, "_remote_ingest") as remote,
-					contextlib.redirect_stdout(io.StringIO()),
-				):
-					result = bridge.run(
-						dry_run=True,
-						limit=10,
-						report_json=False,
-						state_path=Path(tmp) / "state.json",
-					)
-				self.assertEqual(result["would_create"], 0)
-				self.assertEqual(result["blocked"], 1)
-				remote.assert_not_called()
-
-	def test_consent_rejects_unconsumed_unicode_text(self):
-		for extra in (" 我不同意处理我的个人资料", " 🚫"):
-			with self.subTest(extra=extra):
-				graph = GraphModule(
-					self.message(),
-					[self.attachment()],
-					body={"contentType": "text", "content": bridge.CONSENT_PHRASE + extra},
-				)
-				self.assertFalse(bridge._has_current_vacancy_consent(graph.request_graph, "MSG-1"))
-
 	def test_subject_without_vacancy_code_reaches_authorized_single_vacancy_flow(self):
 		message = self.message()
 		message["subject"] = "Solicitud para otra vacante"
@@ -554,22 +398,17 @@ class TestAyPEmailBridge(unittest.TestCase):
 		candidate = bridge._build_candidate({**self.message(), "subject": subject}, self.attachment())
 		self.assertEqual(candidate.payload["subject"], subject)
 
-	def test_consent_html_rejects_processing_instruction(self):
-		message = self.message()
-		message["body"] = {
-			"contentType": "html",
-			"content": "<?manufactured consent?><p>" + bridge.CONSENT_PHRASE + "</p>",
-		}
-		self.assertFalse(
-			bridge._has_current_vacancy_consent(lambda **kwargs: {"body": message["body"]}, "GRAPH-ID")
-		)
-
 	def test_attachment_with_malformed_declared_size_fails_closed(self):
 		attachment = self.attachment()
 		attachment["size"] = "not-an-integer"
 		selected, status = bridge._select_candidate_attachment([attachment])
 		self.assertIsNone(selected)
 		self.assertEqual(status, "blocked_candidate_attachment_size")
+
+		attachment["size"] = bridge.MAX_GRAPH_ATTACHMENT_DECLARED_BYTES + 1
+		selected, status = bridge._select_candidate_attachment([attachment])
+		self.assertIsNone(selected)
+		self.assertEqual(status, "blocked_candidate_cv_size")
 
 	def test_attachment_change_between_metadata_and_content_fails_closed(self):
 		metadata = {key: value for key, value in self.attachment().items() if key != "contentBytes"}
@@ -599,14 +438,46 @@ class TestAyPEmailBridge(unittest.TestCase):
 			self.assertEqual(report["faults"], 1)
 			self.assertEqual(report["reasons"], {"graph_attachment_content_invalid": 1})
 
-	def test_hydrated_attachment_requires_valid_base64_and_exact_declared_length(self):
+	def test_hydrated_attachment_requires_valid_base64(self):
 		metadata = {key: value for key, value in self.attachment().items() if key != "contentBytes"}
-		for content in ("not base64!", "JVBERi0xLjQK"):
-			with (
-				self.subTest(content=content),
-				self.assertRaisesRegex(bridge.BridgeError, "graph_attachment_content_invalid"),
-			):
-				bridge._validate_hydrated_attachment(metadata, {**metadata, "contentBytes": content})
+		with self.assertRaisesRegex(bridge.BridgeError, "graph_attachment_content_invalid"):
+			bridge._validate_hydrated_attachment(metadata, {**metadata, "contentBytes": "not base64!"})
+
+	def test_graph_size_overhead_does_not_replace_actual_byte_validation(self):
+		overhead = 294
+		metadata = {
+			key: (value + overhead if key == "size" else value)
+			for key, value in self.attachment().items()
+			if key != "contentBytes"
+		}
+		hydrated = {**self.attachment(), "size": metadata["size"]}
+		bridge._validate_hydrated_attachment(metadata, hydrated)
+		candidate = bridge._build_candidate(self.message(), hydrated)
+		self.assertNotIn("size", candidate.payload["attachments"][0])
+
+		boundary_metadata = {
+			**metadata,
+			"size": bridge.MAX_CV_BYTES + overhead,
+		}
+		selected, outcome = bridge._select_candidate_attachment([boundary_metadata], require_content=False)
+		self.assertIs(selected, boundary_metadata)
+		self.assertEqual(outcome, "candidate")
+
+	def test_actual_hydrated_bytes_cannot_exceed_limit_hidden_by_declared_size(self):
+		content = b"x" * (bridge.MAX_CV_BYTES + 1)
+		metadata = {
+			**{key: value for key, value in self.attachment().items() if key != "contentBytes"},
+			"size": 1,
+		}
+		hydrated = {
+			**metadata,
+			"contentBytes": base64.b64encode(content).decode("ascii"),
+		}
+		with self.assertRaisesRegex(bridge.AdmissionBlock, "blocked_candidate_cv_size"):
+			bridge._validate_hydrated_attachment(metadata, hydrated)
+
+		with self.assertRaisesRegex(bridge.AdmissionBlock, "blocked_candidate_cv_size"):
+			bridge._validate_hydrated_attachment(metadata, {**metadata, "contentBytes": ""})
 
 	def test_hydrated_identity_types_are_retryable_faults_without_state_or_ingest(self):
 		metadata = {key: value for key, value in self.attachment().items() if key != "contentBytes"}
@@ -623,7 +494,7 @@ class TestAyPEmailBridge(unittest.TestCase):
 					if "/attachments/" in base_url:
 						return hydrated
 					if "?$select=body" in kwargs["url"]:
-						return {"body": {"contentType": "text", "content": bridge.CONSENT_PHRASE}}
+						return {"body": {"contentType": "text", "content": "legacy body must not be read"}}
 					return {"value": [self.message()]}
 
 				graph = types.SimpleNamespace(request_graph=request_graph)
@@ -802,7 +673,7 @@ class TestAyPEmailBridge(unittest.TestCase):
 			if "/attachments/" in base_url:
 				return self.attachment()
 			if "?$select=body" in url:
-				return {"body": {"contentType": "text", "content": bridge.CONSENT_PHRASE}}
+				return {"body": {"contentType": "text", "content": "legacy body must not be read"}}
 			if "$skiptoken=older-header-valid" in url:
 				return {"value": [valid]}
 			return {"value": invalid_messages, "@odata.nextLink": older_url}
@@ -924,7 +795,7 @@ class TestAyPEmailBridge(unittest.TestCase):
 				return {
 					"body": {
 						"contentType": "text",
-						"content": bridge.CONSENT_PHRASE,
+						"content": "legacy body must not be read",
 					}
 				}
 			if "$skiptoken=older-valid" in url:
@@ -954,65 +825,6 @@ class TestAyPEmailBridge(unittest.TestCase):
 			self.assertEqual(second["faults"], 0)
 			remote.assert_called_once()
 			self.assertTrue(any("$skiptoken=older-valid" in url for url in calls))
-
-	def test_limit_sized_oversized_bodies_are_terminal_and_cannot_starve_older_mail(self):
-		oversized_messages = [
-			{
-				**self.message(),
-				"id": f"OVERSIZED-{index}",
-				"internetMessageId": f"<oversized-{index}@example.test>",
-			}
-			for index in range(10)
-		]
-		valid = {
-			**self.message(),
-			"id": "VALID-AFTER-OVERSIZED",
-			"internetMessageId": "<valid-after-oversized@example.test>",
-		}
-		older_url = (
-			"https://graph.microsoft.com/v1.0/users/empleos@aroypedal.com/"
-			"mailFolders/inbox/messages?$skiptoken=after-oversized"
-		)
-		metadata = {key: value for key, value in self.attachment().items() if key != "contentBytes"}
-		oversized_body = bridge.CONSENT_PHRASE + ("x" * bridge.MAX_MESSAGE_BODY_CHARS)
-		calls: list[str] = []
-
-		def request_graph(**kwargs):
-			url = kwargs["url"]
-			calls.append(url)
-			base_url = url.split("?", 1)[0]
-			if "/attachments/" in base_url:
-				return self.attachment()
-			if base_url.endswith("/attachments"):
-				return {"value": [metadata]}
-			if "?$select=body" in url:
-				body = oversized_body if "/messages/OVERSIZED-" in url else bridge.CONSENT_PHRASE
-				return {"body": {"contentType": "text", "content": body}}
-			if "$skiptoken=after-oversized" in url:
-				return {"value": [valid]}
-			return {"value": oversized_messages, "@odata.nextLink": older_url}
-
-		graph = types.SimpleNamespace(request_graph=request_graph)
-		with (
-			tempfile.TemporaryDirectory() as tmp,
-			patch.object(bridge, "_load_graph_client", return_value=graph),
-			patch.object(bridge, "_remote_ingest") as remote,
-			contextlib.redirect_stdout(io.StringIO()),
-		):
-			state_path = Path(tmp) / "state.json"
-			first = bridge.run(dry_run=False, limit=10, report_json=False, state_path=state_path)
-			self.assertEqual(first["blocked"], 10)
-			self.assertEqual(first["faults"], 0)
-			remote.assert_not_called()
-			self.assertFalse(any("/attachments/ATT-1" in url for url in calls))
-			self.assertEqual(len(bridge._load_state(state_path)["messages"]), 10)
-
-			remote.return_value = {"status": "created", "applicant": "APP-AFTER-OVERSIZED"}
-			second = bridge.run(dry_run=False, limit=10, report_json=False, state_path=state_path)
-			self.assertEqual(second["created"], 1)
-			self.assertEqual(second["faults"], 0)
-			remote.assert_called_once()
-			self.assertTrue(any("$skiptoken=after-oversized" in url for url in calls))
 
 	def test_message_pagination_persists_validated_progress_beyond_one_thousand(self):
 		known = self.message()
@@ -1373,33 +1185,6 @@ class TestAyPEmailBridge(unittest.TestCase):
 					json.loads(output.getvalue())["reasons"],
 					{"graph_attachment_metadata_invalid": 1},
 				)
-
-	def test_malformed_body_content_type_is_retryable_without_state_or_ingest(self):
-		metadata = {key: value for key, value in self.attachment().items() if key != "contentBytes"}
-		for content_type in (None, 1, False, [], {}, "markdown"):
-			with self.subTest(content_type=content_type), tempfile.TemporaryDirectory() as tmp:
-
-				def request_graph(**kwargs):
-					if kwargs["url"].split("?", 1)[0].endswith("/attachments"):
-						return {"value": [metadata]}
-					if "?$select=body" in kwargs["url"]:
-						return {"body": {"contentType": content_type, "content": bridge.CONSENT_PHRASE}}
-					return {"value": [self.message()]}
-
-				graph = types.SimpleNamespace(request_graph=request_graph)
-				with (
-					patch.object(bridge, "_load_graph_client", return_value=graph),
-					patch.object(bridge, "_remote_ingest") as remote,
-					patch.object(bridge, "_exclusive_lock", return_value=contextlib.nullcontext()),
-					contextlib.redirect_stdout(io.StringIO()) as output,
-				):
-					state_path = Path(tmp) / "state.json"
-					with patch.object(sys, "argv", [str(SCRIPT), "--state", str(state_path)]):
-						return_code = bridge.main()
-				self.assertEqual(return_code, 2)
-				self.assertFalse(state_path.exists())
-				remote.assert_not_called()
-				self.assertEqual(json.loads(output.getvalue())["reasons"], {"message_body_invalid": 1})
 
 	def test_identity_uses_full_digest_of_mailbox_and_immutable_graph_id(self):
 		first = self.message()
