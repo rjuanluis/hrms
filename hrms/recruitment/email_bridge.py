@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import re
+import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import NoReturn
@@ -15,16 +16,28 @@ from frappe import _
 from frappe.utils import validate_email_address
 from frappe.utils.file_manager import get_content_hash
 
+from hrms.recruitment.ats_vacancy_reference import (
+	AUTHORIZED_JOB_OPENING,
+	subject_has_only_authorized_vacancy_references,
+)
 from hrms.recruitment.matching import EMAIL_RECRUITMENT_SOURCE, normalize_email
 from hrms.security.candidate_cv import (
 	MAX_CV_BYTES,
+	CandidateCVScanUnavailableError,
 	CandidateCVSecurityError,
 	read_stored_candidate_cv_bytes,
 	scan_stored_candidate_cv,
 	validate_cv_file,
 )
 
-DEFAULT_JOB_OPENING = "HR-OPN-2026-0001"
+DEFAULT_JOB_OPENING = AUTHORIZED_JOB_OPENING
+JOB_OPENING_LOCK_SQL = """
+	SELECT `name`, `status`
+	FROM `tabJob Opening`
+	ORDER BY `name`
+	FOR UPDATE
+"""
+TRANSACTION_ISOLATION_SQL = "SELECT @@transaction_isolation AS transaction_isolation"
 RECRUITMENT_MAILBOX = "empleos@aroypedal.com"
 JOB_OPENING_CONFIG_KEY = "ayp_email_bridge_job_opening"
 EMAIL_PROVENANCE_FIELD = "custom_ayp_email_provenance"
@@ -35,28 +48,40 @@ SUBJECT_FIELD = "custom_ayp_email_subject"
 CURRENT_VACANCY_CONSENT_FIELD = "custom_ayp_email_current_vacancy_consent"
 CONSENT_NOTICE_FIELD = "custom_ayp_email_consent_notice_version"
 CONSENT_EVIDENCE_FIELD = "custom_ayp_email_consent_evidence_sha256"
-EMAIL_CONSENT_NOTICE_VERSION = "AYP-RH-EMAIL-CURRENT-VACANCY-2026-08-15-v1"
-CONSENT_EVIDENCE_FORMAT = "AYP-EMAIL-CONSENT-EVIDENCE-V1"
-NORMALIZED_CONSENT_PHRASE = (
-	"he leido el aviso de privacidad de aro y pedal y autorizo el tratamiento "
-	"de mis datos exclusivamente para esta vacante"
-)
+EMAIL_CONSENT_NOTICE_VERSION = "AYP-RH-EMAIL-DIRECT-SUBMISSION-2026-08-19-v1"
+CONSENT_EVIDENCE_FORMAT = "AYP-EMAIL-DIRECT-SUBMISSION-EVIDENCE-V1"
+CONSENT_BASIS = "direct_email_submission_to_recruitment_mailbox"
 MAX_DATA_LENGTH = 140
+MAX_CANDIDATE_FILENAME_BYTES = 240
+MAX_SUBJECT_LENGTH = 4096
 MAX_RAW_MESSAGE_ID_LENGTH = 4096
 MAX_BASE64_LENGTH = ((MAX_CV_BYTES + 2) // 3) * 4
 CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
-JOB_OPENING_SUBJECT_PATTERN = re.compile(
-	rf"(?<![A-Z0-9-]){re.escape(DEFAULT_JOB_OPENING)}(?![A-Z0-9-])",
-	re.IGNORECASE,
-)
 
 
 class EmailBridgeError(frappe.ValidationError):
 	pass
 
 
+class EmailBridgeAdmissionError(EmailBridgeError):
+	def __init__(self, code: str, message: str):
+		super().__init__(_(message))
+		self.code = code
+
+
 def _fail(message: str) -> NoReturn:
 	raise EmailBridgeError(_(message))
+
+
+def _block_admission(code: str, message: str) -> NoReturn:
+	raise EmailBridgeAdmissionError(code, message)
+
+
+def _filename_exceeds_storage_bytes(value: str) -> bool:
+	try:
+		return len(value.encode("utf-8")) > MAX_CANDIDATE_FILENAME_BYTES
+	except UnicodeEncodeError:
+		return True
 
 
 def _clean_data(value, *, label: str, required: bool = True, max_length: int = MAX_DATA_LENGTH) -> str:
@@ -92,7 +117,7 @@ def _consent_evidence_sha256(payload: dict) -> str:
 	if not isinstance(received_on, str) or not received_on.strip() or len(received_on) > 64:
 		_fail("La fecha de recepción no es válida.")
 	evidence = {
-		"canonical_consent": NORMALIZED_CONSENT_PHRASE,
+		"basis": CONSENT_BASIS,
 		"format": CONSENT_EVIDENCE_FORMAT,
 		"graph_message_id": graph_id,
 		"mailbox": RECRUITMENT_MAILBOX,
@@ -111,15 +136,44 @@ def _consent_evidence_sha256(payload: dict) -> str:
 	return expected
 
 
+def _has_identity_control(value: str) -> bool:
+	return any(unicodedata.category(character) in {"Cc", "Cf", "Cs"} for character in value)
+
+
 def _sender(payload: dict) -> tuple[str, str]:
-	email = _clean_data(payload.get("sender_email"), label="El correo del remitente")
-	if any(character in email for character in (",", ";", "\r", "\n")):
+	raw_email = payload.get("sender_email")
+	if not isinstance(raw_email, str):
 		_fail("El correo del remitente no es válido.")
+	email = " ".join(raw_email.split())
+	if (
+		not email
+		or len(email) > MAX_DATA_LENGTH
+		or _has_identity_control(raw_email)
+		or any(character in email for character in (",", ";"))
+	):
+		_block_admission(
+			"blocked_sender_identity",
+			"El correo del remitente no cumple la política de admisión.",
+		)
 	try:
 		validate_email_address(email, throw=True)
 	except Exception as exc:
-		raise EmailBridgeError(_("El correo del remitente no es válido.")) from exc
-	name = _clean_data(payload.get("sender_name"), label="El nombre del remitente")
+		raise EmailBridgeAdmissionError(
+			"blocked_sender_identity",
+			"El correo del remitente no cumple la política de admisión.",
+		) from exc
+	raw_name = payload.get("sender_name")
+	if not isinstance(raw_name, str):
+		_fail("El nombre del remitente no es válido.")
+	name = " ".join(raw_name.split())
+	if not name:
+		_fail("El nombre del remitente es obligatorio.")
+	if _has_identity_control(name):
+		_block_admission(
+			"blocked_sender_identity",
+			"El nombre del remitente no cumple la política de admisión.",
+		)
+	name = name[:MAX_DATA_LENGTH]
 	return normalize_email(email), name
 
 
@@ -136,6 +190,14 @@ def _received_on(payload: dict) -> datetime:
 	return parsed.astimezone(timezone.utc).replace(tzinfo=None)
 
 
+def _require_compatible_subject_vacancy(subject: str) -> None:
+	if not subject_has_only_authorized_vacancy_references(subject):
+		_block_admission(
+			"blocked_explicit_vacancy_mismatch",
+			"El asunto contiene un código de vacante distinto de la vacante autorizada.",
+		)
+
+
 def _attachment(payload: dict) -> tuple[str, bytes, str]:
 	attachments = payload.get("attachments")
 	if not isinstance(attachments, list) or len(attachments) != 1:
@@ -143,9 +205,20 @@ def _attachment(payload: dict) -> tuple[str, bytes, str]:
 	attachment = attachments[0]
 	if not isinstance(attachment, dict):
 		_fail("El adjunto no es válido.")
-	filename = _clean_data(attachment.get("name"), label="El nombre del archivo")
-	if "/" in filename or "\\" in filename or filename in {".", ".."}:
-		_fail("El nombre del archivo no es válido.")
+	raw_filename = attachment.get("name")
+	if isinstance(raw_filename, str) and (
+		len(raw_filename) > MAX_DATA_LENGTH
+		or _filename_exceeds_storage_bytes(raw_filename)
+		or raw_filename in {".", ".."}
+		or "/" in raw_filename
+		or "\\" in raw_filename
+		or CONTROL_CHARACTERS.search(raw_filename)
+	):
+		_block_admission(
+			"blocked_candidate_cv_security",
+			"El nombre del CV no supera la validación determinística de seguridad.",
+		)
+	filename = _clean_data(raw_filename, label="El nombre del archivo")
 	encoded = attachment.get("content_base64")
 	if not isinstance(encoded, str) or not encoded or len(encoded) > MAX_BASE64_LENGTH:
 		_fail("El contenido base64 del CV no es válido o excede 5 MB.")
@@ -154,7 +227,15 @@ def _attachment(payload: dict) -> tuple[str, bytes, str]:
 		content = base64.b64decode(encoded_bytes, validate=True)
 	except (UnicodeEncodeError, binascii.Error, ValueError) as exc:
 		raise EmailBridgeError(_("El contenido base64 del CV no es válido.")) from exc
-	validate_cv_file(filename, content)
+	try:
+		validate_cv_file(filename, content)
+	except CandidateCVScanUnavailableError:
+		raise
+	except CandidateCVSecurityError:
+		_block_admission(
+			"blocked_candidate_cv_security",
+			"El CV no supera la validación determinística de formato y seguridad.",
+		)
 	return filename, content, hashlib.sha256(content).hexdigest()
 
 
@@ -182,28 +263,58 @@ def _save_detached_private_file(filename: str, content: bytes):
 	return file_doc
 
 
+def _require_repeatable_read() -> None:
+	rows = frappe.db.sql(TRANSACTION_ISOLATION_SQL, (), as_dict=True)
+	if len(rows) != 1:
+		_fail("No se pudo verificar el aislamiento de la transacción del canal de correo.")
+	value = str(rows[0].get("transaction_isolation") or "").strip().upper().replace("_", "-")
+	if value != "REPEATABLE-READ":
+		_fail("La transacción del canal de correo no usa el aislamiento autorizado.")
+
+
 def _job_opening() -> str:
 	configured = frappe.conf.get(JOB_OPENING_CONFIG_KEY)
 	job_opening = str(configured or DEFAULT_JOB_OPENING).strip()
 	if job_opening != DEFAULT_JOB_OPENING:
-		_fail("La vacante configurada no es la vacante autorizada para el canal de correo.")
-	if not job_opening or frappe.db.get_value("Job Opening", job_opening, "status") != "Open":
-		_fail("La vacante configurada no está abierta.")
+		_block_admission(
+			"blocked_authorized_vacancy_configuration",
+			"La vacante configurada no es la vacante autorizada para el canal de correo.",
+		)
+	_require_repeatable_read()
+	# Lock the complete authoritative set, not only currently-open rows. Under
+	# InnoDB's transaction isolation this prevents an opening from changing
+	# status or being inserted between authorization and applicant insertion.
+	job_opening_rows = frappe.db.sql(JOB_OPENING_LOCK_SQL, (), as_dict=True)
+	open_job_openings = sorted(
+		{
+			str(row.get("name") or "").strip()
+			for row in job_opening_rows
+			if row.get("status") == "Open" and str(row.get("name") or "").strip()
+		}
+	)
+	if open_job_openings != [job_opening]:
+		_block_admission(
+			"blocked_single_open_vacancy_required",
+			"El canal de correo requiere exactamente una vacante abierta y autorizada.",
+		)
 	return job_opening
 
 
-def _require_current_vacancy_consent(payload: dict) -> None:
-	subject = _clean_data(payload.get("subject"), label="El asunto", required=False)
-	if not JOB_OPENING_SUBJECT_PATTERN.search(subject):
-		_fail("El asunto no identifica la vacante autorizada.")
+def _require_direct_submission_consent(payload: dict) -> None:
 	if payload.get("consent_current_vacancy") is not True:
-		_fail("Falta el consentimiento explícito para procesar la solicitud de esta vacante.")
+		_fail("Falta la constancia de envío directo para procesar la solicitud de esta vacante.")
+	basis = _clean_data(
+		payload.get("consent_basis"),
+		label="La base del consentimiento por correo",
+	)
+	if basis != CONSENT_BASIS:
+		_fail("La base del consentimiento por correo no está autorizada.")
 	version = _clean_data(
 		payload.get("consent_notice_version"),
-		label="La versión del aviso de consentimiento",
+		label="La versión de la política de consentimiento por envío",
 	)
 	if version != EMAIL_CONSENT_NOTICE_VERSION:
-		_fail("La versión del aviso de consentimiento no está autorizada.")
+		_fail("La versión de la política de consentimiento por envío no está autorizada.")
 
 
 def _require_configuration() -> None:
@@ -412,11 +523,26 @@ def ingest_email_payload(payload: dict) -> dict:
 
 	_require_configuration()
 	message_key = _message_key(payload)
-	_require_current_vacancy_consent(payload)
+	_require_direct_submission_consent(payload)
 	consent_evidence_sha256 = _consent_evidence_sha256(payload)
 	sender_email, sender_name = _sender(payload)
 	received_on = _received_on(payload)
-	subject = _clean_data(payload.get("subject"), label="El asunto", required=False)
+	raw_subject = payload.get("subject")
+	if isinstance(raw_subject, str) and (
+		len(raw_subject) > MAX_SUBJECT_LENGTH or CONTROL_CHARACTERS.search(raw_subject)
+	):
+		_block_admission(
+			"blocked_candidate_subject",
+			"El asunto no cumple la política de admisión del canal de correo.",
+		)
+	full_subject = _clean_data(
+		raw_subject,
+		label="El asunto",
+		required=False,
+		max_length=MAX_SUBJECT_LENGTH,
+	)
+	_require_compatible_subject_vacancy(full_subject)
+	subject = full_subject[:MAX_DATA_LENGTH]
 	filename, content, attachment_sha256 = _attachment(payload)
 	job_opening = _job_opening()
 
@@ -448,10 +574,28 @@ def ingest_email_payload(payload: dict) -> dict:
 		)
 	)
 	try:
+		# Re-read under the same transaction lock immediately before any private
+		# file is stored. This also detects unexpected in-process authority drift.
+		if _job_opening() != job_opening:
+			_block_admission(
+				"blocked_single_open_vacancy_required",
+				"La vacante autorizada cambió durante la admisión del correo.",
+			)
 		file_doc = _save_detached_private_file(filename, content)
-		stored_sha256 = scan_stored_candidate_cv(file_doc)
+		try:
+			stored_sha256 = scan_stored_candidate_cv(file_doc)
+		except CandidateCVScanUnavailableError:
+			raise
+		except CandidateCVSecurityError:
+			_block_admission(
+				"blocked_candidate_cv_security",
+				"El CV almacenado no supera la validación determinística de seguridad.",
+			)
 		if stored_sha256 != attachment_sha256:
-			raise CandidateCVSecurityError(_("No se pudo verificar la integridad del CV almacenado."))
+			_block_admission(
+				"blocked_candidate_cv_security",
+				"La evidencia del CV almacenado no coincide con el contenido validado.",
+			)
 
 		applicant = frappe.get_doc(
 			{
@@ -462,8 +606,8 @@ def ingest_email_payload(payload: dict) -> dict:
 				"job_title": job_opening,
 				"source": EMAIL_RECRUITMENT_SOURCE,
 				"resume_attachment": file_doc.file_url,
-				# This existing field includes future-opportunity consent. Email
-				# applicants never receive that status from the current-vacancy phrase.
+				# This existing field covers future-opportunity consent. A direct
+				# submission grants processing only for the current hiring process.
 				"custom_data_processing_consent": 0,
 				"custom_privacy_notice_version": EMAIL_CONSENT_NOTICE_VERSION,
 				"custom_candidate_profile": None,

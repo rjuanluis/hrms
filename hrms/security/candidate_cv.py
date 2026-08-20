@@ -23,6 +23,7 @@ MAX_CV_BYTES = 5 * 1024 * 1024
 MAX_DOCX_UNCOMPRESSED_BYTES = 20 * 1024 * 1024
 MAX_DOCX_ENTRIES = 1000
 PDF_VALIDATION_TIMEOUT_SECONDS = 7
+PDF_VALIDATOR_INVALID_CONTENT = 2
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".heic", ".heif", ".jpeg", ".jpg", ".png"}
 PDF_NAME_ESCAPE = re.compile(rb"#([0-9a-fA-F]{2})")
 PRIVACY_NOTICE_VERSION = "AYP-RH-2026-07-17-v3"
@@ -44,6 +45,10 @@ CANDIDATE_CV_EVIDENCE_FIELDS = (
 
 class CandidateCVSecurityError(frappe.ValidationError):
 	pass
+
+
+class CandidateCVScanUnavailableError(CandidateCVSecurityError):
+	"""Retryable antivirus/configuration failure, not a candidate rejection."""
 
 
 def _is_bound_candidate_cv(file_doc: Any) -> bool:
@@ -161,11 +166,18 @@ def _validate_pdf(content: bytes) -> None:
 			env={"PATH": os.environ.get("PATH", "")},
 		)
 	except (OSError, subprocess.SubprocessError) as exc:
-		raise CandidateCVSecurityError(
-			_("El PDF está dañado o no supera la validación estructural.")
+		raise CandidateCVScanUnavailableError(
+			_("El validador estructural de PDF no está disponible temporalmente.")
 		) from exc
-	if completed.returncode != 0:
+	if completed.returncode == PDF_VALIDATOR_INVALID_CONTENT:
 		raise CandidateCVSecurityError(_("El PDF está dañado, protegido o contiene contenido activo."))
+	if completed.returncode != 0:
+		# The child reserves code 2 for deterministic content rejection. Limit
+		# setup, parser import, signals and unknown process failures are runtime
+		# availability faults and must never become a permanent candidate block.
+		raise CandidateCVScanUnavailableError(
+			_("El validador estructural de PDF no está disponible temporalmente.")
+		)
 
 
 def _validate_docx(content: bytes) -> None:
@@ -202,7 +214,7 @@ def _validate_docx(content: bytes) -> None:
 					relationship_type = relationship.attrib.get("Type", "").lower()
 					if not relationship_type.endswith("/hyperlink"):
 						raise CandidateCVSecurityError(_("El DOCX contiene recursos externos no permitidos."))
-	except zipfile.BadZipFile as exc:
+	except (zipfile.BadZipFile, NotImplementedError) as exc:
 		raise CandidateCVSecurityError(_("El archivo no es un DOCX válido.")) from exc
 
 
@@ -276,7 +288,7 @@ def _scan_candidate_cv(content: bytes) -> None:
 			title="Candidate CV antivirus unavailable",
 			message=f"ClamAV validation failed: {type(exc).__name__}: {exc}",
 		)
-		raise CandidateCVSecurityError(
+		raise CandidateCVScanUnavailableError(
 			_("No pudimos validar el CV de forma segura. Intenta nuevamente en unos minutos.")
 		) from exc
 
@@ -286,7 +298,7 @@ def scan_stored_candidate_cv(file_doc) -> str:
 
 	security_fields = ("custom_av_scan_status", "custom_av_scan_engine", "custom_av_scanned_on")
 	if not all(_file_has_column(fieldname) for fieldname in security_fields):
-		raise CandidateCVSecurityError(
+		raise CandidateCVScanUnavailableError(
 			_("El control antivirus todavía no está disponible. Intenta nuevamente en unos minutos.")
 		)
 	if not file_doc.is_private or not (file_doc.file_url or "").startswith("/private/files/"):
@@ -349,7 +361,7 @@ def mark_scanned_candidate_cv_file(file_doc, method=None) -> None:
 
 	av_fields = ("custom_av_scan_status", "custom_av_scan_engine", "custom_av_scanned_on")
 	if not all(_file_has_column(fieldname) for fieldname in av_fields):
-		raise CandidateCVSecurityError(
+		raise CandidateCVScanUnavailableError(
 			_("El control antivirus todavía no está disponible. Intenta nuevamente en unos minutos.")
 		)
 	content = read_stored_candidate_cv_bytes(file_doc)
@@ -397,7 +409,7 @@ def validate_job_applicant_cv(doc, method=None) -> None:
 	if not all(
 		frappe.db.has_column("File", fieldname) for fieldname in file_security_fields
 	) or not frappe.db.has_column("Job Applicant", "custom_cv_sha256"):
-		raise CandidateCVSecurityError(
+		raise CandidateCVScanUnavailableError(
 			_("El control antivirus todavía no está disponible. Intenta nuevamente en unos minutos.")
 		)
 

@@ -9,6 +9,7 @@ from frappe.utils import now_datetime
 from hrms.recruitment.candidate_document_processing import DocumentProcessingError, extract_candidate_document
 from hrms.recruitment.matching import EMAIL_RECRUITMENT_SOURCE, has_email_recruitment_provenance
 from hrms.security.candidate_cv import (
+	CandidateCVScanUnavailableError,
 	CandidateCVSecurityError,
 	read_stored_candidate_cv_bytes,
 	validate_cv_file,
@@ -260,6 +261,8 @@ def revalidate_candidate_document(applicant) -> None:
 		)
 	try:
 		_load_exact_cv(applicant)
+	except CandidateCVScanUnavailableError:
+		raise
 	except CandidateCVSecurityError:
 		frappe.throw(
 			_("El CV no coincide con un archivo privado y limpio validado por antivirus."),
@@ -305,6 +308,36 @@ def _persist_result(
 	)
 	# Persist the terminal CAS result before this background job exits so a
 	# retry cannot observe the prior in-progress claim.
+	frappe.db.commit()  # nosemgrep
+	return True
+
+
+def _release_for_retry(applicant_name: str, expected_sha256: str, claim: str) -> bool:
+	"""Release an exact processing claim without manufacturing terminal evidence."""
+
+	applicant = _locked_applicant(applicant_name)
+	if (
+		(applicant.custom_cv_sha256 or "") != expected_sha256
+		or applicant.custom_cv_processing_status != "Procesando"
+		or (applicant.custom_cv_processing_claim or "") != claim
+	):
+		frappe.db.rollback()
+		return False
+	applicant.db_set(
+		{
+			"custom_cv_processing_status": "Pendiente",
+			"custom_cv_processing_detail": (
+				"El validador de seguridad no estuvo disponible; el trabajo será reintentado."
+			),
+			"custom_cv_processing_queued_on": None,
+			"custom_cv_processing_started_on": None,
+			"custom_cv_processing_claim": "",
+			"custom_cv_processor_version": PROCESSOR_VERSION,
+		},
+		update_modified=False,
+	)
+	# The hourly reconciler treats a null queue timestamp as immediately
+	# recoverable and enqueues it after that transaction commits.
 	frappe.db.commit()  # nosemgrep
 	return True
 
@@ -370,6 +403,9 @@ def process_candidate_document(applicant_name: str, expected_sha256: str) -> dic
 			page_count=result.page_count,
 		)
 		return {"status": status if persisted else "superseded"}
+	except CandidateCVScanUnavailableError:
+		released = _release_for_retry(applicant_name, expected_sha256, claim)
+		return {"status": "retryable-unavailable" if released else "superseded"}
 	except CandidateCVSecurityError:
 		persisted = _persist_result(
 			applicant_name,

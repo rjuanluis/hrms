@@ -9,6 +9,7 @@ import types
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER_PATH = ROOT / "deploy" / "ayp_ats_email_bridge.py"
@@ -25,6 +26,14 @@ if MATCHING_SPEC is None or MATCHING_SPEC.loader is None:
 MATCHING_MODULE = importlib.util.module_from_spec(MATCHING_SPEC)
 MATCHING_SPEC.loader.exec_module(MATCHING_MODULE)
 EMAIL_RECRUITMENT_SOURCE = MATCHING_MODULE.EMAIL_RECRUITMENT_SOURCE
+VACANCY_REFERENCE_PATH = ROOT / "hrms" / "recruitment" / "ats_vacancy_reference.py"
+VACANCY_REFERENCE_SPEC = importlib.util.spec_from_file_location(
+	"ats_vacancy_reference_under_test", VACANCY_REFERENCE_PATH
+)
+if VACANCY_REFERENCE_SPEC is None or VACANCY_REFERENCE_SPEC.loader is None:
+	raise ImportError(f"Could not load {VACANCY_REFERENCE_PATH}")
+VACANCY_REFERENCE_MODULE = importlib.util.module_from_spec(VACANCY_REFERENCE_SPEC)
+VACANCY_REFERENCE_SPEC.loader.exec_module(VACANCY_REFERENCE_MODULE)
 
 
 class FakeValidationError(Exception):
@@ -36,6 +45,10 @@ class FakeDuplicateEntryError(FakeValidationError):
 
 
 class FakeCandidateCVSecurityError(FakeValidationError):
+	pass
+
+
+class FakeCandidateCVScanUnavailableError(FakeCandidateCVSecurityError):
 	pass
 
 
@@ -84,9 +97,14 @@ class FakeDB:
 		raise AssertionError(f"Unexpected get_value call: {(doctype, filters, fieldname, as_dict)}")
 
 	def sql(self, query, params, as_dict=False):
+		if "@@transaction_isolation" in query:
+			return [FakeRow({"transaction_isolation": self.owner.transaction_isolation})]
 		if "FOR UPDATE" not in query:
 			raise AssertionError(f"Unexpected SQL: {query}")
 		self.owner.locking_reads += 1
+		if "FROM `tabJob Opening`" in query:
+			self.owner.locking_read_tables.append("Job Opening")
+			return [FakeRow({"name": name, "status": "Open"}) for name in self.owner.open_job_openings]
 		if "FROM `tabJob Applicant`" in query:
 			self.owner.locking_read_tables.append("Job Applicant")
 			row = self.owner.applicants_by_message.get(params[0])
@@ -198,6 +216,8 @@ class FakeFrappe(types.ModuleType):
 		self.conf = {}
 		self.db = FakeDB(self)
 		self.job_opening_status = "Open"
+		self.open_job_openings = ["HR-OPN-2026-0001"]
+		self.transaction_isolation = "REPEATABLE-READ"
 		self.files_by_url = {}
 		self.files_by_name = {}
 		self.deleted_files = []
@@ -229,6 +249,8 @@ class FakeFrappe(types.ModuleType):
 		self.deleted_files.append((doctype, name, kwargs))
 
 	def get_all(self, doctype, filters=None, pluck=None):
+		if doctype == "Job Opening" and filters == {"status": "Open"} and pluck == "name":
+			return list(self.open_job_openings)
 		if doctype != "File" or pluck != "name":
 			raise AssertionError(f"Unexpected get_all call: {(doctype, filters, pluck)}")
 		return sorted(self.preexisting_file_names)
@@ -249,6 +271,7 @@ def load_email_bridge(fake_frappe):
 		"frappe.utils",
 		"frappe.utils.file_manager",
 		"hrms.recruitment.matching",
+		"hrms.recruitment.ats_vacancy_reference",
 		"hrms.security.candidate_cv",
 	)
 	original_modules = {name: sys.modules.get(name) for name in module_names}
@@ -273,6 +296,7 @@ def load_email_bridge(fake_frappe):
 	candidate_cv = types.ModuleType("hrms.security.candidate_cv")
 	candidate_cv.MAX_CV_BYTES = 32
 	candidate_cv.CandidateCVSecurityError = FakeCandidateCVSecurityError
+	candidate_cv.CandidateCVScanUnavailableError = FakeCandidateCVScanUnavailableError
 
 	def validate_cv_file(filename, content):
 		if not filename.lower().endswith((".pdf", ".doc", ".docx", ".png", ".jpg", ".jpeg")):
@@ -298,6 +322,7 @@ def load_email_bridge(fake_frappe):
 		sys.modules["frappe.utils"] = frappe_utils
 		sys.modules["frappe.utils.file_manager"] = file_manager
 		sys.modules["hrms.recruitment.matching"] = MATCHING_MODULE
+		sys.modules["hrms.recruitment.ats_vacancy_reference"] = VACANCY_REFERENCE_MODULE
 		sys.modules["hrms.security.candidate_cv"] = candidate_cv
 		spec = importlib.util.spec_from_file_location("email_bridge_under_test", MODULE_PATH)
 		if spec is None or spec.loader is None:
@@ -321,7 +346,8 @@ def email_payload(content=b"synthetic cv"):
 		"sender_email": "Candidate@Example.com",
 		"sender_name": "Candidate Example",
 		"consent_current_vacancy": True,
-		"consent_notice_version": "AYP-RH-EMAIL-CURRENT-VACANCY-2026-08-15-v1",
+		"consent_basis": "direct_email_submission_to_recruitment_mailbox",
+		"consent_notice_version": "AYP-RH-EMAIL-DIRECT-SUBMISSION-2026-08-19-v1",
 		"attachments": [
 			{
 				"name": "candidate.pdf",
@@ -330,11 +356,8 @@ def email_payload(content=b"synthetic cv"):
 		],
 	}
 	evidence = {
-		"canonical_consent": (
-			"he leido el aviso de privacidad de aro y pedal y autorizo el tratamiento "
-			"de mis datos exclusivamente para esta vacante"
-		),
-		"format": "AYP-EMAIL-CONSENT-EVIDENCE-V1",
+		"basis": payload["consent_basis"],
+		"format": "AYP-EMAIL-DIRECT-SUBMISSION-EVIDENCE-V1",
 		"graph_message_id": payload["graph_message_id"],
 		"mailbox": "empleos@aroypedal.com",
 		"notice_version": payload["consent_notice_version"],
@@ -393,6 +416,7 @@ class TestEmailBridge(unittest.TestCase):
 			"receivedDateTime": "2026-08-15T17:14:15Z",
 			"subject": "Solicitud de empleo HR-OPN-2026-0001",
 			"sender": {"emailAddress": {"address": "ats-canary@aroypedal.com", "name": "Candidate Example"}},
+			"from": {"emailAddress": {"address": "ats-canary@aroypedal.com", "name": "Candidate Example"}},
 		}
 		attachment = {
 			"name": "candidate.pdf",
@@ -408,6 +432,61 @@ class TestEmailBridge(unittest.TestCase):
 			candidate.payload["consent_evidence_sha256"],
 		)
 
+	def test_full_subject_is_validated_before_storage_truncation(self):
+		partial_token = " HR-OPN-2026-00"
+		prefix = "A" * (self.bridge.MAX_DATA_LENGTH - len(partial_token))
+		subject = prefix + " HR-OPN-2026-0001"
+		self.assertFalse(
+			VACANCY_REFERENCE_MODULE.subject_has_only_authorized_vacancy_references(
+				subject[: self.bridge.MAX_DATA_LENGTH]
+			)
+		)
+		payload = email_payload()
+		payload["subject"] = subject
+		result = self.bridge.ingest_email_payload(payload)
+		self.assertEqual(result["status"], "created")
+		self.assertEqual(
+			self.frappe.inserted_applicants[0].custom_ayp_email_subject,
+			subject[: self.bridge.MAX_DATA_LENGTH],
+		)
+
+	def test_unsupported_exact_sender_and_subject_are_terminal_admission_blocks(self):
+		long_email = f"{'a' * 64}@{'b' * 63}.{'c' * 63}.com"
+		for field, value, expected_code in (
+			("sender_email", long_email, "blocked_sender_identity"),
+			("sender_email", "candidate\u200d@example.test", "blocked_sender_identity"),
+			("sender_name", "Bad\x00Name", "blocked_sender_identity"),
+			("sender_name", "Bad\x80Name", "blocked_sender_identity"),
+			("sender_name", "Bad\u200dName", "blocked_sender_identity"),
+			("subject", "S" * (self.bridge.MAX_SUBJECT_LENGTH + 1), "blocked_candidate_subject"),
+			("subject", "Solicitud\nHR-OPN-2026-0001", "blocked_candidate_subject"),
+		):
+			with self.subTest(field=field):
+				payload = email_payload()
+				payload[field] = value
+				with self.assertRaises(self.bridge.EmailBridgeAdmissionError) as raised:
+					self.bridge.ingest_email_payload(payload)
+				self.assertEqual(raised.exception.code, expected_code)
+		self.assertEqual(self.frappe.saved_files, [])
+
+	def test_padded_filename_is_normalized_before_private_storage(self):
+		payload = email_payload()
+		payload["attachments"][0]["name"] = " candidate.pdf "
+		result = self.bridge.ingest_email_payload(payload)
+		self.assertEqual(result["status"], "created")
+		self.assertEqual(self.frappe.saved_files[0].file_name, "candidate.pdf")
+
+	def test_pdf_validator_unavailability_is_retryable_and_stores_nothing(self):
+		with patch.object(
+			self.bridge,
+			"validate_cv_file",
+			side_effect=FakeCandidateCVScanUnavailableError("validator unavailable"),
+		):
+			with self.assertRaises(FakeCandidateCVScanUnavailableError):
+				self.bridge.ingest_email_payload(email_payload())
+		self.assertEqual(self.frappe.saved_files, [])
+		self.assertEqual(self.frappe.inserted_applicants, [])
+
 	def test_exact_duplicate_returns_existing_without_new_file_or_applicant(self):
 		first = self.bridge.ingest_email_payload(email_payload())
 		self.frappe.locking_read_tables.clear()
@@ -417,7 +496,7 @@ class TestEmailBridge(unittest.TestCase):
 		self.assertEqual(second["status"], "already_processed")
 		self.assertEqual(len(self.frappe.saved_files), 1)
 		self.assertEqual(len(self.frappe.inserted_applicants), 1)
-		self.assertEqual(self.frappe.locking_read_tables, ["Job Applicant", "File"])
+		self.assertEqual(self.frappe.locking_read_tables, ["Job Opening", "Job Applicant", "File"])
 
 	def test_duplicate_fails_closed_when_exact_file_is_missing(self):
 		self.bridge.ingest_email_payload(email_payload())
@@ -446,10 +525,10 @@ class TestEmailBridge(unittest.TestCase):
 		)
 		self.assertEqual(self.frappe.deleted_files, [])
 		self.assertEqual(self.frappe.direct_db_deletes, [("File", "FILE-1")])
-		self.assertEqual(self.frappe.locking_reads, 3)
+		self.assertEqual(self.frappe.locking_reads, 5)
 		self.assertEqual(
 			self.frappe.locking_read_tables,
-			["Job Applicant", "Job Applicant", "File"],
+			["Job Opening", "Job Applicant", "Job Opening", "Job Applicant", "File"],
 		)
 		self.assertIn("FILE-WINNER", self.frappe.files_by_name)
 
@@ -470,11 +549,18 @@ class TestEmailBridge(unittest.TestCase):
 			self.bridge.ingest_email_payload(payload)
 		self.assertEqual(self.frappe.saved_files, [])
 
-	def test_missing_or_wrong_current_vacancy_consent_fails_before_file_storage(self):
+	def test_missing_or_wrong_direct_submission_consent_fails_before_file_storage(self):
 		missing = email_payload()
 		missing["consent_current_vacancy"] = False
-		with self.assertRaisesRegex(self.bridge.EmailBridgeError, "consentimiento explícito"):
+		with self.assertRaisesRegex(self.bridge.EmailBridgeError, "constancia de envío directo"):
 			self.bridge.ingest_email_payload(missing)
+
+		wrong_basis = email_payload()
+		wrong_basis["consent_basis"] = "untrusted-basis"
+		with self.assertRaisesRegex(
+			self.bridge.EmailBridgeError, "base del consentimiento.*no está autorizada"
+		):
+			self.bridge.ingest_email_payload(wrong_basis)
 
 		wrong_version = email_payload()
 		wrong_version["consent_notice_version"] = "untrusted-version"
@@ -489,12 +575,47 @@ class TestEmailBridge(unittest.TestCase):
 			self.bridge.ingest_email_payload(payload)
 		self.assertEqual(self.frappe.saved_files, [])
 
-	def test_missing_authoritative_vacancy_fails_before_file_storage(self):
+	def test_subject_without_vacancy_code_uses_only_open_authorized_vacancy(self):
 		payload = email_payload()
 		payload["subject"] = "Solicitud para otra vacante"
-		with self.assertRaisesRegex(self.bridge.EmailBridgeError, "no identifica la vacante autorizada"):
-			self.bridge.ingest_email_payload(payload)
-		self.assertEqual(self.frappe.saved_files, [])
+		result = self.bridge.ingest_email_payload(payload)
+		self.assertEqual(result["status"], "created")
+		self.assertEqual(self.frappe.inserted_applicants[0].job_title, "HR-OPN-2026-0001")
+
+	def test_explicit_incompatible_vacancy_code_is_terminal_admission_block(self):
+		for subject in (
+			"Solicitud HR-OPN-2026-9999",
+			"HR-OPN-2026-0001 y HR-OPN-2026-9999",
+			"Solicitud HR-OPN-9999",
+			"HR-OPN-2026-0001 y HR-OPN-9999",
+			"Solicitud HR-OPN-2026-9999-",
+			"Solicitud HR-OPN-",
+			"Solicitud HR-OPN- 2026-0001",
+			"Solicitud HR-OPN-2026-0001-extra",
+			"Solicitud HR-OPN-2026-0001_",
+			"Solicitud XHR-OPN-2026-0001",
+			"Solicitud HR-OPN-2026-0001–9999",
+			"Solicitud HR-OPN-2026-0001\u0336",
+		):
+			with self.subTest(subject=subject):
+				payload = email_payload()
+				payload["subject"] = subject
+				with self.assertRaisesRegex(
+					self.bridge.EmailBridgeAdmissionError, "distinto de la vacante autorizada"
+				) as raised:
+					self.bridge.ingest_email_payload(payload)
+				self.assertEqual(raised.exception.code, "blocked_explicit_vacancy_mismatch")
+				self.assertEqual(self.frappe.saved_files, [])
+
+	def test_subject_vacancy_parser_allows_no_code_or_only_exact_authorized_code(self):
+		for subject in (
+			"Solicitud para ventas en línea",
+			"Solicitud HR-OPN-2026-0001",
+			"hr-opn-2026-0001: solicitud",
+			"HR-OPN-2026-0001 y HR-OPN-2026-0001",
+		):
+			with self.subTest(subject=subject):
+				self.bridge._require_compatible_subject_vacancy(subject)
 
 	def test_invalid_base64_and_oversize_fail_before_file_storage(self):
 		invalid = email_payload()
@@ -503,14 +624,103 @@ class TestEmailBridge(unittest.TestCase):
 			self.bridge.ingest_email_payload(invalid)
 
 		oversized = email_payload(b"x" * 33)
-		with self.assertRaises((self.bridge.EmailBridgeError, FakeCandidateCVSecurityError)):
+		with self.assertRaisesRegex(
+			self.bridge.EmailBridgeAdmissionError, "validación determinística"
+		) as raised:
 			self.bridge.ingest_email_payload(oversized)
+		self.assertEqual(raised.exception.code, "blocked_candidate_cv_security")
 		self.assertEqual(self.frappe.saved_files, [])
+
+	def test_unsafe_candidate_filename_is_terminal_security_block(self):
+		for filename in (
+			"../cv.pdf",
+			"folder/cv.pdf",
+			"folder\\cv.pdf",
+			"cv\x00.pdf",
+			f"{'a' * self.bridge.MAX_DATA_LENGTH}x.pdf",
+			"é" * 136 + ".png",
+		):
+			with self.subTest(filename=filename):
+				payload = email_payload()
+				payload["attachments"][0]["name"] = filename
+				with self.assertRaisesRegex(
+					self.bridge.EmailBridgeAdmissionError, "validación determinística"
+				) as raised:
+					self.bridge.ingest_email_payload(payload)
+				self.assertEqual(raised.exception.code, "blocked_candidate_cv_security")
+				self.assertEqual(self.frappe.saved_files, [])
+
+	def test_stored_cv_security_rejection_is_terminal_but_scanner_outage_is_retryable(self):
+		with (
+			patch.object(
+				self.bridge,
+				"scan_stored_candidate_cv",
+				side_effect=FakeCandidateCVSecurityError("malware found"),
+			),
+			self.assertRaisesRegex(
+				self.bridge.EmailBridgeAdmissionError, "validación determinística"
+			) as rejected,
+		):
+			self.bridge.ingest_email_payload(email_payload())
+		self.assertEqual(rejected.exception.code, "blocked_candidate_cv_security")
+		self.assertEqual(self.frappe.inserted_applicants, [])
+
+		with (
+			patch.object(
+				self.bridge,
+				"scan_stored_candidate_cv",
+				side_effect=FakeCandidateCVScanUnavailableError("scanner unavailable"),
+			),
+			self.assertRaisesRegex(FakeCandidateCVScanUnavailableError, "scanner unavailable"),
+		):
+			self.bridge.ingest_email_payload(email_payload())
+		self.assertEqual(self.frappe.inserted_applicants, [])
 
 	def test_non_open_override_fails_closed(self):
 		self.bridge.frappe.conf[self.bridge.JOB_OPENING_CONFIG_KEY] = "HR-OPN-CLOSED"
 		self.frappe.job_opening_status = "Closed"
 		with self.assertRaisesRegex(self.bridge.EmailBridgeError, "no es la vacante autorizada"):
+			self.bridge.ingest_email_payload(email_payload())
+		self.assertEqual(self.frappe.saved_files, [])
+
+	def test_zero_or_multiple_open_vacancies_fail_before_file_storage(self):
+		for open_job_openings in (
+			[],
+			["HR-OPN-2026-0002"],
+			["HR-OPN-2026-0001", "HR-OPN-2026-0002"],
+		):
+			with self.subTest(open_job_openings=open_job_openings):
+				self.frappe.open_job_openings = open_job_openings
+				with self.assertRaisesRegex(
+					self.bridge.EmailBridgeAdmissionError, "exactamente una vacante abierta"
+				) as raised:
+					self.bridge.ingest_email_payload(email_payload())
+				self.assertEqual(raised.exception.code, "blocked_single_open_vacancy_required")
+				self.assertEqual(self.frappe.saved_files, [])
+
+	def test_non_repeatable_read_session_fails_before_authority_lock_or_file_storage(self):
+		self.frappe.transaction_isolation = "READ-COMMITTED"
+		with self.assertRaisesRegex(self.bridge.EmailBridgeError, "aislamiento autorizado"):
+			self.bridge.ingest_email_payload(email_payload())
+		self.assertEqual(self.frappe.locking_reads, 0)
+		self.assertEqual(self.frappe.saved_files, [])
+
+	def test_vacancy_authority_drift_fails_before_file_storage(self):
+		original = self.bridge._job_opening
+		calls = 0
+
+		def mutate_after_first_authorization():
+			nonlocal calls
+			calls += 1
+			result = original()
+			if calls == 1:
+				self.frappe.open_job_openings.append("HR-OPN-2026-0002")
+			return result
+
+		with (
+			patch.object(self.bridge, "_job_opening", side_effect=mutate_after_first_authorization),
+			self.assertRaisesRegex(self.bridge.EmailBridgeAdmissionError, "exactamente una vacante abierta"),
+		):
 			self.bridge.ingest_email_payload(email_payload())
 		self.assertEqual(self.frappe.saved_files, [])
 

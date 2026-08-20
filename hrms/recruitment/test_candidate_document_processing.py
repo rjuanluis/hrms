@@ -22,7 +22,7 @@ from hrms.recruitment.candidate_document_service import (
 	prepare_candidate_document_state,
 	processing_status_for_method,
 )
-from hrms.security.candidate_cv import CandidateCVSecurityError
+from hrms.security.candidate_cv import CandidateCVScanUnavailableError, CandidateCVSecurityError
 
 
 class FakeMeta:
@@ -176,6 +176,14 @@ class TestCandidateDocumentProcessing(unittest.TestCase):
 		):
 			with self.assertRaisesRegex(RuntimeError, "blocked"):
 				candidate_document_service.revalidate_candidate_document(doc)
+		unavailable = CandidateCVScanUnavailableError("validator unavailable")
+		with (
+			patch.object(candidate_document_service, "_load_exact_cv", side_effect=unavailable),
+			patch.object(candidate_document_service.frappe, "throw") as throw,
+		):
+			with self.assertRaises(CandidateCVScanUnavailableError):
+				candidate_document_service.revalidate_candidate_document(doc)
+		throw.assert_not_called()
 
 	def test_enqueue_deduplicates_inside_post_commit_callback(self):
 		hook_source = inspect.getsource(candidate_document_service.enqueue_candidate_document)
@@ -241,6 +249,65 @@ class TestCandidateDocumentProcessing(unittest.TestCase):
 		self.assertIn("!= claim", source)
 		process_source = inspect.getsource(candidate_document_service.process_candidate_document)
 		self.assertIn('custom_cv_processing_status != "Pendiente"', process_source)
+
+	def test_pdf_validator_outage_releases_claim_for_durable_retry(self):
+		class ProcessingApplicant(FakeApplicant):
+			def __init__(self):
+				super().__init__(
+					attachment="/private/files/cv.pdf",
+					sha256="a" * 64,
+					status="Pendiente",
+				)
+				self.name = "HR-APP-RETRY"
+				self.custom_cv_processed_sha256 = ""
+
+			def db_set(self, values, update_modified=False):
+				for key, value in values.items():
+					setattr(self, key, value)
+
+		applicant = ProcessingApplicant()
+		fake_db = SimpleNamespace(commit=MagicMock(), rollback=MagicMock())
+		with (
+			patch.object(candidate_document_service, "_has_processing_fields", return_value=True),
+			patch.object(candidate_document_service, "_locked_applicant", return_value=applicant),
+			patch.object(candidate_document_service.frappe, "db", fake_db),
+			patch.object(candidate_document_service.frappe, "generate_hash", return_value="exact-claim"),
+			patch.object(candidate_document_service.frappe, "get_doc", return_value=applicant),
+			patch.object(candidate_document_service, "now_datetime", return_value="2026-08-19 22:00:00"),
+			patch.object(
+				candidate_document_service,
+				"_load_exact_cv",
+				side_effect=CandidateCVScanUnavailableError("validator unavailable"),
+			),
+		):
+			result = candidate_document_service.process_candidate_document(applicant.name, "a" * 64)
+
+		self.assertEqual(result, {"status": "retryable-unavailable"})
+		self.assertEqual(applicant.custom_cv_processing_status, "Pendiente")
+		self.assertEqual(applicant.custom_cv_processing_claim, "")
+		self.assertIsNone(applicant.custom_cv_processing_started_on)
+		self.assertIsNone(applicant.custom_cv_processing_queued_on)
+		self.assertEqual(applicant.custom_cv_processed_sha256, "")
+		self.assertEqual(fake_db.commit.call_count, 2)
+
+	def test_retry_release_cannot_overwrite_a_newer_processing_claim(self):
+		applicant = SimpleNamespace(
+			custom_cv_sha256="a" * 64,
+			custom_cv_processing_status="Procesando",
+			custom_cv_processing_claim="newer-claim",
+			db_set=MagicMock(),
+		)
+		fake_db = SimpleNamespace(commit=MagicMock(), rollback=MagicMock())
+		with (
+			patch.object(candidate_document_service, "_locked_applicant", return_value=applicant),
+			patch.object(candidate_document_service.frappe, "db", fake_db),
+		):
+			released = candidate_document_service._release_for_retry("HR-APP-RETRY", "a" * 64, "stale-claim")
+
+		self.assertFalse(released)
+		applicant.db_set.assert_not_called()
+		fake_db.commit.assert_not_called()
+		fake_db.rollback.assert_called_once_with()
 
 	def test_recovery_covers_pending_and_invalidates_claim(self):
 		source = inspect.getsource(candidate_document_service.recover_stale_candidate_document_jobs)

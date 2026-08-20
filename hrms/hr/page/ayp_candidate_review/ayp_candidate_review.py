@@ -8,6 +8,7 @@ from frappe import _
 
 from hrms.recruitment.candidate_document_service import MANUAL_REVIEWABLE as CV_MANUAL_REVIEWABLE
 from hrms.recruitment.candidate_document_service import (
+	CandidateCVScanUnavailableError,
 	revalidate_candidate_document,
 	validate_candidate_ready_for_scoring,
 )
@@ -758,6 +759,10 @@ def process_filtered_run_chunk(run: str):
 				else:
 					try:
 						revalidate_candidate_document(doc)
+					except CandidateCVScanUnavailableError:
+						# Roll back the whole chunk so no candidate is omitted or
+						# advanced while the safety validator is unavailable.
+						raise
 					except frappe.ValidationError:
 						document_skip_detail = _(
 							"Omitido: el CV no conserva un archivo privado, limpio y ligado a su huella procesada."

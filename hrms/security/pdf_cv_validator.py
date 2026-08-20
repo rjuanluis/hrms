@@ -13,6 +13,7 @@ SELF_TEST_MEMORY_LIMIT_ENFORCED = 86
 SELF_TEST_LIMIT_SETUP_FAILED = 87
 SELF_TEST_PARSER_PRELOADED = 88
 SELF_TEST_PARSER_IMPORT_FAILED = 89
+PARSER_RUNTIME_FAILED = 90
 
 # These are intentionally loaded only after the child process has installed
 # its hard limits. Importing pypdf before RLIMIT_AS leaves parser import and
@@ -22,6 +23,7 @@ ArrayObject = None
 DictionaryObject = None
 IndirectObject = None
 NameObject = None
+PARSER_CONTENT_ERRORS: tuple[type[Exception], ...] = ()
 
 FORBIDDEN_KEYS = {
 	"/AA",
@@ -76,7 +78,7 @@ def _strict_name_unnumber(raw: bytes) -> bytes:
 
 def _set_memory_limit(limit) -> bool:
 	try:
-		soft, hard = resource.getrlimit(limit)
+		_soft, hard = resource.getrlimit(limit)
 		target = MAX_ADDRESS_SPACE_BYTES
 		if hard != resource.RLIM_INFINITY:
 			target = min(target, hard)
@@ -110,8 +112,9 @@ def _set_limits() -> None:
 
 
 def _load_parser() -> None:
-	global PdfReader, ArrayObject, DictionaryObject, IndirectObject, NameObject
+	global PdfReader, ArrayObject, DictionaryObject, IndirectObject, NameObject, PARSER_CONTENT_ERRORS
 	from pypdf import PdfReader as _PdfReader
+	from pypdf.errors import PdfReadError as _PdfReadError
 	from pypdf.generic import (
 		ArrayObject as _ArrayObject,
 	)
@@ -130,6 +133,7 @@ def _load_parser() -> None:
 	DictionaryObject = _DictionaryObject
 	IndirectObject = _IndirectObject
 	NameObject = _NameObject
+	PARSER_CONTENT_ERRORS = (_PdfReadError,)
 
 
 def _name(value) -> str:
@@ -219,6 +223,15 @@ def validate_pdf_bytes(content: bytes) -> None:
 		raise PDFSecurityError("no-pages")
 
 
+def _parser_content_error_is_deterministic(exc: Exception) -> bool:
+	current = exc.__cause__ or exc.__context__
+	while current is not None:
+		if not isinstance(current, (PDFSecurityError, *PARSER_CONTENT_ERRORS)):
+			return False
+		current = current.__cause__ or current.__context__
+	return True
+
+
 def main() -> int:
 	parser_was_preloaded = any(name == "pypdf" or name.startswith("pypdf.") for name in sys.modules)
 	try:
@@ -231,7 +244,7 @@ def main() -> int:
 	try:
 		_load_parser()
 	except Exception:
-		return SELF_TEST_PARSER_IMPORT_FAILED if self_test else 2
+		return SELF_TEST_PARSER_IMPORT_FAILED
 	# The parent validator passes a minimal environment containing only PATH,
 	# so uploaded bytes cannot activate this test-only confinement probe.
 	# Importing pypdf before the verified limit, failing to import it, or failing
@@ -248,8 +261,19 @@ def main() -> int:
 	content = sys.stdin.buffer.read()
 	try:
 		validate_pdf_bytes(content)
-	except Exception:
+	except PDFSecurityError:
 		return 2
+	except PARSER_CONTENT_ERRORS as exc:
+		# pypdf's documented read-error family represents deterministic malformed
+		# content unless it wrapped a resource or unknown runtime exception.
+		# Strict-mode pypdf may wrap arbitrary exceptions as PdfReadError while
+		# preserving the original in the exception chain.
+		return 2 if _parser_content_error_is_deterministic(exc) else PARSER_RUNTIME_FAILED
+	except Exception:
+		# Unknown parser/runtime failures, including MemoryError, are
+		# infrastructure faults. Only our explicit PDFSecurityError contract is
+		# a deterministic content rejection that the parent may persist.
+		return PARSER_RUNTIME_FAILED
 	return 0
 
 
