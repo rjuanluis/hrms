@@ -420,6 +420,21 @@ class TestCandidateCVSecurity(unittest.TestCase):
 		):
 			self.assertEqual(pdf_cv_validator.main(), 2)
 
+	def test_pdf_child_known_read_errors_are_terminal_malformed_content(self):
+		from hrms.security import pdf_cv_validator
+
+		broken_xref = (
+			b"%PDF-1.4\nxref\n0 1\n0000000000 65535 f \ntrailer\n<< /Size 1 >>\nstartxref\n0\n%%EOF\n"
+		)
+		for content in (b"%PDF-1.4\n", broken_xref):
+			with (
+				self.subTest(content=content[:16]),
+				patch.dict(os.environ, {}, clear=True),
+				patch.object(pdf_cv_validator, "_set_limits"),
+				patch.object(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(content))),
+			):
+				self.assertEqual(pdf_cv_validator.main(), 2)
+
 	def test_pdf_parser_child_enforces_memory_ceiling(self):
 		from hrms.security.pdf_cv_validator import SELF_TEST_MEMORY_LIMIT_ENFORCED
 

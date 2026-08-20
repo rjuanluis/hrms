@@ -23,6 +23,7 @@ ArrayObject = None
 DictionaryObject = None
 IndirectObject = None
 NameObject = None
+PARSER_CONTENT_ERRORS: tuple[type[Exception], ...] = ()
 
 FORBIDDEN_KEYS = {
 	"/AA",
@@ -111,8 +112,9 @@ def _set_limits() -> None:
 
 
 def _load_parser() -> None:
-	global PdfReader, ArrayObject, DictionaryObject, IndirectObject, NameObject
+	global PdfReader, ArrayObject, DictionaryObject, IndirectObject, NameObject, PARSER_CONTENT_ERRORS
 	from pypdf import PdfReader as _PdfReader
+	from pypdf.errors import PdfReadError as _PdfReadError
 	from pypdf.generic import (
 		ArrayObject as _ArrayObject,
 	)
@@ -131,6 +133,7 @@ def _load_parser() -> None:
 	DictionaryObject = _DictionaryObject
 	IndirectObject = _IndirectObject
 	NameObject = _NameObject
+	PARSER_CONTENT_ERRORS = (_PdfReadError,)
 
 
 def _name(value) -> str:
@@ -250,6 +253,11 @@ def main() -> int:
 	try:
 		validate_pdf_bytes(content)
 	except PDFSecurityError:
+		return 2
+	except PARSER_CONTENT_ERRORS:
+		# pypdf's documented read-error family represents deterministic malformed
+		# content (missing EOF, broken xref, invalid streams). Keep only this
+		# explicit parser contract terminal; resource and unknown failures retry.
 		return 2
 	except Exception:
 		# Unknown parser/runtime failures, including MemoryError, are
